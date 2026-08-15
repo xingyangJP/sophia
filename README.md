@@ -1,6 +1,12 @@
-# Sophia
+<p align="center">
+  <img src="assets/logo.png" alt="Sophia" width="132">
+</p>
 
-**独自モデルを内蔵した、ローカル完結のデスクトップAI。会話は端末の外に出ない。**
+<h1 align="center">Sophia</h1>
+
+<p align="center">
+  <strong>独自モデルを内蔵した、ローカル完結のデスクトップAI。会話は端末の外に出ない。</strong>
+</p>
 
 > これはプロジェクトの**到達目標**であり、現在地ではない。
 > いま何ができていて何が未着手かは「[いまの状態](#いまの状態)」を参照。

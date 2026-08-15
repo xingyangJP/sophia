@@ -1,4 +1,4 @@
-.PHONY: help up down restart status logs models bench bench-save pull clean-models
+.PHONY: help up down restart status logs models bench bench-save pull clean-models icons
 
 SHELL := /bin/bash
 NOTE ?=
@@ -15,6 +15,7 @@ help:
 	@echo ""
 	@echo "  make pull        ベースモデルを取得"
 	@echo "  make models      modelfiles/ から専用モデルを作り直す"
+	@echo "  make icons       assets/logo.png から macOS アイコン一式を生成"
 	@echo ""
 	@echo "  make bench       速度を計測して表示"
 	@echo "  make bench-save NOTE=\"変更内容\"   計測して docs/BENCH_RESULTS.md に追記"
@@ -53,6 +54,11 @@ bench:
 
 bench-save:
 	@python3 scripts/bench.py --models sophia-chat sophia-coder --ctx $(CTX) --save --note "$(NOTE)"
+
+# assets/logo.png を差し替えたら実行する。
+# macOS はアイコンを自動で角丸にしないため、形状と余白を焼き込む必要がある。
+icons:
+	@uv run --quiet --with pillow python scripts/make-icons.py
 
 clean-models:
 	@echo "削除候補:"; ollama list
