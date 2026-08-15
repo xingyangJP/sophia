@@ -1,0 +1,19 @@
+logs/
+*.log
+
+# 実測値と環境依存の設定。.env は環境ごとに違うので共有しない
+.env
+
+# Open WebUI が起動時に生成する秘密鍵とデータ。絶対にコミットしない
+.webui_secret_key
+data/
+
+# モデル本体は ~/.ollama/models に置かれるためリポジトリには入らないが、
+# 将来アプリ側で GGUF を扱う際の取り違え防止のため明示しておく
+*.gguf
+models/
+
+.DS_Store
+node_modules/
+dist/
+out/
