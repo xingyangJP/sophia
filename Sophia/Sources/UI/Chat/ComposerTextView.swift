@@ -29,6 +29,13 @@ struct ComposerTextView: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeNSView(context: Context) -> NSScrollView {
+        makeScrollView(coordinator: context.coordinator)
+    }
+
+    /// `Context` を受け取らない本体。**テストから呼べるようにするために分けてある。**
+    /// `NSViewRepresentableContext` は自前で組み立てられないため、
+    /// `makeNSView` のままだと入力欄の実物を単体テストで触れない。
+    func makeScrollView(coordinator: Coordinator) -> NSScrollView {
         let scrollView = NSScrollView()
         scrollView.drawsBackground = false
         scrollView.hasVerticalScroller = true
@@ -38,7 +45,7 @@ struct ComposerTextView: NSViewRepresentable {
         // TextKit 1 を明示する。macOS 14+ の既定（TextKit 2）だと
         // `layoutManager` が nil になり、高さの実測ができない。
         let textView = NSTextView(usingTextLayoutManager: false)
-        textView.delegate = context.coordinator
+        textView.delegate = coordinator
         textView.drawsBackground = false
         textView.isRichText = false
         textView.allowsUndo = true
@@ -57,7 +64,7 @@ struct ComposerTextView: NSViewRepresentable {
         textView.string = text
 
         scrollView.documentView = textView
-        context.coordinator.textView = textView
+        coordinator.textView = textView
 
         DispatchQueue.main.async {
             textView.window?.makeFirstResponder(textView)
@@ -67,14 +74,25 @@ struct ComposerTextView: NSViewRepresentable {
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         context.coordinator.parent = self
+        apply(to: scrollView, coordinator: context.coordinator)
+    }
+
+    /// SwiftUI 側の再描画を AppKit へ反映する本体。`makeScrollView` と同じ理由で分けてある。
+    func apply(to scrollView: NSScrollView, coordinator: Coordinator) {
         guard let textView = scrollView.documentView as? NSTextView else { return }
         // 送信後に空へ戻す場合など、外から変わったときだけ差し替える。
-        if textView.string != text {
+        //
+        // **変換中（マークドテキストがある）は絶対に代入しない。**
+        // `textView.string = ...` は入力セッションを畳んでしまうため、
+        // 未確定の「にほん」が消えて日本語が1文字も打てなくなる。
+        // ここへは変換中でも来る: `textViewDidChangeSelection` が
+        // `isVisuallyEmpty` を変え、その再描画が `updateNSView` を呼ぶため。
+        if !textView.hasMarkedText(), textView.string != text {
             textView.string = text
         }
-        context.coordinator.reportHeight(of: textView)
+        coordinator.reportHeight(of: textView)
         // 送信後のクリア等、delegate を経由しない変更もここで拾う。
-        context.coordinator.syncVisualEmptiness(of: textView)
+        coordinator.syncVisualEmptiness(of: textView)
     }
 
     @MainActor
