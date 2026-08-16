@@ -1,9 +1,10 @@
 .PHONY: help up down restart status logs models bench bench-save pull clean-models icons \
-        app app-release app-run app-test app-clean app-setup
+        app app-release app-run app-test app-clean app-setup app-stats stats-tail
 
 SHELL := /bin/bash
 NOTE ?=
 CTX  ?= 8192
+STATS_LOG ?= logs/mlx-stats.log
 
 # --- macOS アプリ（フェーズA1） -------------------------------------------
 # xcodebuild の引数を1か所に集約する。GUI を持たない環境ではここが唯一の入口。
@@ -28,6 +29,8 @@ help:
 	@echo "  make app-clean   ビルド成果物を削除（再ビルドに5分半かかる。慎重に）"
 	@echo "  make app-setup   初回だけ必要な Metal ツールチェーンを導入"
 	@echo "  make app-test    永続化層(DB)の単体テスト。GPUもモデルも使わない"
+	@echo "  make app-stats   実測ログ付きで起動（[STATS] を logs/mlx-stats.log へ）"
+	@echo "  make stats-tail  その実測ログを追尾"
 	@echo "  make test-inference  思考タグ分離（FR-17）の単体テスト。推論は走らない"
 	@echo ""
 	@echo "  make up          Ollama と Open WebUI を起動 (http://localhost:8081)"
@@ -99,6 +102,31 @@ app-release:
 
 app-run: app
 	@open "$(APP_DEBUG)"
+
+# 実測を取りながら起動する（FR-14）。
+#
+# **`make app-run` では [STATS] 行は1バイトも残らない。**
+# `open` は LaunchServices 経由なので fd 0/1/2 がすべて /dev/null に繋がる
+# （稼働中の GUI プロセスを lsof で見て確認した）。
+# `ChatViewModel.logMeasurement` は生の write(2) なので `log stream` にも出ない。
+# したがって計測時は --stderr で fd 2 を付け替える必要がある。
+#
+# --stderr は追記（O_APPEND）。--env は launchd 経由でもプロセスに届く。
+# -n を付けるのは、既に起動していると open が既存プロセスを前面に出すだけで
+# **新しい条件で起動し直してくれない**ため（古いプロセスを測る事故を防ぐ）。
+#
+# ビルドには依存させない。DerivedData を共有しているので、
+# 計測のたびにビルドが走ると条件（熱・メモリ）が揃わなくなる。
+app-stats:
+	@mkdir -p logs
+	@printf '=== %s note=%s ===\n' "$$(date '+%F %T')" "$(NOTE)" >> $(STATS_LOG)
+	@sysctl -n vm.swapusage >> $(STATS_LOG)
+	@open -n --env SOPHIA_LOG_STATS=1 $(if $(SYSTEM_PROMPT),--env SOPHIA_SYSTEM_PROMPT=$(SYSTEM_PROMPT),) \
+		--stderr "$(CURDIR)/$(STATS_LOG)" "$(APP_DEBUG)"
+	@echo "計測ログ: $(STATS_LOG)（別窓で make stats-tail）"
+
+stats-tail:
+	@tail -f $(STATS_LOG) | grep --line-buffered '^\[STATS\]'
 
 # Xcode のテストターゲット（SophiaTests）。永続化層 = DB のテストがここに入る。
 # **GPU もモデルも使わない**ので、他の作業と並行して回して安全（全体で1秒未満）。

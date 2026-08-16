@@ -86,6 +86,36 @@ enum SophiaDefaults {
     /// 必ず MLX形式（safetensors）のリポジトリIDを指すこと。
     static let modelID = "mlx-community/Qwen3-8B-4bit"
 
+    /// モデルの自己認識（FR-21）。**毎ターン払うトークンなので、入れる文はここまで。**
+    ///
+    /// 出所は `modelfiles/sophia-chat.Modelfile` の SYSTEM の**冒頭3行だけ**である。
+    /// 同 Modelfile にはこの後に「書き方の原則」「やりとりの原則」が続くが、
+    /// **それらは持ち込んでいない。** 自己認識ではなく出力スタイルの調整であり、
+    /// 概算で+130トークン／毎ターン かかる一方、モデルは指示が無くても大きくは外さない。
+    /// 役割の切替は A2 の `ProfileRecord.systemPrompt`（FR-05）が本来の置き場。
+    ///
+    /// **Ollama 側とアプリ側は別系統で、`make models` では同期されない。**
+    /// アプリが読むのは上の `modelID`（MLX形式）であって Modelfile ではない。
+    /// 文言を変えるときは両方を手で合わせること。ここが唯一の食い違いリスク点。
+    static let systemPrompt = """
+        あなたの名前は Sophia（ソフィア）。この端末の中だけで動くローカルAIアシスタントです。
+        名乗るとき・自己紹介するときは常に「Sophia」と名乗ってください。
+        基盤技術を直接尋ねられたときだけ、ローカルで動くオープンなモデルの上に構築されていると答えてよい（偽らないこと）。
+        """
+
+    /// 自己認識を送るか。**切れることが要件**（既定は送る）。
+    ///
+    /// `SOPHIA_SYSTEM_PROMPT=0` で切れる。UI のトグルにしていないのは A1 の scope 判断だが、
+    /// 切る手段そのものは無くせない。理由は3つあり、どれも測定に効く。
+    ///   1. NFR-03（1秒以内に何かが出る）の達成条件は「入力が約170トークン以内」
+    ///      （DESIGN.md 第2.4章）。常時ONだと**素の性能を測り続けられなくなる**
+    ///   2. VISION の適応度関数（品質÷消費エネルギー）は、同じ問いを
+    ///      あり/なしで走らせないと評価できない。切れないと比較実験が成立しない
+    ///   3. BENCH_RESULTS で Ollama と並べるとき、片方だけ system を持つと比較が壊れる
+    static var systemPromptEnabled: Bool {
+        ProcessInfo.processInfo.environment["SOPHIA_SYSTEM_PROMPT"] != "0"
+    }
+
     /// `modelfiles/sophia-chat.Modelfile` と揃えてある。
     static let temperature: Double = 0.7
     static let topP: Double = 0.9

@@ -35,6 +35,12 @@ final class ChatViewModel {
     /// 思考モード（FR-18）。会話ごとの切替。
     var thinkingEnabled: Bool = true
 
+    /// 自己認識（FR-21）を送るか。既定は `SOPHIA_SYSTEM_PROMPT` から取る。
+    ///
+    /// `@Observable` なので、切り替えるとその場で `estimatedInputTokens` が計算し直され、
+    /// **払っている額が画面のトークン計に増減として出る。** これが「測ってから足す」の実装形。
+    var systemPromptEnabled: Bool = SophiaDefaults.systemPromptEnabled
+
     private(set) var isGenerating = false
 
     /// 描画へ反映するたびに増える。**自動追従スクロールの合図としてだけ使う。**
@@ -483,10 +489,26 @@ final class ChatViewModel {
     /// **思考テキストは入れない。** 過去の思考を送り返すとプリフィルが無駄に膨らむ
     /// （VISION 第1因子）。`SophiaMessage` に thinking が無いのはそのため。
     ///
-    /// システムプロンプトも付けない。**入れた瞬間、毎ターンその分のトークンを払い続ける。**
-    /// 必要になったら「何トークン増えるか」を測ってから足すこと。
+    /// ## システムプロンプト（自己認識 / FR-21）を先頭に置く
+    ///
+    /// かつてここには「付けない。入れた瞬間、毎ターンその分のトークンを払い続ける。
+    /// 必要になったら何トークン増えるか測ってから足すこと」と書いてあった。
+    /// **測った上で、自己認識3行ぶんだけ払うと決めた。**
+    /// Modelfile の SYSTEM 全文（概算+219トークン）は持ち込んでいない
+    /// ─ 内訳と判断は `SophiaDefaults.systemPrompt` のコメント、実測は BENCH_RESULTS.md。
+    ///
+    /// **足すならここ以外にない。** `estimatedInputTokens` と `send()` が
+    /// どちらもこの関数を通っているので、ここに入れれば
+    /// 「画面に出るトークン数」と「実際に送る量」が構造的に一致する。
+    /// `send()` 側だけに足すと、入力欄の予算警告が実送信より少ない嘘の数字になる
+    /// ─ VISION の測定原則（無駄が痛みとして見えないと誰も減らさない）を最初に破るのがこの形。
+    ///
+    /// 次の担当者へ: ③書き方の原則・④やりとりの原則を**ここへ足さないこと。**
+    /// 足すと 331 トークンへ戻る。役割の切替は A2 の `ProfileRecord.systemPrompt`（FR-05）へ。
     private func engineMessages() -> [SophiaMessage] {
-        turns.compactMap { turn in
+        let system: [SophiaMessage] =
+            systemPromptEnabled ? [.system(SophiaDefaults.systemPrompt)] : []
+        return system + turns.compactMap { turn in
             guard !turn.text.isEmpty else { return nil }
             switch turn.author {
             case .user: return .user(turn.text)
