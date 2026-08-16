@@ -23,3 +23,36 @@ models/
 node_modules/
 dist/
 out/
+
+# ---------------------------------------------------------------------------
+# Xcode / Swift（2026-08-16 に Electron から転換）
+# ---------------------------------------------------------------------------
+
+# ビルド生成物。Sophia/DerivedData は 1.5GB を超える（MLX の C++ と Metal シェーダ）
+DerivedData/
+build/
+.build/
+*.xcarchive
+
+# 利用者ごとの UI 状態。共有すると Xcode が壊れる
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+
+# 共有スキームは **コミットする**。これが無いと xcodebuild -scheme が動かず、
+# GUI を持たないエージェントがビルドできなくなる
+!Sophia/Sophia.xcodeproj/xcshareddata/
+!Sophia/Sophia.xcodeproj/xcshareddata/**
+
+# SPM の解決結果は **コミットする**。MLX Swift は API の変化が速く、
+# revision 固定と Package.resolved の両方が無いと再現性が無い（MLX_SWIFT.md 第11.2節）
+!**/Package.resolved
+
+# SPM の作業ディレクトリ（キャッシュ。数百MB）
+Sophia/Sophia.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/configuration/
+*.playground/playground.xcworkspace
+
+# 上の `models/` は「どの階層の models ディレクトリ」にも効くため、
+# Swift 側で Models/ ディレクトリを作ると巻き込まれる。ソースコードは除外を打ち消す
+!Sophia/Sources/**/Models/

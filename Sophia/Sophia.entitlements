@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- NFR-01（会話を端末の外に出さない）を OS のレベルで裏づけるため、
+	     最初からサンドボックスを有効にする。後から入れると必ず壊れる。 -->
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+
+	<!-- ★ この通信許可は「モデルの取得」だけのために存在する。
+	     会話内容の送信には一切使わない（NFR-01）。
+	     MLX_SWIFT.md 第2.3節Cの「ローカルディレクトリのみを読む」構成に移行できれば、
+	     この1行を削除して NFR-01 を entitlement のレベルで保証できる。A2以降の検討事項。 -->
+	<key>com.apple.security.network.client</key>
+	<true/>
+
+	<!-- 利用者が自分でモデルディレクトリを選ぶ経路（A3のモデル管理）で必要になる。 -->
+	<key>com.apple.security.files.user-selected.read-only</key>
+	<true/>
+</dict>
+</plist>

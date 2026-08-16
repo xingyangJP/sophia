@@ -1,0 +1,521 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		5000000000000000000000E1 /* MLX in Frameworks */ = {isa = PBXBuildFile; productRef = 5000000000000000000000D1 /* MLX */; };
+		5000000000000000000000E2 /* MLXLLM in Frameworks */ = {isa = PBXBuildFile; productRef = 5000000000000000000000D2 /* MLXLLM */; };
+		5000000000000000000000E3 /* MLXLMCommon in Frameworks */ = {isa = PBXBuildFile; productRef = 5000000000000000000000D3 /* MLXLMCommon */; };
+		5000000000000000000000E4 /* MLXHuggingFace in Frameworks */ = {isa = PBXBuildFile; productRef = 5000000000000000000000D4 /* MLXHuggingFace */; };
+		5000000000000000000000E5 /* HuggingFace in Frameworks */ = {isa = PBXBuildFile; productRef = 5000000000000000000000D5 /* HuggingFace */; };
+		5000000000000000000000E6 /* Tokenizers in Frameworks */ = {isa = PBXBuildFile; productRef = 5000000000000000000000D6 /* Tokenizers */; };
+		5000000000000000000000E7 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = 5000000000000000000000D7 /* GRDB */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		5000000000000000000000A4 /* Sophia.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Sophia.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		5000000000000000000000B0 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		5000000000000000000000B1 /* Sophia.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Sophia.entitlements; sourceTree = "<group>"; };
+		5000000000000000000000F1 /* SophiaTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SophiaTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		5000000000000000000000AF /* Sources */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			explicitFileTypes = {
+			};
+			explicitFolders = (
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		5000000000000000000000F0 /* Tests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			explicitFileTypes = {
+			};
+			explicitFolders = (
+			);
+			path = Tests;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		5000000000000000000000A7 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5000000000000000000000E1 /* MLX in Frameworks */,
+				5000000000000000000000E2 /* MLXLLM in Frameworks */,
+				5000000000000000000000E3 /* MLXLMCommon in Frameworks */,
+				5000000000000000000000E4 /* MLXHuggingFace in Frameworks */,
+				5000000000000000000000E5 /* HuggingFace in Frameworks */,
+				5000000000000000000000E6 /* Tokenizers in Frameworks */,
+				5000000000000000000000E7 /* GRDB in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5000000000000000000000F4 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		5000000000000000000000A2 = {
+			isa = PBXGroup;
+			children = (
+				5000000000000000000000AF /* Sources */,
+				5000000000000000000000F0 /* Tests */,
+				5000000000000000000000B0 /* Info.plist */,
+				5000000000000000000000B1 /* Sophia.entitlements */,
+				5000000000000000000000A3 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		5000000000000000000000A3 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				5000000000000000000000A4 /* Sophia.app */,
+				5000000000000000000000F1 /* SophiaTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		5000000000000000000000A5 /* Sophia */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 5000000000000000000000AA /* Build configuration list for PBXNativeTarget "Sophia" */;
+			buildPhases = (
+				5000000000000000000000A6 /* Sources */,
+				5000000000000000000000A7 /* Frameworks */,
+				5000000000000000000000A8 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				5000000000000000000000AF /* Sources */,
+			);
+			name = Sophia;
+			packageProductDependencies = (
+				5000000000000000000000D1 /* MLX */,
+				5000000000000000000000D2 /* MLXLLM */,
+				5000000000000000000000D3 /* MLXLMCommon */,
+				5000000000000000000000D4 /* MLXHuggingFace */,
+				5000000000000000000000D5 /* HuggingFace */,
+				5000000000000000000000D6 /* Tokenizers */,
+				5000000000000000000000D7 /* GRDB */,
+			);
+			productName = Sophia;
+			productReference = 5000000000000000000000A4 /* Sophia.app */;
+			productType = "com.apple.product-type.application";
+		};
+		5000000000000000000000F2 /* SophiaTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 5000000000000000000000F8 /* Build configuration list for PBXNativeTarget "SophiaTests" */;
+			buildPhases = (
+				5000000000000000000000F3 /* Sources */,
+				5000000000000000000000F4 /* Frameworks */,
+				5000000000000000000000F5 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				5000000000000000000000F6 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				5000000000000000000000F0 /* Tests */,
+			);
+			name = SophiaTests;
+			packageProductDependencies = (
+			);
+			productName = SophiaTests;
+			productReference = 5000000000000000000000F1 /* SophiaTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		5000000000000000000000A1 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2660;
+				LastUpgradeCheck = 2660;
+				TargetAttributes = {
+					5000000000000000000000A5 = {
+						CreatedOnToolsVersion = 26.6;
+					};
+					5000000000000000000000F2 = {
+						CreatedOnToolsVersion = 26.6;
+						TestTargetID = 5000000000000000000000A5;
+					};
+				};
+			};
+			buildConfigurationList = 5000000000000000000000A9 /* Build configuration list for PBXProject "Sophia" */;
+			developmentRegion = ja;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				ja,
+				en,
+				Base,
+			);
+			mainGroup = 5000000000000000000000A2;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				5000000000000000000000C1 /* XCRemoteSwiftPackageReference "mlx-swift" */,
+				5000000000000000000000C2 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */,
+				5000000000000000000000C3 /* XCRemoteSwiftPackageReference "swift-huggingface" */,
+				5000000000000000000000C4 /* XCRemoteSwiftPackageReference "swift-transformers" */,
+				5000000000000000000000C5 /* XCRemoteSwiftPackageReference "GRDB.swift" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 5000000000000000000000A3 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				5000000000000000000000A5 /* Sophia */,
+				5000000000000000000000F2 /* SophiaTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		5000000000000000000000A8 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5000000000000000000000F5 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		5000000000000000000000A6 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5000000000000000000000F3 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXContainerItemProxy section */
+		5000000000000000000000F7 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 5000000000000000000000A1 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 5000000000000000000000A5;
+			remoteInfo = Sophia;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXTargetDependency section */
+		5000000000000000000000F6 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 5000000000000000000000A5 /* Sophia */;
+			targetProxy = 5000000000000000000000F7 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		5000000000000000000000AB /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ARCHS = arm64;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		5000000000000000000000AC /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ARCHS = arm64;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_NO_COMMON_BLOCKS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = nonisolated;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		5000000000000000000000AD /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = Sophia.entitlements;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "";
+				DEVELOPMENT_TEAM = "";
+				ENABLE_HARDENED_RUNTIME = NO;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = jp.co.xerographix.sophia;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+			};
+			name = Debug;
+		};
+		5000000000000000000000AE /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = Sophia.entitlements;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "";
+				DEVELOPMENT_TEAM = "";
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = jp.co.xerographix.sophia;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+			};
+			name = Release;
+		};
+		5000000000000000000000F9 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = jp.co.xerographix.sophia.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Sophia.app/Contents/MacOS/Sophia";
+			};
+			name = Debug;
+		};
+		5000000000000000000000FA /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = jp.co.xerographix.sophia.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Sophia.app/Contents/MacOS/Sophia";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		5000000000000000000000A9 /* Build configuration list for PBXProject "Sophia" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5000000000000000000000AB /* Debug */,
+				5000000000000000000000AC /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		5000000000000000000000AA /* Build configuration list for PBXNativeTarget "Sophia" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5000000000000000000000AD /* Debug */,
+				5000000000000000000000AE /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		5000000000000000000000F8 /* Build configuration list for PBXNativeTarget "SophiaTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5000000000000000000000F9 /* Debug */,
+				5000000000000000000000FA /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		5000000000000000000000C1 /* XCRemoteSwiftPackageReference "mlx-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/ml-explore/mlx-swift";
+			requirement = {
+				kind = upToNextMinorVersion;
+				minimumVersion = 0.31.6;
+			};
+		};
+		5000000000000000000000C2 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/ml-explore/mlx-swift-lm";
+			requirement = {
+				kind = revision;
+				revision = d7dc03d8447ee6b42b54a1c5295b4e56ee9274f3;
+			};
+		};
+		5000000000000000000000C3 /* XCRemoteSwiftPackageReference "swift-huggingface" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/huggingface/swift-huggingface";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.9.0;
+			};
+		};
+		5000000000000000000000C4 /* XCRemoteSwiftPackageReference "swift-transformers" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/huggingface/swift-transformers";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.3.0;
+			};
+		};
+		5000000000000000000000C5 /* XCRemoteSwiftPackageReference "GRDB.swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/groue/GRDB.swift";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 7.11.1;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		5000000000000000000000D1 /* MLX */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 5000000000000000000000C1 /* XCRemoteSwiftPackageReference "mlx-swift" */;
+			productName = MLX;
+		};
+		5000000000000000000000D2 /* MLXLLM */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 5000000000000000000000C2 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */;
+			productName = MLXLLM;
+		};
+		5000000000000000000000D3 /* MLXLMCommon */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 5000000000000000000000C2 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */;
+			productName = MLXLMCommon;
+		};
+		5000000000000000000000D4 /* MLXHuggingFace */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 5000000000000000000000C2 /* XCRemoteSwiftPackageReference "mlx-swift-lm" */;
+			productName = MLXHuggingFace;
+		};
+		5000000000000000000000D5 /* HuggingFace */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 5000000000000000000000C3 /* XCRemoteSwiftPackageReference "swift-huggingface" */;
+			productName = HuggingFace;
+		};
+		5000000000000000000000D6 /* Tokenizers */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 5000000000000000000000C4 /* XCRemoteSwiftPackageReference "swift-transformers" */;
+			productName = Tokenizers;
+		};
+		5000000000000000000000D7 /* GRDB */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 5000000000000000000000C5 /* XCRemoteSwiftPackageReference "GRDB.swift" */;
+			productName = GRDB;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 5000000000000000000000A1 /* Project object */;
+}
