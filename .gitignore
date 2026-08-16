@@ -11,6 +11,9 @@ data/
 # アイコン生成の中間ファイル。icon.png と icon.icns は成果物なのでコミットする
 assets/icon.iconset/
 
+__pycache__/
+*.pyc
+
 # モデル本体は ~/.ollama/models に置かれるためリポジトリには入らないが、
 # 将来アプリ側で GGUF を扱う際の取り違え防止のため明示しておく
 *.gguf
