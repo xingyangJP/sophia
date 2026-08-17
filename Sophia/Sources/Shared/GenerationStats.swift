@@ -223,9 +223,21 @@ struct GenerationClock: Sendable {
         let decode: Double = decodeSeconds
             ?? max((totalMs - (ttftMs ?? totalMs)) / 1000, 0)
 
-        // 思考トークンを実測できないエンジン向けの概算（1文字 ≒ 0.5トークン）。
+        // 思考トークンを実測できないエンジン向けの概算。
+        //
+        // **一律 0.5 を掛けていたのを 2026-08-17 に直した。**
+        // 思考は英語で出ることが多く、0.5 では約2倍に膨らむ ─
+        // 実際に `think_tok=296` に対し `out=166` という
+        // **出力全体より思考が多い**という原理的にありえない値が出ていた。
+        //
+        // **ただしここには文字数しか無いので、文字種の内訳が分からない。**
+        // `SophiaMessage.estimateTokens(in:)` は本文を受け取れるが、
+        // `GenerationClock` は文字数しか数えていない。
+        // **英語寄りに倒して 0.3 とする。過大に出すより過少のほうが害が小さい**
+        // （思考量を過大に見せると、思考OFFの判断を誤らせる）。
+        // **本筋は実トークナイザで数えること**（DESIGN.md 第15章）。
         let estimatedThinking = thinkingCharacterCount > 0
-            ? Int(ceil(Double(thinkingCharacterCount) * 0.5))
+            ? Int(ceil(Double(thinkingCharacterCount) * 0.3))
             : nil
 
         return GenerationStats(

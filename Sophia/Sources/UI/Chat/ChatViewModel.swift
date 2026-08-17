@@ -393,6 +393,11 @@ final class ChatViewModel {
             turn.statsAreEstimated = false
         } else {
             // `.done` は届かないことがある。UI 側で確定させる（契約の約束事3・4）。
+            // **思考（英語寄り）と本文（日本語寄り）が混ざるので、単一の係数では合わない。**
+            // ここは文字数しか無く内訳を復元できないため、中間の 0.5 を残す。
+            // `.done` が届かなかった回だけの退避経路であり、届いた回は実測値が入る
+            // （`statsAreEstimated` で区別できる）。
+            // **本筋は実トークナイザ**（DESIGN.md 第15章）。
             let characters = stream.clock.thinkingCharacterCount + stream.clock.contentCharacterCount
             turn.stats = stream.clock.finish(
                 inputTokens: stream.inputTokens,
