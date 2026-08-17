@@ -2,7 +2,7 @@ import Foundation
 import XCTest
 @testable import Sophia
 
-/// 自己認識（FR-21）が**本当にエンジンまで届いているか**。
+/// 自己認識（FR-23）が**本当にエンジンまで届いているか**。
 ///
 /// システムプロンプトは「入れたつもりで入っていない」が起きやすい。
 /// `engineMessages()` は送信経路と表示経路の両方から呼ばれるので、

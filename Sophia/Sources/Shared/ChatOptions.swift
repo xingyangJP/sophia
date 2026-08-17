@@ -86,7 +86,7 @@ enum SophiaDefaults {
     /// 必ず MLX形式（safetensors）のリポジトリIDを指すこと。
     static let modelID = "mlx-community/Qwen3-8B-4bit"
 
-    /// モデルの自己認識（FR-21）。**毎ターン払うトークンなので、入れる文はここまで。**
+    /// モデルの自己認識（FR-23）。**毎ターン払うトークンなので、入れる文はここまで。**
     ///
     /// 出所は `modelfiles/sophia-chat.Modelfile` の SYSTEM の**冒頭3行だけ**である。
     /// 同 Modelfile にはこの後に「書き方の原則」「やりとりの原則」が続くが、
