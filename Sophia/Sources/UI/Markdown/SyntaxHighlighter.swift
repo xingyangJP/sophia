@@ -117,7 +117,16 @@ enum SyntaxHighlighter {
 
             // --- 識別子 -------------------------------------------------------------
             if isIdentifierStart(character) {
-                var end = i
+                // **先頭の1文字は無条件に取り込む。** `end = i` から始めてはいけない。
+                //
+                // `#` と `@` は識別子の**先頭**にはなれるが `isIdentifierPart` ではない。
+                // `end = i` から始めると、この2文字では while が1度も回らず
+                // `word` が空のまま `i = end`（＝ `i`）へ戻り、**無限ループする。**
+                // 走査器は MainActor 上で動くので、これは色が崩れるのではなく
+                // **アプリが固まる**（`@State` を含む Swift のコードブロックで必ず再現した）。
+                //
+                // ここから始めれば、どの文字で入っても必ず1文字は進む。
+                var end = i + 1
                 while end < characters.count, isIdentifierPart(characters[end]) { end += 1 }
                 let word = String(characters[i..<end])
                 let kind: CodeTokenKind

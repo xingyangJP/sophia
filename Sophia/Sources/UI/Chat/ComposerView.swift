@@ -72,6 +72,7 @@ struct ComposerView: View {
                     .font(SophiaFont.subhead)
                     .foregroundStyle(SophiaColor.ink3)
                     .lineLimit(1)
+                    .help(model.provenance ?? model.id)
             }
 
             primaryAction

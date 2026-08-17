@@ -25,7 +25,18 @@ struct ModelInfo: Sendable, Equatable, Codable, Identifiable {
     /// MLX では HuggingFace のリポジトリID（例 `mlx-community/Qwen3-8B-4bit`）。
     var id: String
     /// UI に出す表示名。既定は id の末尾。
+    ///
+    /// **`id` と違ってよい。** 独自の呼び名（例 `Nous 8B`）を出す一方で、
+    /// `id` は実際に読んでいるリポジトリを指し続ける。表示名で `id` を置き換えないこと。
     var displayName: String
+
+    /// 重みの出所。**Apache 2.0 の帰属表示（§4）を画面に出すための1行。**
+    ///
+    /// 表示名を独自のものにすると、画面からベースモデルが分からなくなる。
+    /// ライセンス上の義務であると同時に、「重みを実際に作ったのか、
+    /// 名前を変えただけなのか」を自分で見失わないための歯止めでもある。
+    /// エンジン非依存にしてあるのは、UI が MLX を知らないまま出せるようにするため（NFR-09）。
+    var provenance: String?
     /// モデルのサイズ（バイト）。分からなければ nil。
     var sizeBytes: Int64?
     /// パラメータ数の表記（例 `8.2B`）。
@@ -42,6 +53,7 @@ struct ModelInfo: Sendable, Equatable, Codable, Identifiable {
     init(
         id: String,
         displayName: String? = nil,
+        provenance: String? = nil,
         sizeBytes: Int64? = nil,
         parameterSize: String? = nil,
         quantization: String? = nil,
@@ -51,6 +63,7 @@ struct ModelInfo: Sendable, Equatable, Codable, Identifiable {
     ) {
         self.id = id
         self.displayName = displayName ?? (id.split(separator: "/").last.map(String.init) ?? id)
+        self.provenance = provenance
         self.sizeBytes = sizeBytes
         self.parameterSize = parameterSize
         self.quantization = quantization

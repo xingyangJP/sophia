@@ -113,6 +113,10 @@ struct SidebarView: View {
                     .font(SophiaFont.subhead)
                     .foregroundStyle(SophiaColor.ink2)
                     .lineLimit(1)
+                    // 独自名を出す以上、ベースがどれかを画面から辿れるようにしておく。
+                    // Apache 2.0 の帰属表示であり、「重みを作ったのか名前を変えただけか」を
+                    // 自分で見失わないための歯止めでもある。
+                    .help(info.provenance ?? info.id)
             }
 
             HStack(spacing: SophiaMetrics.space1) {
