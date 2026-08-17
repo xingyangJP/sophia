@@ -13,11 +13,19 @@ import MLXLMCommon
 
 /// 選べるモデルの台帳。A1 では表示のみで、切り替え UI は A2 以降（FR-09）。
 ///
-/// ## 表示名「Nous」について（消してはいけない但し書き）
+/// ## 表示名「Omoikane」について（消してはいけない但し書き）
 ///
-/// 画面に出るのは `Nous 8B` だが、**いま載っている重みは無改造の
+/// **これは重みの系列名であって、AI が名乗る名前ではない。**
+/// AI の自己認識は `SophiaDefaults.systemPrompt` の「Sophia（ソフィア）」で、
+/// そちらは FR-23 の要件。**2つは別の層にあり、混ぜないこと。**
+///
+/// 画面に出るのは `Omoikane 8B` だが、**いま載っている重みは無改造の
 /// `mlx-community/Qwen3-8B-4bit` である。** 独自の重みはまだ1つも作っていない
 /// （ROADMAP のトラックB / M1 マージ・M2 LoRA が着手前）。
+///
+/// **名前が実体を先取りしている状態である。** 「重みを改造したらオリジナルの名前にする」
+/// という決定に対して、名前だけが先に入っている。実体が追いつくまでの間、
+/// 下の帰属表示（`provenance`）が唯一の歯止めになる。**外さないこと。**
 ///
 /// 改名そのものは Apache 2.0 が許している。むしろ §6 が商標の使用権を与えないため、
 /// 「Qwen」の名前を自分の製品名として使い続ける方が危ない。**改名が正しい方向である。**
@@ -37,8 +45,20 @@ enum MLXModelCatalog {
 
     /// 独自モデルの呼び名。重みの系列に付ける名前で、アプリ名（Sophia）とは別。
     ///
-    /// Sophia（σοφία＝知恵）がアプリ、Nous（νοῦς＝知性）が中身、という対にしてある。
-    static let familyName = "Nous"
+    /// Sophia（σοφία＝知恵）がアプリ、Omoikane（思兼神＝思慮の神）が中身、という対。
+    /// **どちらも「知恵の擬人化」で揃えてある。**
+    ///
+    /// ## `Nous` から改名した（2026-08-17）— 消してはいけない理由
+    ///
+    /// νοῦς（知性）はギリシア語で Sophia と綺麗に対を成すが、
+    /// **`Nous Research` が同名で公開モデルを出しており、モデル名として衝突する。**
+    /// Qwen の名を製品名に使い続けない判断（下記 §6・商標）がそのまま当てはまるため、
+    /// **避けるほうを採った。名前で他所のモデルと混同されるのは、改名の目的に反する。**
+    ///
+    /// 思兼神は天岩戸で神々の意見をまとめて策を立てた神で、
+    /// 「多くの思いを兼ねる」が名の由来とされる。
+    /// **思考を書き出してから答える**（FR-17）このモデルの振る舞いに合っている。
+    static let familyName = "Omoikane"
 
     /// ベースモデルの出所。**帰属表示（Apache 2.0 §4）のための唯一の記録がここ。**
     /// UI のツールチップと `docs/MODELS.md` が両方ともこの文を出所にする。
@@ -55,7 +75,7 @@ enum MLXModelCatalog {
     static let entries: [ModelInfo] = [
         ModelInfo(
             id: "mlx-community/Qwen3-8B-4bit",
-            displayName: "Nous 8B v1.0",
+            displayName: "Omoikane 8B v1.0",
             provenance: provenance,
             // 4.62GB は MLX_SWIFT.md 第2.2節が HuggingFace API で実測した値。
             // 他のモデルは実測していないので sizeBytes を入れない（nil = 不明）。
@@ -67,7 +87,7 @@ enum MLXModelCatalog {
         ),
         ModelInfo(
             id: "mlx-community/Qwen3-4B-4bit",
-            displayName: "Nous 4B v1.0",
+            displayName: "Omoikane 4B v1.0",
             provenance: provenance,
             parameterSize: "4B",
             quantization: "4bit",
@@ -76,7 +96,7 @@ enum MLXModelCatalog {
         ),
         ModelInfo(
             id: "mlx-community/Qwen3-1.7B-4bit",
-            displayName: "Nous 1.7B v1.0",
+            displayName: "Omoikane 1.7B v1.0",
             provenance: provenance,
             parameterSize: "1.7B",
             quantization: "4bit",
@@ -85,7 +105,7 @@ enum MLXModelCatalog {
         ),
         ModelInfo(
             id: "mlx-community/Qwen3-0.6B-4bit",
-            displayName: "Nous 0.6B v1.0",
+            displayName: "Omoikane 0.6B v1.0",
             provenance: provenance,
             parameterSize: "0.6B",
             quantization: "4bit",

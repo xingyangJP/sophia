@@ -26,7 +26,7 @@ struct ModelInfo: Sendable, Equatable, Codable, Identifiable {
     var id: String
     /// UI に出す表示名。既定は id の末尾。
     ///
-    /// **`id` と違ってよい。** 独自の呼び名（例 `Nous 8B`）を出す一方で、
+    /// **`id` と違ってよい。** 独自の呼び名（例 `Omoikane 8B`）を出す一方で、
     /// `id` は実際に読んでいるリポジトリを指し続ける。表示名で `id` を置き換えないこと。
     var displayName: String
 
