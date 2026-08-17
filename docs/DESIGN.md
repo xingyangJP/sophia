@@ -3,10 +3,11 @@
 | 項目 | 内容 |
 |---|---|
 | 文書名 | Sophia 設計書 |
-| 版 | **2.0** |
+| 版 | **2.1** |
 | 作成日 | 2026-08-15 |
-| 更新日 | 2026-08-16（**Electron から SwiftUI + MLX へ全面改訂**。第3・4・5・7・9・11・12章を書き換え、第1・6・8・10・13章に追記。第2章の実測値は変更なし） |
-| 対象 | [REQUIREMENTS.md](REQUIREMENTS.md) v1.0 の全要件 |
+| 更新日 | 2026-08-17（**A1 の実装が入ったので、設計案だったコード片と構成を実装に合わせた。** 第3・4・5・6・7・9・11・12・13章を書き換え、4.8節（自己認識）を新設。第2章の実測値は変更なし） |
+| 前回更新 | 2026-08-16（**Electron から SwiftUI + MLX へ全面改訂**） |
+| 対象 | [REQUIREMENTS.md](REQUIREMENTS.md) v1.1。**ただし FR-19〜22（ローカル環境の参照・操作）は未設計**（13.1節に A2 の作業として立ててある） |
 | 上位文書 | **[VISION.md](VISION.md)**（本書はこの下位にある） |
 | 関連文書 | [MLX_SWIFT.md](MLX_SWIFT.md) / [TUNING.md](TUNING.md) / [UI_SPEC.md](UI_SPEC.md) / [UI_NATIVE.md](UI_NATIVE.md) / [MODELS.md](MODELS.md) / [BENCH_RESULTS.md](BENCH_RESULTS.md) |
 
@@ -18,9 +19,14 @@
 > | **【確認済】** | [MLX_SWIFT.md](MLX_SWIFT.md) でソースを読み、またはビルドを通して確認した |
 > | **【未確認】** | 設計上の判断であり、実機で検証していない。**A1 で検証すること** |
 >
-> **本書に載る Swift コードは、特記がない限り「設計案」であってコンパイルを通していない。**
-> MLX 側の API が実在しコンパイルが通ることは [MLX_SWIFT.md](MLX_SWIFT.md) 第10章で確認済みだが、
-> **Sophia 側の型定義とその組み合わせは未確認である。**
+> **【2026-08-17】上の但し書きは第4章・第5章については無効になった。**
+> A1 の実装が入り、`Sophia/Sources/` の型定義は**実在してコンパイルとテスト（80件）を通っている。**
+> 本書のコード片は**実装から写したもの**に差し替えてある。以後、
+> **食い違いがあれば実装（`Sophia/Sources/`）が正であり、本書を直すこと。**
+> それ以外の章（第7章の取得経路・第10章・第11章）はまだ設計案を含む。
+>
+> **ただし「コンパイルが通る」と「実機で動く」は別である。**
+> A1 の9つの完成条件（13.2節）のうち、実行時の検証記録があるものは**まだ1つも無い。**
 >
 > **2026-08-16 の転換について**
 >
@@ -168,9 +174,23 @@ MLX では計算グラフが Sophia のコード内にある【確認済 / MLX_S
 > 再計測時は思考部分の言語と `eval_count` を必ず記録すること。
 >
 > **【2026-08-16 追記】この未解決は A1 で解ける。**
-> 第4.6節の `GenerationStats` は `thinkingChars` と `outputTokens` を
+> 第4.6節の `GenerationStats` は思考の量と `outputTokens` を
 > **同じ1回の生成について同時に記録する**。思考テキストは Sophia 自身が分離するため
 > （第6章）、文字数はアプリ側で確実に数えられる。**A1 の最初の計測課題とする。**
+>
+> **【2026-08-17 訂正】A1 の実装では、この形では解けない。**
+> `GenerationClock` は思考の文字数を数えてはいるが、
+> `finish()` の中で `Int(ceil(文字数 × 0.5))` に潰してから `thinkingTokens` へ入れており、
+> **比較の材料である生の文字数が捨てられている**（`GenerationStats.swift`）。
+> さらに `MLXEngine` は実トークン数を渡していない（`thinkingTokens: nil`）ため、
+> **`thinkingTokens` は常に概算である**（`thinkingTokensAreEstimated = true`）。
+> つまり現状のログには「文字数」も「思考の実トークン数」も残らず、**この未解決は解けていない。**
+>
+> 解くには実装の追加が要る。どちらか一方でよい。
+> - `GenerationStats` に `thinkingCharacterCount` を落とさず持つ（1フィールド。struct なので追加は安全）
+> - 分離器が思考側に流したトークンを数えて `thinkingTokens` に実測を入れる
+>
+> **A2 の作業として 13.1節に立てた。**
 
 → 第6章で専用の設計を行う。UIで扱わない限り、**利用者には15秒間フリーズに見える**。
 
@@ -247,10 +267,24 @@ Open WebUI 経由で「こんにちは」の一言を送ったときの実際の
 273トークンで1.6秒かかっている。`sophia-chat` は Modelfile の SYSTEM だけで
 223トークンを消費するため、**利用者が1文字打っただけでもプリフィルは約1.5秒**になる。
 
+> **【2026-08-17 訂正】この 223 という数字はアプリの値ではない。**
+>
+> | | 何の値か | 状態 |
+> |---|---|---|
+> | **223トークン** | **Ollama 側**（`sophia-chat`）の Modelfile SYSTEM を、Ollama の実トークナイザで数えた値 | **実測。ただし計測後に SYSTEM が書き換えられており、現物とも一致しない**（2026-08-16 に自己認識3行が追記され 295文字 → 438文字に増えた。再計測していない） |
+> | アプリ（MLX / Qwen3-8B-4bit）の system | 概算 **+71トークン**（自己認識3行・141文字 × 0.5） | **未計測。** 実トークナイザで数えた値をまだ1度も取っていない |
+>
+> **アプリと Ollama は別系統である。** アプリは Modelfile を読まない（4.8節）。
+> したがって上の「223トークン」を根拠にアプリの初動を論じてはいけない。
+> 概算式の 0.5 tok/文字 自体、この文体では過小に出る疑いがある
+> （223/295 = 0.756 tok/文字 という実績があり、1.5倍の開き）。
+> **アプリ側の真値は `GenerationStats.inputTokens`（実トークナイザ由来）で取れる。**
+> `SOPHIA_SYSTEM_PROMPT` の ON/OFF で1回ずつ送り、差を取れば確定する（4.8節）。**未実施。**
+
 つまり NFR-03 の「1秒以内」は、システムプロンプトを含めて
-**入力が約170トークン以内のときしか満たせない**。
-現状の要件は入力長の条件を書いていないため、達成条件が定義できていない。
-→ REQUIREMENTS の NFR-03 に入力長の前提を追記するか、閾値を見直す必要がある（未決）。
+**入力が約170トークン以内のときしか満たせない**（この 170 も Ollama 実測からの内挿である）。
+→ **REQUIREMENTS v1.1 の NFR-03 に入力長の前提を明記した。** 未決だったのはこの点で、そこは閉じた。
+**残る未決は「MLX で測り直したとき 170 という数字自体が変わるか」であり、こちらは未計測。**
 
 なお、この1.5秒は「無反応」にしてよい時間ではない。
 UIは送信直後に受付表示を出し、**プリフィル中であることを示す**（第6章の思考領域と同じ考え方）。
@@ -275,14 +309,96 @@ UIは送信直後に受付表示を出し、**プリフィル中であること�
 | モデルのディスク量 | **約0.6GB 減る** | Qwen3-8B-4bit（MLX）4.62GB【確認済】vs Q4_K_M 約5.2GB |
 | 出力品質 | **不明** | 量子化方式が違う。**比較測定が必要**（MLX_SWIFT 12.4 の未解決課題） |
 
-### 2.6 MLX での実測（A1 完了後に記入）
+### 2.6 MLX での実測【2往復のみ / 基準値ではない】
 
-**未計測。** A1 の完了時に、Ollama 実測と並べられる形で
-[BENCH_RESULTS.md](BENCH_RESULTS.md) と本節に記録する。最低限そろえる項目:
+**計測経路は通った**（`make app-stats` → `logs/mlx-stats.log` の `[STATS]` 行）。
+取れているのは **同一セッション内の連続2往復だけ**である。
+全データと切り分け手順は [BENCH_RESULTS.md](BENCH_RESULTS.md) 2026-08-17 の節にある。
 
-`promptTokenCount` / `promptTokensPerSecond` / `tokensPerSecond` /
-TTFT（思考の1文字目まで）/ TTFR（本文の1文字目まで）/ `thinkingChars` /
-`MLX.Memory.snapshot()` / 冷間と連続使用時の別 / **計測時はデバッガを外す**【MLX_SWIFT 落とし穴15】。
+| 項目 | 1往復目 | 2往復目 |
+|---|--:|--:|
+| 入力トークン | 104 | 156 |
+| 出力トークン | 166 | 383 |
+| **プリフィル** | 0.84秒 / **123.26 tok/s** | 11.65秒 / **13.39 tok/s** |
+| デコード | 8.53秒 / **19.46 tok/s** | 19.94秒 / **19.21 tok/s** |
+| TTFT（最初の1文字） | **0.97秒** | **11.87秒** |
+| TTFR（**本文**の1文字目） | **7.71秒** | 28.36秒 |
+| 合計 | 9.42秒 | 31.66秒 |
+| ピークメモリ | 4,615.61 MB | 4,656.19 MB |
+
+**この数字を基準値として使ってはいけない。** 条件は
+**Debug ビルド（デバッガは非接続）**（【MLX_SWIFT 落とし穴15】は計測時にデバッガを外せと書いている）・
+思考モードON・自己認識ON・**起動時点でスワップ4GB使用済み**・**2往復のみ**。
+
+#### この計測の最大の発見 — プリフィルだけが崩れる
+
+**デコードは無傷（19.46 → 19.21 tok/s）なのに、プリフィルだけが9.2倍遅くなっている。**
+熱制限なら**デコードも道連れになるはず**で、そうなっていない。
+入力は104→156トークン（+50%）に増えただけで、プリフィル時間は13.9倍になっている。
+
+> **⚠️ `peak_mb` を「メモリは動いていない」の根拠に使わないこと。**
+> この値は生成ごとに `MLX.Memory.peakMemory = 0` でリセットされる
+> **「その生成中のピーク*アロケーション*量」**であり（`MLXEngine.swift:290`）、
+> **そのページが物理RAMにあるかスワップにあるかを知らない。**
+> KVの膨張は否定できるが、**ページアウトは否定できない。**
+> residency を測るには OS 側（`phys_footprint` / ページイン数）が要る。
+
+**有力仮説は「待機中に重みがページアウトされ、プリフィルが読み戻しの代金を払った」。**
+コード調査で前提条件がすべて満たされていることを確認した ─
+**重みは wired されていない**（`wiredMemoryTicket` 既定 nil）/ モデルは往復をまたいで保持
+（**都度ロードではない**）/ 合間に `clearCache()` は呼ばれない / メモリ圧への反応が0件 /
+`cacheLimit` が20MBと小さく1往復ごとにバッファがOSへ返る。
+そして **`prefill_s` の計測窓が「待機後に4.6GB全体へ最初に触る一回」と正確に一致する。**
+
+**決定的な数字 ─ 2往復目は計算していない。** 1トークン単価に直すと、
+プリフィルは 8.1 → **74.7 ms/tok**、デコードは 51.4 → 52.1 ms/tok。
+**2往復目はプリフィル単価がデコードを上回っている。**
+プリフィルは重みの読み出しを156トークンで償却できるので、**計算律速なら単価は必ずデコードより
+安くなる**（1往復目はそうなっている）。逆転している以上、**11.65秒の大半は演算ではない。**
+
+**消えた対抗仮説:** サーマル（decode が−1.3%）/ チャンク境界差（既定ステップ512未満で同一経路）/
+入力長そのもの（1.5倍）/ **モデルの都度ロード** / **計測窓への別作業の混入** /
+**計算律速**。カーネル遅延コンパイル説も弱まった（**1往復目こそ初回**なのに速い）。
+
+> **計測窓の潔白は独立に確認できる。** `ttft_s` の起点は `prefill` より前なので、
+> その差が窓外の全コストの上限になる ─ **1往復目0.13秒 / 2往復目0.22秒**。
+> モデルのロード・テンプレート適用・トークナイズ・KV確保はすべて窓の外である。
+
+**KVキャッシュは持ち越されていない（確定）。** `generate` に `cache:` を渡しておらず、
+毎回全36層ぶんの新規キャッシュが作られ、`ChatViewModel` は毎ターン会話全体を再送している
+（思考テキストは再送していない）。**ただし主因ではない** ─ 156トークンを1往復目のレートで
+全部再プリフィルしても1.27秒で、11.65秒の11%にしかならない。
+**それでも会話長に対して二乗で効く実在の税なので、A2 までに直す**（10.x節の宿題。
+`ChatSession` をそのまま使うと FR-02 と衝突するため、トークン台帳は自前で持つこと）。
+
+**残る候補:** ①待機中のページアウト（本命）②他プロセスとの争奪が壁時計に乗った
+③Debug増幅。**切り分け手順は [BENCH_RESULTS.md](BENCH_RESULTS.md) にある。**
+**最も安い1手は「まったく同じプロンプトを2回続けて送る」** ─ 入力トークン数が同一なので、
+2回目が速ければ原因は「初回に触る」側だと確定する。
+
+> **直す前に、静かな状態で再現するかを確かめること。**
+> この計測はスワップが5,120M中4,056M埋まった機体で並行作業の最中に取られており、
+> **アプリの性質ではなく「そのときの機体の状態」を測った数字である可能性が相当ある。**
+> 再現しなければ直すべきものは無い。
+
+**これは A1 の残作業ではなく、体感速度に直結する最優先の調査項目である**（リスク21）。
+
+#### NFR への影響
+
+- **NFR-03（1秒以内に何かが出る）は2往復目で破れている。** 0.97秒 → 11.87秒。
+  **「初回だけ条件を満たす」のは満たしていないのと同じ。**
+- **NFR-03 の「入力約170トークンまで」の閾値も揺らぐ**（[REQUIREMENTS.md](REQUIREMENTS.md)）。
+  あれは Ollama からの内挿値で、1往復目は104トークンで既に0.97秒だった。
+- **TTFT と TTFR の乖離。** 1往復目で 0.97秒 対 7.71秒。「何かが出る」までは1秒でも、
+  本文までは約8倍。**NFR-03 の指標が「何かが出るまで」で良いのかは再考の余地がある。**
+- メモリは見積り約5.4GB に対しピーク4,656MB で**収まっている**（長文脈は未計測）。
+
+> **`think_tok`（296 / 288）は壊れた値である。** 1往復目は出力全体が166トークンなのに
+> 思考が296というのは原理的にありえない。思考が英語のとき「0.5 tok/文字」の概算係数が
+> 約2倍過大に出る（リスク20）。**思考量の議論にこの数字を使わないこと。**
+
+**残っている計測:** プリフィル崩れの切り分け（最優先）/ Release ビルド・デバッガ非接続での
+取り直し / 冷間と連続使用の別 / `SOPHIA_SYSTEM_PROMPT` の ON/OFF による入力トークン差（4.8節）。
 
 ---
 
@@ -307,8 +423,10 @@ Sophia.app ── 単一プロセス ──────────────�
               │                       ▼
   [ 非 MainActor / Task ]
       actor MLXEngine : InferenceEngine                     第4章
-          ├─ ReasoningSplitter   <think> の分離             第6章
-          ├─ StatsCollector      TTFT / TTFR / tok/s        4.6節
+          ├─ ThinkingSeparating  <think> の分離             第6章
+          │    ├─ ReasoningEmitterSeparator（公式。Qwen3 はこちら）
+          │    └─ ThinkingSplitter（自作。フォールバック）
+          ├─ GenerationClock     TTFT / TTFR                4.6節
           └─ MLXLMCommon.ModelContainer（MLX 側の actor）
                   └─ Qwen3 モデル本体 ──▶ Metal / GPU
 
@@ -317,10 +435,11 @@ Sophia.app ── 単一プロセス ──────────────�
 
 ──────────────────────────────────────────────────────────────────
 
-  ~/Library/Application Support/Sophia/     ← 第7.1節
-      ├─ Models/      MLX形式（safetensors）のディレクトリ
-      └─ sophia.db    会話履歴
-      （サンドボックス下では実体が Containers 配下になる。7.1節）
+  Application Support/Sophia/sophia.db      会話履歴（第8章）
+  HuggingFace キャッシュ/models--<repo-id>/ モデル本体（第7.1節）
+
+  いずれもサンドボックス下では実体が
+  ~/Library/Containers/jp.co.xerographix.sophia/Data/ 配下になる（7.1節）
 ```
 
 ### 3.1 推論を別プロセスに置かない理由（Electron からの最大の変更点）
@@ -385,12 +504,17 @@ error: sending 'input' risks causing data races
 
 ### 3.3 起動時の初期化
 
-| 順 | やること | 根拠 |
-|---|---|---|
-| 1 | `MLX.Memory.cacheLimit = 20 * 1024 * 1024` | **公式サンプル LLMEval / LLMBasic / MLXChatExample の3つとも同じ値**【確認済 / MLX_SWIFT 8.1】。「LLMは20MB」が事実上の推奨 |
-| 2 | ウィンドウを出す。**モデルのロードを待たない** | ロードは秒単位かかる。第1章の原則2 |
-| 3 | モデルのロードを別 Task で開始し、進捗を出す | 初回はダウンロード 4.62GB（第7章） |
-| 4 | `MLX.GPU.deviceInfo()` / `maxRecommendedWorkingSetBytes()` を記録 | FR-08 の推奨判定（7.3節）と、ベンチの環境記録 |
+| 順 | やること | 根拠 | A1 の実装 |
+|---|---|---|---|
+| 1 | `MLX.Memory.cacheLimit = 20 * 1024 * 1024` | **公式サンプル LLMEval / LLMBasic / MLXChatExample の3つとも同じ値**【確認済 / MLX_SWIFT 8.1】。「LLMは20MB」が事実上の推奨 | **実装済み。ただし置き場所が違う。** `SophiaApp` ではなく `MLXEngine` 内の static（`runtimeConfigured`）で、**エンジンを最初に触ったときに1回だけ**設定している |
+| 2 | ウィンドウを出す。**モデルのロードを待たない** | ロードは秒単位かかる。第1章の原則2 | 実装済み |
+| 3 | モデルのロードを別 Task で開始し、進捗を出す | 初回はダウンロード 4.62GB（第7章） | 実装済み（FR-07 の進捗表示つき） |
+| 4 | `MLX.GPU.deviceInfo()` / `maxRecommendedWorkingSetBytes()` を記録 | FR-08 の推奨判定（7.3節）と、ベンチの環境記録 | **未実装。** これらの API も `ProcessInfo.physicalMemory` も、`Sophia/Sources/` から1度も呼んでいない |
+
+> **手順1 を起動処理に置かなかった理由。** MLX に触る前でありさえすればよく、
+> エンジンの初期化に載せておけば「エンジンを作れば必ず設定済み」が型の上で保証される。
+> 起動処理に置くと、テストや `StubEngine` 経路で呼ばれない道ができる。
+> **`SophiaApp` には現在ウィンドウ設定と About メニューしか無い。**
 
 **`GPU.set(cacheLimit:)` は非推奨。`Memory.cacheLimit` を使う**【確認済 / MLX_SWIFT 8.1。ビルド時に deprecation 警告が出ることを実測】。
 
@@ -414,91 +538,116 @@ error: sending 'input' risks causing data races
 
 要件 **NFR-09**。そして**第1章の原則1と原則4が同居する層**である。
 
-### 4.1 protocol と共通型【設計案 / 未確認】
+### 4.1 protocol と共通型【実装済み。以下は `Sophia/Sources/Shared/` から写したもの】
+
+**実装が正。** 型が足りないと感じても本書を先に書き換えないこと。
 
 ```swift
-// Sophia/Core/Inference/InferenceEngine.swift
+// Sophia/Sources/Shared/SophiaMessage.swift
 
-/// 会話1発言。**Sendable であることがこの型の存在理由**（3.2節）。
-public struct SophiaMessage: Sendable, Equatable, Codable {
-    public enum Role: String, Sendable, Codable { case system, user, assistant }
-    public var role: Role
-    public var content: String
-    /// 思考モードの出力（第6章）。**エンジンへ送り返さない。**
-    /// 過去の思考を再送するとプリフィルが無駄に膨らむ（第2.2章）。
-    public var thinking: String?
+enum MessageRole: String, Sendable, Codable, CaseIterable, Equatable {
+    case system, user, assistant     // 第8章の messages.role CHECK 制約と綴りを揃えてある
 }
 
-/// 生成中に流れてくる断片。思考と本文を型で区別する。
-public enum Chunk: Sendable {
-    case thinking(String)
-    case content(String)
+/// 会話1発言。**Sendable であることがこの型の存在理由**（3.2節）。
+struct SophiaMessage: Sendable, Equatable, Codable {
+    var role: MessageRole
+    var content: String
+    // thinking は **無い**（下記）
+}
+
+// Sophia/Sources/Shared/Chunk.swift
+enum Chunk: Sendable, Equatable {
+    case prefill(PrefillProgress)    // 入力処理の進捗（2.4節の「無反応の1.5秒」対策）
+    case thinking(String)            // 差分。<think> タグ自体は含めない
+    case content(String)             // 差分
     case done(GenerationStats)
 }
 
-/// **1回の生成の「力加減」をここに集約する**（4.5節①）。
-/// View から個別のグローバル設定を読ませない。切替点を1か所に固定するための型。
-public struct ChatOptions: Sendable {
-    public var temperature: Float = 0.7
-    public var topP: Float = 0.8
-    public var topK: Int = 20
-    public var maxTokens: Int = 2048
+// Sophia/Sources/Shared/ChatOptions.swift
+struct ChatOptions: Sendable, Equatable, Codable {
+    var temperature: Double          // 既定 0.7
+    var topP: Double                 // 既定 0.9（modelfiles と揃えてある）
+    var topK: Int                    // 既定 20
+    var contextLength: Int           // 既定 8192（Ollama の num_ctx に相当）
+    var maxTokens: Int               // 既定 1024。思考ONなら 4096 へ引き上げ
+    var thinking: Bool               // 既定 false（FR-18）
+    var seed: UInt64?                // 再現性が要る計測用
+    var repetitionPenalty: Double?
 
-    /// 思考モード（FR-18 / 第6章）。true のとき maxTokens を自動的に引き上げる
-    public var thinking: Bool = true
-
-    // --- 以下は A1 では既定値のまま。**フィールドだけ先に開けておく**（4.7節） ---
-
-    /// 思考トークンの予算。VISION「予算の9割」への直接の道具【MLX_SWIFT 6.6 / main のみ】
-    public var thinkingBudget: Int? = nil
-    /// KVキャッシュ制御【MLX_SWIFT 8.3】。16GB機のメモリ逼迫に効く見込み
-    public var maxKVSize: Int? = nil
-    public var kvBits: Int? = nil
-    /// 層ごとの計測を有効にするか（4.5節③）。素の MLXEngine は無視する
-    public var instrument: Bool = false
+    // --- A2以降の最適化用。A1 では nil のまま ---
+    var maxKVSize: Int?
+    var kvBits: Int?
+    var kvScheme: String?
 }
 
-public struct EngineCapabilities: Sendable {
-    public var thinking: Bool
-    public var maxContext: Int
-    /// 思考モードを OFF にできるか。DeepSeek-R1 系は不可【確認済 / MLX_SWIFT 6.3】
-    public var canDisableThinking: Bool
-    /// 層ごとの計測に対応しているか（4.5節③）。MLXEngine は false
-    public var instrumented: Bool
+// Sophia/Sources/Shared/ModelInfo.swift
+struct EngineCapabilities: Sendable, Equatable {
+    var supportsThinking: Bool
+    var canDisableThinking: Bool     // DeepSeek-R1 系は false【確認済 / MLX_SWIFT 6.3】
+    var maxContextLength: Int
+    var reportsPrefillProgress: Bool // Chunk.prefill を送れるか
+    var reportsExactTokenCounts: Bool // 概算が混じるなら false。BENCH に載せる判断材料
 }
 
-public protocol InferenceEngine: Actor {
-    func listModels() async throws -> [ModelInfo]
-    func load(_ modelId: String,
-              onProgress: @Sendable @escaping (Double) -> Void) async throws
-    /// 生成。**中断は返された Stream を消費する Task の cancel で行う**（5.3節）
-    func chat(_ messages: [SophiaMessage],
-              options: ChatOptions) async throws -> AsyncStream<Chunk>
+// Sophia/Sources/Shared/InferenceEngine.swift
+protocol InferenceEngine: Sendable {
+    nonisolated var identifier: EngineIdentifier { get }
+    func loadedModel() async -> ModelInfo?
+    func capabilities() async -> EngineCapabilities      // ロード後に問い合わせる
+    func availableModels() async throws -> [ModelInfo]
+    nonisolated func load(_ modelID: String) -> AsyncThrowingStream<LoadProgress, any Error>
     func unload() async
-    var capabilities: EngineCapabilities { get }
+    /// 生成（FR-01）。**この関数は async でも throws でもない。呼んだ瞬間に返る。**
+    /// 失敗はストリームの中で通知される。中断は消費側の Task を cancel する（5.3節）。
+    nonisolated func chat(_ messages: [SophiaMessage],
+                          options: ChatOptions) -> AsyncThrowingStream<Chunk, any Error>
 }
 ```
 
-#### v1.1 の TypeScript から変わった点
+#### 設計案から変わった点と、その理由
 
-| v1.1（TypeScript） | v2.0（Swift） | 理由 |
+| 設計案（v2.0） | 実装 | 理由 |
 |---|---|---|
-| `signal: AbortSignal` を `ChatOptions` に持つ | **消した** | Swift の Task cancellation は構造化されており、呼び出し側の `Task` を cancel すれば伝播する。**型に持たせる必要が無い**【確認済 / MLX_SWIFT 第5章: 生成ループが `while !Task.isCancelled`】 |
-| `Chunk` が `{ kind, text }` のタグ付きユニオン | `enum Chunk` | Swift の enum が同じ役割を果たす。**思考と本文を型で分ける設計判断は変わらない** |
-| `numCtx: number` | `maxKVSize` / `maxContext` | Ollama の `num_ctx` に相当する単一のつまみが MLX には無い。KVキャッシュ側の制御に置き換わる |
-| `interface InferenceEngine` | `protocol InferenceEngine: Actor` | 実装を actor に限定し、モデルの状態（ロード済みか、生成中か）への同時アクセスをコンパイラに守らせる |
+| `SophiaMessage.thinking: String?` を持つ | **持たない** | 「過去の思考を送り返さない」を注意書きではなく**型の形で保証する**ため。フィールドが在れば誰かが必ず入れる。思考テキストは UI と永続化層が自分の型で持つ |
+| `protocol InferenceEngine: Actor` | `protocol InferenceEngine: Sendable` | actor 限定にすると `chat` を `nonisolated` にできない。**実装が actor であることは変わらない**（`MLXEngine` / `StubEngine` / `MockEngine` はいずれも actor で、`load` / `chat` だけ `nonisolated`） |
+| `chat(...) async throws -> AsyncStream<Chunk>` | `chat(...) -> AsyncThrowingStream<Chunk, any Error>` | 呼んだ瞬間に返る形にした。`async throws` だと「ストリームを取るまで待つ」段と「流れてくる」段の2か所で失敗しうる。**失敗経路を1本にする** |
+| `thinkingBudget` / `instrument` のフィールドを先に開ける | **開けていない** | `GenerationStats` と同じ判断で、**struct はフィールドを後から足しても既存コードが壊れない**（網羅 switch がある enum とは違う）。空フィールドを先に置くと「用意したが誰も読まない値」が増える。**enum の `Chunk` だけは先にケースを開けてある**（消費側に `default:` を義務づけている） |
+| `maxContext` | `maxContextLength` / `contextLength` | Ollama の `num_ctx` に相当する単一のつまみが MLX に無いため、能力（モデルの上限）と設定（この生成で使う長さ）を別の名前に分けた |
 
 **`Chunk` で思考と本文を型レベルで分けているのが設計の要点。**（v1.1 から変わらない）
 実測どおり思考は本文の10倍量が流れるため、混ぜて扱うと UI もトークン計算も破綻する。
 **MLX では分離をアプリ側が行う**点が Ollama と決定的に違う（第6章）。
 
+#### v1.1 の TypeScript から変わった点（変わらなかった判断）
+
+| v1.1（TypeScript） | v2.0（Swift） | 理由 |
+|---|---|---|
+| `signal: AbortSignal` を `ChatOptions` に持つ | **消した** | Swift の Task cancellation は構造化されており、呼び出し側の `Task` を cancel すれば伝播する。**型に持たせる必要が無い**【確認済 / MLX_SWIFT 第5章: 生成ループが `while !Task.isCancelled`】。実装側のコメントは理由をもう一段強く書いている ─ 「**中断の手段を options に混ぜると、キャンセル経路が2つになって必ず食い違う**」 |
+| `Chunk` が `{ kind, text }` のタグ付きユニオン | `enum Chunk` | Swift の enum が同じ役割を果たす。**思考と本文を型で分ける設計判断は変わらない** |
+| `numCtx: number` | `contextLength` / `maxKVSize` | Ollama の `num_ctx` に相当する単一のつまみが MLX には無い。上限の検査（`contextLength`）と KVキャッシュ側の制御（`maxKVSize`）に分かれる |
+
 ### 4.2 実装の一覧
 
-| 実装 | 使用時期 | 中身 |
-|---|---|---|
-| `MockEngine` | A1 の初日〜 | モデルをロードせず、記録した応答を等間隔で流す。**UI とストリーミングを推論の都合から切り離す**（REQUIREMENTS 第8章の意図をそのまま引き継ぐ） |
-| **`MLXEngine`** | **A1〜配布まで** | `mlx-swift-lm` の**低レベルAPI**（`ModelContainer.generate`）。5.3節の理由で `ChatSession` を使わない |
-| `InstrumentedMLXEngine` | A2以降 | `Qwen3.swift` を複製・改造し `ModelTypeRegistry.registerModelType` で登録。層ごとの計測・早期終了（4.5節③） |
+| 実装 | 場所 | 使用時期 | 中身 |
+|---|---|---|---|
+| **`MLXEngine`** | `Sources/Inference/` | **A1〜配布まで** | `mlx-swift-lm` の低レベルAPI（`perform` + 自由関数 `generate`）。4.3節・5.3節の理由で `ChatSession` を使わない |
+| `StubEngine` | `Sources/Engine/` | A1 の初日〜 | モデルを一切読まない。**実測に近い速度**（約26文字/秒 = 生成13 tok/s 相当）で流す。存在理由は「UI が推論の完成を待たずに進める」ことに加え、**`InferenceEngine` が実装可能な形になっていることの証明**でもある |
+| `MockEngine` | `Sources/UI/Mock/` | A1（DEBUG のみ） | **描画の限界を突く用。** 1文字を4ms（約250文字/秒）で流し、見出し・箇条書き・複数言語のコードブロックを含む。`.failure` シナリオで FR-11 の表示も確認できる |
+| `InstrumentedMLXEngine` | 未着手 | A2以降 | `Qwen3.swift` を複製・改造し `ModelTypeRegistry.registerModelType` で登録。層ごとの計測・早期終了（4.5節③） |
+
+**`StubEngine` と `MockEngine` を分けているのは役割が違うから。**
+速すぎるダミーで作った UI は本物に差し替えた瞬間に破綻し、
+遅いダミーだけでは間引きの不足を見つけられない。**両方要る。**
+
+**エンジンの実体を作ってよいのは `EngineFactory` だけ**（composition root）。
+3人が別々に `MLXEngine()` を書くと同じモデルが2回メモリに載り、16GB機ではそれだけで壊れる。
+
+| 環境変数 | 効果 |
+|---|---|
+| （なし） | **`MLXEngine`。既定は本物。** 既定を偽物にすると「動いているように見えて実は Stub だった」が起きる |
+| `SOPHIA_ENGINE=stub` | `StubEngine`。不具合が UI 側か推論側かを切り分ける退避口 |
+| `SOPHIA_UI_MOCK=rich` 等 | `MockEngine`（DEBUG ビルドのみ） |
 
 **`OllamaEngine` と `LlamaCppEngine` は廃止。**
 v1.1 の「開発時 Ollama / 配布時 llama.cpp」という二段構えは、
@@ -509,26 +658,57 @@ v1.1 の「開発時 Ollama / 配布時 llama.cpp」という二段構えは、
 > `modelfiles/` は第2章の実測値の出所であり、MLX との比較対象として価値がある。
 > **アプリからは呼ばない。**
 
-### 4.3 A1 で使う生成コード【MLX 側 API は確認済 / 組み合わせは未確認】
+### 4.3 A1 の生成コード【実装済み】
 
 ```swift
 // MLXEngine 内部。ここが唯一 Chat.Message に触れる場所（3.2節）
 let chat: [Chat.Message] = messages.map {
     switch $0.role {
-    case .system:    .system($0.content)
+    case .system:    .system($0.content)      // 自己認識（FR-23 / 4.8節）はここを通る
     case .user:      .user($0.content)
-    case .assistant: .assistant($0.content)   // thinking は送り返さない（第2.2章）
+    case .assistant: .assistant($0.content)   // thinking は送り返さない（型で保証済み）
     }
 }
-let input  = UserInput(chat: chat, additionalContext: ["enable_thinking": options.thinking])
+let input   = UserInput(chat: chat, additionalContext: strategy.additionalContext(...))
 let lmInput = try await container.prepare(input: input)
-let params = GenerateParameters(maxTokens: options.maxTokens,
-                                temperature: options.temperature,
-                                topP: options.topP, topK: options.topK)
-let stream = try await container.generate(input: lmInput, parameters: params)
+
+// **実トークン数がここで取れる。** 概算ではない唯一の場所（4.6節 / 4.8節）
+let promptTokens = lmInput.text.tokens.asArray(Int.self)
+
+var configured = GenerateParameters(
+    maxTokens: options.maxTokens,
+    maxKVSize: options.maxKVSize, kvBits: options.kvBits, kvScheme: options.kvScheme,
+    temperature: Float(options.temperature), topP: Float(options.topP), topK: options.topK,
+    repetitionPenalty: options.repetitionPenalty.map(Float.init), seed: options.seed)
+
+// プリフィルの進捗（2.4節の「無反応の1.5秒」を進捗表示に変える）
+configured.prefill.progress = { processed, total in
+    continuation.yield(.prefill(PrefillProgress(processedTokens: processed, totalTokens: total)))
+}
+let parameters = configured                    // @Sendable クロージャへ渡す前に不変にする
+let components = makeGenerationComponents(options: options)   // A1 では空（4.5節②）
+
+let stream = try await container.perform(nonSendable: lmInput) { context, input in
+    try MLXLMCommon.generate(input: input, parameters: parameters,
+                             context: context, components: components)
+}
 ```
 
-**【確認済 / MLX_SWIFT 4.3】上記の MLX 側 API はコンパイルを通している。**
+#### `ModelContainer.generate` ではなく `perform` + 自由関数 `generate` を使う
+
+**設計案（v2.0）は `container.generate(input:parameters:)` と書いていたが、実装は使っていない。**
+理由は1つで、**`components:` を渡せるのが自由関数の側だけだから**である。
+
+`GenerationComponents` は `LogitProcessor` を差し込む口であり、
+**VISION 第3因子（全部を起動しない）への正規の入口**にあたる（4.5節②）。
+A1 では空を渡しているが、**呼び出し経路だけ先に通してある。**
+`ModelContainer.generate` で組むと、後から差し込むときに生成の呼び出し方ごと書き換えることになる。
+
+> **この判断は 4.7節の約束1 と第5.3章にも波及している。**
+> 3か所とも「低レベルAPI で組む」ことの中身は `perform` + 自由関数 `generate` である。
+
+**プリフィルは `TokenIterator.init` の中、つまりこの `generate` 呼び出しの内側で同期的に走る。**
+進捗コールバックはストリームが返る前に発火するが、`continuation` は既に存在しているので取りこぼさない。
 
 ### 4.4 解剖可能性 — なぜ推論層に組み込むのか（第1章 原則4）
 
@@ -580,8 +760,8 @@ let stream = try await container.generate(input: lmInput, parameters: params)
 
 | # | 解剖点 | VISION の因子 | 置き場所 | A1 での扱い |
 |---|---|---|---|---|
-| ① | **力加減の切替** | 第2因子 | `ChatOptions`（4.1節）と `ModelSelection`（7.3節） | **思考ON/OFF と `maxTokens` のみ実装。**他はフィールドを用意して既定値のまま |
-| ② | **サンプリング層のフック** | 第3因子（浅い側） | `LogitProcessor`【確認済】。`main` なら `GenerationComponents.appendingLogitProcessor`、3.31.4 なら `TokenIterator` を自前で組む | **実装しない。**低レベルAPIを使うことで穴だけ残す |
+| ① | **力加減の切替** | 第2因子 | `ChatOptions`（4.1節）と `ModelSelection`（7.3節） | **思考ON/OFF と `maxTokens` を実装。** KV 系（`maxKVSize` / `kvBits` / `kvScheme`）はフィールドだけ在って nil のまま。**`thinkingBudget` と `instrument` はフィールド自体を作っていない**（4.1節の表） |
+| ② | **サンプリング層のフック** | 第3因子（浅い側） | `LogitProcessor`【確認済】。`GenerationComponents.appendingLogitProcessor` | **実装しない。**ただし `components:` を渡す呼び出し経路は通してある（4.3節）。A1 では空の `GenerationComponents` を渡している |
 | ③ | **層ループの内側** | 第3因子（本丸） | `Qwen3.swift` を複製・改造し `registerModelType("qwen3", ...)` | **実装しない。**`InferenceEngine` protocol を挟むことで、後から `InstrumentedMLXEngine` を並べられるようにする |
 
 **③ には未解決の課題がある。【未確認 / MLX_SWIFT 7.3】**
@@ -598,27 +778,25 @@ MLX は遅延評価のため、`for` ループに時刻を挟むだけでは層�
 FR-14（利用者への表示）はその一部を使うにすぎない。
 
 ```swift
-public struct GenerationStats: Sendable, Codable {
-    // --- 待ち時間。2つ持つ（第2.3章 / MLX_SWIFT 7.2）---
-    public var ttftMs: Int            // 最初の出力まで。思考ONなら思考の1文字目
-    public var ttfrMs: Int?           // 本文の1文字目まで。思考OFFなら ttftMs と一致
-    // --- 速度 ---
-    public var promptTokensPerSecond: Double
-    public var tokensPerSecond: Double
-    // --- 量 ---
-    public var inputTokens: Int
-    public var outputTokens: Int
-    public var thinkingChars: Int     // 第2.1章の未解決（文字数 vs トークン数）を解くための列
-    // --- 終わり方 ---
-    public var stopReason: StopReason // .stop / .length / .cancelled / .error
-    // --- 条件 ---
-    public var modelId: String
-    public var thinkingEnabled: Bool
-    // --- 環境 ---
-    public var peakMemoryBytes: Int?  // MLX.Memory.snapshot()【確認済 / MLX_SWIFT 8.1】
-    /// 層ごとのコスト。**A1 では常に nil。**
-    /// 値の定義そのものが未解決（4.5節③）だが、**型を先に開けておく**
-    public var layerTimings: [LayerTiming]? = nil
+// Sophia/Sources/Shared/GenerationStats.swift（実装から。名前と型はこれが正）
+struct GenerationStats: Sendable, Equatable, Codable {
+    // --- 必須の4つ。名前も型も変えない ---
+    var ttftMs: Double                 // 最初の出力まで。思考ONなら思考の1文字目
+    var tokensPerSecond: Double
+    var inputTokens: Int
+    var outputTokens: Int
+    // --- 以降はすべて省略可能（既定値を持つ）---
+    var ttfrMs: Double?                // 本文の1文字目まで。思考OFFなら ttftMs と一致
+    var prefillSeconds: Double?
+    var prefillTokensPerSecond: Double?
+    var decodeSeconds: Double?
+    var totalMs: Double?
+    var thinkingTokens: Int?
+    var thinkingTokensAreEstimated: Bool
+    var stopReason: StopReason         // .completed / .maxTokens / .cancelled / .failed
+    var modelID: String?
+    var thinkingEnabled: Bool?
+    var peakMemoryBytes: Int?
 }
 ```
 
@@ -627,7 +805,21 @@ public struct GenerationStats: Sendable, Codable {
 | **TTFT を2つ持つ** | 第2.3章の達成判定が「本文の1文字目」で定義されている。**2つの差が思考モードのコストそのもの**であり、VISION の適応度関数（品質÷消費エネルギー）の材料になる |
 | **`Codable` にする** | 同じ値を DB（第8章）と [BENCH_RESULTS.md](BENCH_RESULTS.md) の両方へ流す。**ベンチと実利用の数値が同じ型であることに意味がある**（合成プロンプトと実作業のずれを後から検証できる） |
 | **中断時・失敗時も必ず記録する** | 「測ることを続ける」（VISION 当面の指針1）。`stopReason` があるのはそのため |
-| **`layerTimings` の型を先に置く** | 埋めるのは A2 以降。**型が無いと、後から全層を書き換えることになる**（4.4節） |
+| **`layerTimings` の型は置かなかった** | 設計案は「型を先に開けておく」としていたが、**struct は後からフィールドを足しても既存コードが壊れない**（enum のケース追加と違い、網羅 switch が無い）。値の定義自体が未解決（4.5節③）なまま型だけ置くと、意味の決まっていない列が残る。**A2 で足す** |
+
+#### どの値が実測で、どの値が概算か（**この区別が本節の要点**）
+
+| 値 | 出所 | 確度 |
+|---|---|---|
+| `inputTokens` / `outputTokens` | MLX の `promptTokenCount` / `generationTokenCount` | **実測。** ただし `.info` が届かない中断時は概算に落ちる |
+| `prefillSeconds` / `prefillTokensPerSecond` / `decodeSeconds` | MLX の `promptTime` / `promptTokensPerSecond` / `generateTime` | **実測** |
+| `peakMemoryBytes` | `MLX.Memory.peakMemory`（生成ごとにリセット） | **実測。**【MLX_SWIFT 8.4】過少報告の報告がある。単独で信用しない |
+| `ttftMs` / `ttfrMs` | **アプリ側の `GenerationClock`**（`ContinuousClock`。起点は送信を受理した瞬間） | **実測。** MLX からは取れないので自前で測る |
+| `tokensPerSecond` | `outputTokens ÷ decodeSeconds` | 実測値どうしの割り算 |
+| **`thinkingTokens`** | **思考テキストの文字数 × 0.5** | **常に概算。** `MLXEngine` は実トークン数を渡していない。`thinkingTokensAreEstimated` が常に true になる（2.1節の未解決に直結） |
+
+> **設計案の「TTFTのみ自前計測」は正確でなかった。自前計測は TTFT と TTFR の2つである。**
+> 第2.3章が「本文の1文字目まで」で達成判定を定義している以上、2つとも要る。
 
 **`.info(GenerateCompletionInfo)` は最後に1回しか来ない**【確認済 / MLX_SWIFT 7.2】。
 TTFT / TTFR はストリームを消費する側の壁時計で測る。`.info` からは
@@ -637,13 +829,113 @@ TTFT / TTFR はストリームを消費する側の壁時計で測る。`.info` 
 
 **これだけ守れば、A2 以降で解剖に着手できる。逆に、どれか1つでも破ると構造の作り直しになる。**
 
-1. **`ChatSession` を使わない。** 低レベルの `ModelContainer.generate` で組む
-   （5.3節の中断要件とも一致する）
+1. **`ChatSession` を使わない。** `container.perform(nonSendable:)` + 自由関数
+   `MLXLMCommon.generate(... components:)` で組む（4.3節）。
+   **`ModelContainer.generate` でもない** ─ `components:` を渡せないため
 2. **エンジンは `InferenceEngine` protocol の背後に置く。** View / ViewModel から
    `ModelContainer` や `MLXLLM` の型を直接触らない
 3. **`ChatOptions` に1回の生成の力加減を全部集める。** View が個別のグローバル設定を
    直接読んで生成を呼ばない
 4. **`GenerationStats` を全生成で必ず記録する。** 中断時も、エラー時も
+
+**A1 の実装は4つとも守っている。**
+
+### 4.8 自己認識（FR-23）をどこに置くか【実装済み / 費用は未計測】
+
+**モデルは自分が Sophia であることを知らない。** 与えなければ「Sophia」という人格は存在しない。
+一方で、**毎ターン払うトークンでもある。** 本節はその置き場所と量の判断を記録する。
+
+#### 前提の訂正 — `make models` はアプリに届かない
+
+| | Ollama 側 | アプリ側 |
+|---|---|---|
+| 自己認識の出所 | `modelfiles/sophia-chat.Modelfile` の SYSTEM | `SophiaDefaults.systemPrompt`（Swift の定数） |
+| 反映方法 | `make models` で焼き直す | **再ビルド** |
+| 読むモデル | `sophia-chat`（GGUF） | `mlx-community/Qwen3-8B-4bit`（MLX形式） |
+
+**完全に別系統である。** `make models` を実行してもアプリの自己認識は1文字も変わらない。
+**文言を変えるときは両方を手で合わせること。ここが唯一の食い違いリスク点。**
+（[TUNING.md](TUNING.md) 第10章が「`modelfiles/` で管理し `make models` で焼き直す」と書いているのは
+Ollama 側の話であり、アプリには当てはまらない。）
+
+#### ① なぜ `engineMessages()` の先頭なのか — **ここ以外に置いてはいけない**
+
+`ChatViewModel.engineMessages()` は、**送信経路と表示経路の両方が通る唯一の関数**である。
+
+```
+estimatedInputTokens ──┐
+                       ├──▶ engineMessages()  ← ここに system を1件置く
+send() の history ─────┘
+```
+
+ここに入れれば、**画面に出る入力トークン数と、実際に送る量が構造的に一致する。**
+
+- `send()` 側だけに足すと、入力欄の予算警告が実送信より少ない**嘘の数字**になる。
+  「無駄が痛みとして見えないと誰も減らさない」という VISION の測定原則を、最初に破るのがこの形
+- `MLXEngine` の中に足すのも不可。`StubEngine` / `MockEngine` / 将来の別実装が
+  同じ注入を各自で再実装することになり、必ず食い違う。
+  `InferenceEngine` の契約は「**messages は呼び出し側が組む**」である
+- `ChatOptions` のフィールドにするのも不可。`AbortSignal` を退けたのと同じ理由で、
+  「messages 内の system」と「options の systemPrompt」の2経路ができる（4.1節）
+
+**トグルが `@Observable` を通じて即座に `estimatedInputTokens` に反映される**ため、
+切り替えるとコストが画面上で増減して見える。これが「測ってから足す」の実装形である。
+
+#### ② なぜ Modelfile の SYSTEM 全文を持ち込まなかったのか
+
+Modelfile の SYSTEM は4つの部分でできている。**採ったのは①だけ。**
+
+| 部分 | 文字数 | アプリの概算式 | 採否 |
+|---|--:|--:|---|
+| ① 自己認識3行（名前 / 常に名乗る / 基盤を偽らない） | 141 | **+71 tok** | **採用** |
+| ② 役割1行（日本語で仕事をする編集者兼アシスタント） | 32 | +16 tok | 見送り |
+| ③ 書き方の原則5項目 | 159 | +80 tok | 見送り |
+| ④ やりとりの原則2項目 | 99 | +50 tok | 見送り |
+| **全文** | **438** | **+219 tok** | — |
+
+**③④は自己認識ではなく出力スタイルの調整である。** 毎ターン払う価値が最も薄い部分でもある
+（モデルは指示が無くても大きくは外さない一方、コストは自己認識の1.8倍）。
+**役割の切替は A2 の `ProfileRecord.systemPrompt`（FR-05）が本来の置き場**であり、
+そこへ回した。②も同じ理由で FR-05 側に属する。
+
+全文（概算+219、実トークンでは330前後と見込まれる）を常駐させると、
+**入力予算1,000トークンの2〜3割を、利用者が1文字も打つ前に消費する。**
+第2.2章で「機能をプロンプトに常駐させない」と決めた当のものになりかねない。
+
+> **これは恒久債務ではない。返済経路が2本ある。**
+> 1. A2 のプレフィックスKV再利用（2.2節）。system は必ずプロンプト先頭に来るため、**最も効く部分**
+> 2. LoRA で重みへ移す（10.4節）。「一度払って二度と払わない」
+>
+> **そう位置づけるなら妥当。恒久前提で全文を入れるなら不当。** この区別を消さないこと。
+
+#### ③ なぜ切れる必要があるのか — **要件である**
+
+`SOPHIA_SYSTEM_PROMPT=0` で無効化できる。UI のトグルにしていないのは A1 の scope 判断だが、
+**切る手段そのものは無くせない。** 理由は3つあり、どれも測定に効く。
+
+1. **NFR-03 の達成条件が「入力が約170トークン以内」**（2.4節）。常時ONだと
+   **素の性能を測り続けられなくなる**
+2. **VISION の適応度関数（品質÷消費エネルギー）は、同じ問いをあり/なしで走らせないと評価できない。**
+   切れないと比較実験そのものが成立しない
+3. [BENCH_RESULTS.md](BENCH_RESULTS.md) で Ollama 側と並べるとき、**片方だけ system を持つと比較が壊れる**
+
+#### ④ 未計測・未確認のもの
+
+**+71 という数字は概算式（1文字 × 0.5）の値であって実測ではない。**
+
+| 項目 | 状態 |
+|---|---|
+| 毎ターンの実トークン増分 | **未計測。** `SOPHIA_SYSTEM_PROMPT` の ON/OFF で同じ入力を1回ずつ送り、`GenerationStats.inputTokens` の差を取れば確定する |
+| 秒への換算 | **未計測。** 同時に `prefillSeconds` の差も取れる |
+| 概算式の妥当性 | **疑わしい。** この文体では 0.756 tok/文字 という実績があり（2.4節）、0.5 は約1.5倍過小に出る。**画面の予算表示が甘い方向にずれている可能性がある** |
+| Qwen3 のテンプレート既定 system | **未確認。** テンプレート側が既定 system を挿しているなら、自前の system は「純増」ではなく「置換」であり実コストは小さい。空メッセージで1回プロンプトを吐かせれば分かる |
+| 実際に Sophia と名乗るか | **実機で未確認。** 名乗ること、かつ基盤を聞かれたときだけ正直に答えることの両方を見る必要がある |
+| 思考分離への影響 | **影響しないはずだが未確認。** 分離器の `primedInside` 判定は**描画済みプロンプトの末尾64トークン**しか見ず、system は先頭に入るため末尾は変わらない（6.2節） |
+
+> **A2 への申し送り。** 現状 DB に保存しているのは user と assistant の行だけで、
+> **system 行は保存していない。** A1 は履歴復元をしないので実害は無いが、
+> A2 で `Store.history(in:includingSystem:)` から会話を復元した瞬間に
+> 「復元した会話に system が無い／二重に付く」が出る。**復元を実装する前に決めること。**
 
 ---
 
@@ -690,16 +982,35 @@ v1.1 は「トークンごとに React を再描画すると重い」ので 16ms
 本文を1つの `String` に append し続けると、`Text` は更新のたびに全文を再レイアウトする。
 **生成が進むほど1回の更新が重くなる**（長さに対して超線形になりうる）。
 
-対策の候補（**A1 では最初から入れない**）:
+#### A1 の実装 — 16ms の間引きは**最初から入れた**
+
+**設計案は「A1 では最初から入れない」としていたが、実装は入れている。**
+`SophiaDefaults.renderFlushInterval = 16ms` で、`ChatViewModel` が
+受信した断片を溜め、16ms ごとに1回だけ画面へ反映する。
+
+判断が変わった理由は、上の「生成は 7〜13.4 tok/s なので頻度は低い」という前提が
+**素の推論についてしか成り立たない**ことにある。
+`MockEngine` は1文字4ms（約250文字/秒）で流し、実際の描画はチャンク到着ごとに
+Markdown の全文再解析とシンタックスハイライトの再計算を伴う。
+**間引きが無いと、遅いのは推論ではなく描画になる。**
+
+**責務の分界を先に決めておく（これが本節の要点）:**
+
+| 層 | 責務 |
+|---|---|
+| エンジン | **間引かない。受け取った断片をそのまま全件流す。** エンジンが間引くと計測が汚れる |
+| UI | 16ms 単位で溜めて描画する |
+
+依然として未確認の対策候補（A2 以降）:
 
 | 案 | 内容 |
 |---|---|
 | (a) | 確定した段落と、末尾の未確定部分を分けて持ち、末尾だけを更新する |
 | (b) | `NSTextView` を `NSViewRepresentable` で使い、末尾に追記する |
 
-**まず素朴に実装し、生成の後半で `tokensPerSecond` が落ちるかを見る。**
+**生成の後半で `tokensPerSecond` が落ちるかを見る。**
 落ちるなら描画が推論を食っている。**第2章の測定原則で判定できる問題であり、
-推測で先回りしない。**
+推測で先回りしない。**【未計測】
 
 ### 5.3 中断（FR-02）
 
@@ -718,7 +1029,7 @@ func stop() { generationTask?.cancel() }
 **【確認済 / MLX_SWIFT 第5章】これが `ChatSession` を使わない理由である。**
 `ChatSession` は `AssistantGeneration.shouldRecord` が `stopReason != .cancelled` を要求しており、
 **キャンセルされたターンを履歴に記録しない。** FR-02 と真正面から衝突する。
-→ **A1 は低レベルAPI（`ModelContainer.generate`）で組む。**（4.7節の約束1）
+→ **A1 は低レベルAPI（`perform` + 自由関数 `generate`）で組む。**（4.3節 / 4.7節の約束1）
 
 #### 実装上の注意【確認済 / MLX_SWIFT 第5章の原文コメントより】
 
@@ -772,21 +1083,41 @@ func stop() { generationTask?.cancel() }
 **FR-17 の分離は、Sophia 自身の責務になった。**
 【確認済】公式サンプル `LLMEval` はこの分離をしておらず、`<think>` が画面にそのまま出る。
 
-### 6.2 分離の実装 — 2つの道がある
+### 6.2 分離の実装 — **道A で決着した**
 
-**【確認済 / MLX_SWIFT 1.2】版の選択が要る。どちらでも FR-17 は満たせる。**
+**【確認済 / MLX_SWIFT 1.2】版の選択が要った。どちらでも FR-17 は満たせる。**
 
 | 道 | 使うもの | 長所 | 短所 |
 |---|---|---|---|
-| **A（推奨）** | `main` を revision 固定し、`ReasoningEventEmitter` を使う | 公式実装。**単体テストと実モデル統合テストが付いている**。`ThinkingBudgetProcessor` とプリフィル進捗も同時に手に入る | `main` は毎日動く。`branch:` ではなく `revision:` で固定し `Package.resolved` を commit すること |
-| B | タグ 3.31.4 + 自作 `ThinkSplitter` | リリース版のみを使う方針を保てる | チャンク境界をまたぐ区切り文字など地雷がある。**コード自体は MLX_SWIFT 6.5 にコンパイル確認済みのものがある** |
+| **A（採用）** | `main` を revision 固定し、`ReasoningEventEmitter` を使う | 公式実装。**単体テストと実モデル統合テストが付いている**。`ThinkingBudgetProcessor` とプリフィル進捗も同時に手に入る | `main` は毎日動く。`branch:` ではなく `revision:` で固定し `Package.resolved` を commit すること |
+| B | タグ 3.31.4 + 自作スプリッタ | リリース版のみを使う方針を保てる | チャンク境界をまたぐ区切り文字など地雷がある |
 
-**本書の推奨は A。** 理由は FR-17 の中核部品に加え、
+**道A を採った。** FR-17 の中核部品に加え、
 VISION に直接効く `ThinkingBudgetProcessor`（6.4節）と、
 第2.4章の「無反応の1.5秒」を潰すプリフィル進捗が `main` にしか無いため。
 
-いずれの場合も、Sophia 側は `ReasoningSplitter` という自前の入口を1つ持ち、
-**内部で公式 API か自作かを切り替える。** 版を替えても呼び出し側が壊れないようにする。
+**`mlx-swift-lm` は revision `d7dc03d8447ee6b42b54a1c5295b4e56ee9274f3` で固定してある。**
+
+#### 実装の構造 — 入口は1つ、中身は2つ
+
+Sophia 側は `ThinkingSeparating` という自前の入口を1つ持ち、**内部で切り替える。**
+版を替えても呼び出し側が壊れない。
+
+| 実装 | いつ使われるか |
+|---|---|
+| `ReasoningEmitterSeparator`（公式 `ReasoningEventEmitter` の被せもの） | モデルが `reasoningConfig` を宣言しているとき |
+| `ThinkingSplitter`（自作） | 宣言していないとき（**フォールバック**） |
+
+> **【重要】Qwen3-8B-4bit では `ThinkingSplitter` は1行も実行されない。**
+> Qwen3 は自分で `QwenReasoningProtocol.qwen3` を宣言し、
+> `LLMModelFactory` がそれを `ModelContext.configuration` に載せるため、
+> 分岐は**常に公式側**を選ぶ。
+>
+> 自作側を残しているのは、(a) 未知のモデルが `<think>` を出す場合の受け皿、
+> (b) 区切り文字の扱いを単体テストで固定しておく対象、の2つの理由による。
+> **`scripts/test-thinking-splitter.swift` の28件は「本番で走らない側」を検証している**
+> ことを承知したうえで残すこと。本番側（公式実装を通した経路）は
+> **実モデルの出力に対してまだ検証していない。**
 
 ```swift
 // エンジン内部。分離してから Chunk に載せ替える
@@ -805,7 +1136,18 @@ for segment in splitter.finalize() { /* 残り */ }
 **【確認済 / MLX_SWIFT 6.4】Qwen3 の `primedInside` は `false`。**
 Qwen3 のテンプレートは `<think>` を先出しせず、モデルがストリーム中に自分で出す。
 **`true` にすると全崩壊する。** DeepSeek-R1 系は逆に `true`。
-汎用に書くなら `promptEndsInsideReasoning(renderedPromptTail:config:)` で判定する。
+
+**実装は `false` を直書きしていない。**
+描画済みプロンプトの**末尾64トークンだけを復号し**、
+`ReasoningEventEmitter.promptEndsInsideReasoning(renderedPromptTail:config:)` で導出している。
+
+> **なぜ直書きしなかったか。** A1 は Qwen3 固定なので直書きでも動く。
+> しかし直書きは**モデルを差し替えた瞬間に静かに壊れる**種類の間違いで、
+> しかも壊れ方が「思考が本文に混ざる」という気づきにくい形になる。
+> 第1章の原則1（エンジンとモデルを差し替え可能に保つ）に対する具体的な代償が
+> 「末尾64トークンの復号1回」なら、払う価値がある。
+> 全文を復号する必要はない（長いと無駄）。`decode(tokenIds:)` は既定で特殊トークンを残すため
+> `<think>` が消えない。
 
 ### 6.3 ON/OFF（FR-18）
 
@@ -840,19 +1182,42 @@ v1.1 の「思考ONなら `maxTokens` を引き上げる」は**予算を増や�
 
 ### 7.1 配置
 
-| 対象 | 場所 | 理由 |
+| 対象 | 場所（A1 の実装） | 理由 |
 |---|---|---|
-| モデル本体（**MLX形式のディレクトリ**） | `Application Support/Sophia/Models/<repo-id>/` | アプリ更新で消えない。アンインストール時に一緒に消せる |
-| 会話履歴DB | `Application Support/Sophia/sophia.db` | 同上 |
+| モデル本体（**MLX形式のディレクトリ**） | **HuggingFace のキャッシュ**（`.../Caches/huggingface/hub/models--<org>--<name>/snapshots/<rev>/`） | `#hubDownloader()` の既定をそのまま使っている。取得済み判定も `HubCache.default` を見る |
+| 会話履歴DB | `Application Support/Sophia/sophia.db` | アプリ更新で消えない。アンインストール時に一緒に消せる |
 
-Swift では `FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, ...)`
-で取る。Electron の `app.getPath('userData')` の置き換えにあたる。
+> **設計案（v2.0）は `Application Support/Sophia/Models/<repo-id>/` と書いていたが、実装はそこへ置いていない。**
+> ライブラリの既定キャッシュに任せている。**Application Support 配下に在るのは `sophia.db` だけ。**
+>
+> 既定に任せた代償は2つある。どちらも A3（モデル管理 / FR-09）で向き合うことになる。
+> - モデルの削除・容量表示を、こちらの管理下にないディレクトリに対して行うことになる
+> - 8.2節の `models` / `model_files` テーブルが持つ `directory` 列の意味が、
+>   「Application Support 配下の相対パス」ではなくなる
+>
+> **`Models/` 配下へ移すなら A3 の独立した作業項目として立てること。** A1 では動かさない。
 
-> **サンドボックス下では実体が変わる。**【未確認】
-> `com.apple.security.app-sandbox` を有効にすると（第11章）、実体は
-> `~/Library/Containers/<bundle-id>/Data/Library/Application Support/Sophia/` になる。
-> **`#hubDownloader()` の既定キャッシュ（`~/.cache/huggingface`）もコンテナ内に落ちるはずだが、確認していない。**
-> A1 で実際のパスを確認し、本節に追記すること。
+会話履歴DBの場所は Swift の
+`FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, ...)` で取る。
+
+> **サンドボックス下では実体が変わる。**
+> `com.apple.security.app-sandbox` を有効にしているため（第11章）、実体は
+> `~/Library/Containers/jp.co.xerographix.sophia/Data/` 配下になる。
+> **これは狙い通りで、OS がアクセス範囲を強制してくれるぶん NFR-01 が強くなる。**
+> パスを直書きしてコンテナの外を指さないこと。
+>
+> | 対象 | 実体 | 確度 |
+> |---|---|---|
+> | `sophia.db` | `.../Data/Library/Application Support/Sophia/sophia.db`（0o700 で作る） | **【確認済 / 実装】** |
+> | モデル | `.../Data/Library/Caches/huggingface/hub/models--mlx-community--Qwen3-8B-4bit/snapshots/<rev>/` | **【確認済 / 実機のスナップショットを実地確認】** |
+>
+> **落ちてくるのは9ファイルで、LICENSE も README も含まれない**
+> （`config.json` / `model.safetensors` / `tokenizer.json` 等）。
+> **A4 で同梱配布に切り替えるなら、ライセンス文と帰属表示を意図的に入れる必要がある**
+> （REQUIREMENTS 未決事項#4 の残る宿題。モデル自体は apache-2.0）。
+>
+> **Caches 配下である点に注意。** OS は空き容量が逼迫したとき Caches を削除しうる。
+> 4.6GB が消えて再取得になる経路が理屈の上では在る。**この挙動は未確認。**
 
 **アプリ本体にモデルを同梱しない**（NFR-06）。4.62GB を `.app` に入れると
 配布サイズ・公証時間・更新コストがいずれも現実的でなくなるため、初回起動時に取得する（FR-07）。
@@ -896,7 +1261,12 @@ Swift では `FileManager.default.url(for: .applicationSupportDirectory, in: .us
 | 一時ファイルへ落とし、検証後に改名（NFR-08） | **ディレクトリ単位になる。**「検証前のものを正規のモデルとして読ませない」という要求は維持する |
 | 空き容量の事前確認 | 維持。必要量 4.62GB を明示して中止する |
 
-### 7.3 推奨モデルの判定（FR-08）
+### 7.3 推奨モデルの判定（FR-08）【**未実装**】
+
+> **A1 には無い。** `ProcessInfo.physicalMemory` も `MLX.GPU.deviceInfo()` も
+> `maxRecommendedWorkingSetBytes()` も、`Sophia/Sources/` から1度も呼んでいない。
+> A1 は `SophiaDefaults.modelID`（`mlx-community/Qwen3-8B-4bit`）の1つを決め打ちで読む。
+> **本節は設計であって現況ではない。** 実装は A3（REQUIREMENTS 第8章）。
 
 `ProcessInfo.processInfo.physicalMemory` から判定する（`os.totalmem()` の置き換え）。
 閾値の根拠は [TUNING.md](TUNING.md) の予算表。
@@ -1030,7 +1400,7 @@ CREATE TABLE model_files (
 |---|---|
 | `ttfr_ms` | 本文の1文字目まで。第2.3章の達成判定 |
 | `prompt_tokens_per_sec` | プリフィル速度。第2章で「生成とは別の指標」と決めた |
-| `thinking_chars` | **第2.1章の未解決（文字数 vs トークン数）を実利用のログから解く** |
+| `thinking_chars` | **第2.1章の未解決（文字数 vs トークン数）を実利用のログから解く。** ただし現状 `GenerationStats` は文字数を保持していない（4.6節）。**列を足す前に、値を落とさず持つ実装が要る** |
 | `stop_reason` | 中断・上限到達を後から数えられる。FR-02 の効き方の検証 |
 | `thinking_enabled` | 思考ON/OFFの実際のコスト差を実ログから出す（VISION の適応度） |
 | `peak_memory_bytes` | ページングとの相関。VISION が最大の雑音源とした問題 |
@@ -1051,59 +1421,85 @@ CREATE TABLE model_files (
 
 ## 9. ディレクトリ構成とアセット
 
+**以下は実ツリー（2026-08-17）。** 設計案の `Core/` / `Features/` / `DesignSystem/` という
+区切りは採らなかった。**層の名前（Inference / Store / UI）で切る方が、
+3.2節の Sendable 境界と一致する**ため。
+
 ```
 Sophia/
-├── Sophia.xcodeproj/            # A1 で新規作成
-├── Sophia/                      # アプリターゲット
-│   ├── SophiaApp.swift          # @main。3.3節の初期化
-│   ├── Sophia.entitlements      # 第11章
-│   ├── Assets.xcassets/         # AppIcon（9.1節）
-│   ├── Core/
-│   │   ├── Inference/
-│   │   │   ├── InferenceEngine.swift   # protocol と共通型（第4章）
-│   │   │   ├── MLXEngine.swift         # MLX 実装（4.2節）
-│   │   │   ├── MockEngine.swift        # UI 先行開発用（4.2節）
-│   │   │   ├── ReasoningSplitter.swift # 思考の分離（6.2節）
-│   │   │   └── Stats.swift             # GenerationStats（4.6節）
-│   │   ├── Models/                     # モデル取得・配置・推奨判定（第7章）
-│   │   └── Store/                      # GRDB（第8章）
-│   ├── Features/
-│   │   ├── Chat/                # ChatView / ChatViewModel / ThinkingPanel / Composer
-│   │   └── Sidebar/
-│   └── DesignSystem/            # 配色トークン・タイポグラフィ（9.2節）
-├── SophiaTests/
+├── Sophia.xcodeproj/
+├── Sophia.entitlements          # 第11章
+├── Info.plist
+├── Sources/
+│   ├── App/                     # SophiaApp.swift（@main）/ RootView.swift
+│   ├── Shared/                  # **層をまたぐ型だけ。読み取り専用として扱う**
+│   │   ├── InferenceEngine.swift    # protocol（4.1節）
+│   │   ├── SophiaMessage.swift      # Sendable な会話1発言（3.2節）
+│   │   ├── Chunk.swift              # 思考と本文を型で分ける（4.1節）
+│   │   ├── ChatOptions.swift        # 生成パラメータ + SophiaDefaults（4.1節 / 4.8節）
+│   │   ├── GenerationStats.swift    # 計測（4.6節）
+│   │   ├── ModelInfo.swift          # EngineCapabilities ほか
+│   │   ├── SophiaError.swift        # FR-11
+│   │   ├── AppInfo.swift / DesignTokens.swift
+│   ├── Inference/               # MLX 実装（4.2節）
+│   │   ├── MLXEngine.swift
+│   │   ├── MLXModelCatalog.swift / MLXErrorMapping.swift
+│   │   ├── ReasoningSeparator.swift # 公式実装の被せもの（6.2節。**本番はこちら**）
+│   │   └── ThinkingSplitter.swift   # 自作。フォールバック（6.2節）
+│   ├── Engine/StubEngine.swift  # 契約の実証・実測に近い速度（4.2節）
+│   ├── Store/                   # GRDB（第8章）
+│   │   ├── SophiaDatabase.swift / SophiaMigrations.swift / Store.swift
+│   │   └── ConversationRecord / MessageRecord / ModelRecord / ProfileRecord
+│   ├── UI/
+│   │   ├── Chat/                # ChatScreen / ChatViewModel / ComposerView / TurnView …
+│   │   ├── Markdown/            # MarkdownText / CodeBlockView / SyntaxHighlighter（FR-06）
+│   │   ├── Mock/MockEngine.swift    # 描画の限界を突く用（4.2節）
+│   │   └── Theme/
+│   └── Resources/Assets.xcassets/   # AppIcon（9.1節）
+├── Tests/                       # 80件
 ├── assets/                      # ロゴ原画とアイコン生成物（9.1節）
 ├── modelfiles/                  # Ollama 用（A0 の資産。アプリからは使わない）
 ├── scripts/                     # bench.py / bench-prompt.py / make-icons.py / serve.sh
 └── docs/
 ```
 
-**`app/`（Electron 実装）は破棄予定。**
-A1 でネイティブ側が起動するまでは参照用に残すが、**新しいコードを足さないこと。**
+> **`Sources/Shared/` は読み取り専用として扱う。**
+> 3人が並列で作業するときの唯一の合意点であり、
+> 型が足りないと感じたら勝手に書き換えず相談する、という約束が実装側のコメントに明記してある。
+> 各層のローカルな型（UI の表示状態など）はここへ置かない。
 
 ### 9.0 依存パッケージ
 
-Xcode の **Package Dependencies** に4つ追加し、ターゲットへ
-`MLX` / `MLXLLM` / `MLXLMCommon` / `MLXHuggingFace` / `HuggingFace` / `Tokenizers` をリンクする
-【確認済 / MLX_SWIFT 1.3〜1.4】。
+Xcode の **Package Dependencies** に**5つ**追加し、ターゲットへ
+`MLX` / `MLXLLM` / `MLXLMCommon` / `MLXHuggingFace` / `HuggingFace` / `Tokenizers` / `GRDB`
+をリンクする【確認済 / MLX_SWIFT 1.3〜1.4】。
 
 | パッケージ | 指定 |
 |---|---|
-| `ml-explore/mlx-swift-lm` | **`revision:` で固定**（6.2節の道Aなら `main` の特定コミット） |
+| `ml-explore/mlx-swift-lm` | **`revision: d7dc03d8447ee6b42b54a1c5295b4e56ee9274f3`**（6.2節の道A） |
 | `ml-explore/mlx-swift` | `.upToNextMinor(from: "0.31.6")`。**`MLX`（`Memory` / `GPU`）は再輸出されないので直接書く** |
-| `huggingface/swift-huggingface` | `from: "0.9.0"` |
-| `huggingface/swift-transformers` | `from: "1.3.0"` |
+| `huggingface/swift-huggingface` | `.upToNextMajor(from: "0.9.0")` |
+| `huggingface/swift-transformers` | `.upToNextMajor(from: "1.3.0")` |
+| **`groue/GRDB.swift`** | `.upToNextMajor(from: "7.11.1")`。会話の永続化（第8章） |
 
 - **`Package.resolved` を commit すること。**【確認済 / MLX_SWIFT 11.2】API が速い速度で変わっている
 - **【確認済】MLX の二重リンクに注意。** `App → MLX` と `App → Framework → MLX` が
   同時に成立すると壊れる。ターゲットを分けるときに踏む
-- 解決される依存は16パッケージ。**NFR-06（本体300MB以内）への影響は【未確認】**（第12章）
+- **解決される依存は17パッケージ**（`Package.resolved` の pins を数えた実数）。
+  **NFR-06（本体300MB以内）への影響は【未確認】**（第12章 / 11.4節）。
+  GRDB が増えたぶん条件は悪化しているが、**依然として実測していない**
 
-**最低 macOS バージョンは未決。**
-`mlx-swift` / `mlx-swift-lm` はいずれも **macOS 14.0** で足りる【確認済 / MLX_SWIFT 第9章】。
-REQUIREMENTS の NFR-07 も「macOS 14 以降」である。
-一方 CLAUDE.md は macOS 15+ を想定と書いている。**SwiftUI 側で macOS 15 の API を使うかで決まる。
-A1 で deployment target を確定し、本節に記録すること。**
+**最低 macOS バージョンは確定した。**
+
+| 項目 | 値 |
+|---|---|
+| `MACOSX_DEPLOYMENT_TARGET` | **14.0** |
+| `SWIFT_VERSION` | **6.0** |
+| `SWIFT_STRICT_CONCURRENCY` | **complete** |
+
+`mlx-swift` / `mlx-swift-lm` はいずれも macOS 14.0 で足りる【確認済 / MLX_SWIFT 第9章】。
+REQUIREMENTS の NFR-07（macOS 14 以降）と一致している。
+**macOS 15 専用の SwiftUI API を使わないこと。** 使った時点でこの表と NFR-07 が食い違う。
 
 ### 9.1 アイコン
 
@@ -1172,7 +1568,7 @@ WCAG 2.1 で算出したコントラスト比の表がそこにある。
 | 第3.1〜3.4節 Chromium のフォント解決 | **無効。** `-apple-system` が効かない等は Chromium 固有の問題 |
 | 第6章 Menu / dialog / contextMenu | **手段が変わる。** SwiftUI の `.commands` / `.confirmationDialog` / `.contextMenu`。**「role: editMenu を省くと Cmd+C が効かない」に相当する落とし穴が SwiftUI にもあるかは【未確認】** |
 | 第7章 やってはいけないこと | **大半が有効。** 特に 7.6「Web の寸法感を持ち込む」は SwiftUI でも同じ罠 |
-| 第8章 現状コードとの差分 | **無効。** `app/` に対する申し送りであり、破棄対象 |
+| 第8章 現状コードとの差分 | **無効。** 存在しない Electron 実装（`app/`）に対する申し送りである |
 
 **[UI_SPEC.md](UI_SPEC.md) は全体がそのまま有効。**
 Open WebUI の DOM を観察した寸法・状態遷移の記録であり、実装技術と無関係である。
@@ -1234,8 +1630,11 @@ LoRA の学習を MLX で行う以上、出力は最初から MLX が読める�
 
 ### 10.3 ベースを Qwen 系とする理由
 
-- **Apache 2.0**。再配布・商用利用が可能で、「単体配布アプリ」の要件と矛盾しない
-  （※ 配布前にモデルカードで最終確認すること。REQUIREMENTS 未決事項#4）
+- **apache-2.0**。再配布・商用利用が可能で、「単体配布アプリ」の要件と矛盾しない。
+  **2026-08-17 に確定。** `Qwen/Qwen3-8B` と `mlx-community/Qwen3-8B-4bit` の
+  両方をモデルカードで確認した（REQUIREMENTS 未決事項#4 は閉じた。詳細は [MODELS.md](MODELS.md)）。
+  **ただしアプリが落としてくるファイルに LICENSE は含まれない**（7.1節）。
+  同梱配布へ切り替えるならライセンス文と帰属表示を意図的に入れること
 - MLX / mergekit / 量子化の各段階で情報と実績が揃っている
 - 8B帯で日本語・コードともに競争力がある（[MODELS.md](MODELS.md)）
 - **【確認済 / MLX_SWIFT 2.2】MLX 公式サンプル `LLMEval` の既定モデルが `Qwen3-8B-4bit`。**
@@ -1274,14 +1673,25 @@ LoRA の学習を MLX で行う以上、出力は最初から MLX が読める�
 
 ### 11.1 Entitlements
 
-**【確認済 / MLX_SWIFT 1.5】公式サンプル `LLMEval.entitlements` の内容。**
+**Sophia の現物（`Sophia/Sophia.entitlements`）は3つ。**
 
 ```xml
 <key>com.apple.security.app-sandbox</key><true/>
-<key>com.apple.security.network.client</key><true/>   <!-- モデル取得のためだけに必要 -->
-<key>com.apple.developer.kernel.increased-memory-limit</key><true/>
-<key>com.apple.security.files.user-selected.read-only</key><true/>
+<key>com.apple.security.network.client</key><true/>            <!-- モデル取得のためだけ -->
+<key>com.apple.security.files.user-selected.read-only</key><true/>  <!-- A3 のモデル管理用 -->
 ```
+
+**【確認済 / MLX_SWIFT 1.5】公式サンプル `LLMEval.entitlements` はこれに加えて
+`com.apple.developer.kernel.increased-memory-limit` を持つ。Sophia は採っていない。**
+
+> **採らなかった理由と、その危うさ。**
+> このキーは iOS 系でメモリ上限を引き上げるためのもので、macOS で 8B/4bit（重み4.6GB）を
+> 動かすのに必要だという確認が取れていない。**必要だと確認できていないものを署名対象に足さない**
+> という判断である。
+> **ただし「不要であることを確認した」わけでもない。**
+> 16GB機でメモリ逼迫による異常終了が出るなら、まずここを疑うこと。【未確認】
+
+**サンドボックスは最初から有効にしてある。** 後から入れると必ず壊れるため。
 
 > **`network.client` は「モデル取得のためだけ」である点を、コードのコメントと
 > 利用者向けの説明の両方に明記すること。** NFR-01（会話を外部に出さない）との関係で
@@ -1308,7 +1718,7 @@ v1.1 のリスク1に対する予防措置は、対象を替えてそのまま�
 
 ### 11.4 NFR-06（本体300MB以内）【未確認】
 
-依存が16パッケージに膨らんでいる【確認済 / MLX_SWIFT 1.3】。
+依存が**17パッケージ**に膨らんでいる（9.0節。GRDB を足したぶん v2.0 の見立てより1つ多い）。
 `swift-nio` / `swift-crypto` は `swift-huggingface`（HTTPクライアント）由来であり、
 **第7.2節の経路C にすれば `swift-huggingface` を外せる。**
 `swift-transformers`（トークナイザ）は外せない。
@@ -1326,22 +1736,26 @@ v1.1 のリスク1に対する予防措置は、対象を替えてそのまま�
 | # | リスク | 影響 | 対策 |
 |---|---|---|---|
 | 1 | **配布経路（署名・公証）が通らない。** 要因が `.node` から **Metal シェーダバンドル（`mlx-swift_Cmlx.bundle`）** へ入れ替わった【未確認】 | 配布不能 | **A2 の時点で、MLX にリンクした空アプリを1度公証まで通す**（11.3節）。A4 で初めて試すと手戻りが大きい。**この対策は v1.1 から変わらない** |
-| 2 | ~~Apple Developer 未加入~~ | — | **解消。加入済み**（REQUIREMENTS 未決事項#1 は閉じてよい） |
+| 2 | ~~Apple Developer 未加入~~ | — | **解消。加入済み**（REQUIREMENTS 未決事項#1 は 2026-08-17 に閉じた） |
 | 3 | 思考モードで本文に到達しない | 応答が空に見える | 第6章。`maxTokens` 自動調整と思考領域の表示。A2 以降は `ThinkingBudgetProcessor`（6.4節） |
 | 4 | 開発機16GBでアプリ+モデルが逼迫 | 開発が進まない | 開発中は Open WebUI と Ollama を落とす。`MLX.Memory.cacheLimit = 20MB`（3.3節） |
 | 5 | ファンレスによる熱制限 | 計測値が再現しない | 比較計測は本体が冷えた状態に揃える（TUNING.md 12章）。**計測時はデバッガを外す**【MLX_SWIFT 落とし穴15】 |
-| 6 | モデルのライセンスが再配布不可 | 配布方式の変更 | 初回ダウンロード方式（FR-07）で再配布に当たらない設計。Qwen3 は Apache 2.0。未決事項#4 |
+| 6 | ~~モデルのライセンスが再配布不可~~ | — | **解消。`Qwen/Qwen3-8B` / `mlx-community/Qwen3-8B-4bit` ともに apache-2.0**（2026-08-17 確認。REQUIREMENTS 未決事項#4 は閉じた）。**残る宿題**: 取得したファイルに LICENSE が含まれないため、同梱配布ならライセンス文と帰属表示を自分で入れる（7.1節） |
 | 7 | アイコン形式が `.icns` から `.icon` へ移行中 | 新OSでアイコンが古く見える | macOS 26 の Icon Composer はレイヤーを渡せばシステムが形状・ライト/ダーク/着色を生成する方式。**Xcode 26 での扱いは【未確認】。** A4 着手時に最新ドキュメントを確認する。`.icns` は当面有効なので現状の生成物は無駄にならない |
 | 8 | 機能追加のたびにプロンプトが肥大する | 入力4,786トークン＝プリフィル34秒。Open WebUI で実際に起きた | 送信トークン数を `GenerationStats.inputTokens` で常時記録し、UIに表示する。予算約1,000トークンを超えたら警告（第2.2章） |
 | 9 | 開発機のメモリ逼迫で計測が壊れる | 同一条件で最大4.9倍のばらつき。設定のA/Bが判定不能になる | 計測前に他アプリを閉じる。`peak_memory_bytes` を毎回記録し、多い回は外れ値として扱う（TUNING.md 測り方の作法 / 8.3節） |
 | **10** | **MLX Swift の API が速い速度で変わる。** 3.x で依存構造が丸ごと変わり、`Evaluate.swift` には既に deprecated が5つある【確認済】 | ある朝突然ビルドが壊れる | **`revision:` で固定し `Package.resolved` を commit する**（9.0節）。`branch: "main"` を使わない。依存更新は独立した作業として行い、更新のたびに MLX_SWIFT.md を取り直す |
-| **11** | **思考分離API（`ReasoningEventEmitter`）がリリース版 3.31.4 に無い**【確認済】 | FR-17 | 道A（`main` を revision 固定）か道B（自作スプリッタ）。**どちらでも FR-17 は満たせる**。自作版は MLX_SWIFT 6.5 にコンパイル確認済みのコードがある（6.2節） |
-| **12** | **Swift / SwiftUI / Swift Concurrency の習熟。** strict concurrency のエラーは初見で意味が読めない | 開発速度。設計を歪める形で回避しがち | **Sendable 境界を 3.2節の1か所に固定する**（`Chat.Message` を外へ出さない）。**詰まったら誤魔化さず「詰まった」と報告する**（CLAUDE.md） |
+| ~~11~~ | ~~思考分離API がリリース版 3.31.4 に無い~~ | — | **解消。道A（`main` を revision `d7dc03d` で固定）を採用し、公式 `ReasoningEventEmitter` で実装済み**（6.2節）。自作 `ThinkingSplitter` はフォールバックとして残る。**残るのはリスク10（`main` 固定そのもの）に吸収される** |
+| **12** | **Swift / SwiftUI / Swift Concurrency の習熟。** strict concurrency のエラーは初見で意味が読めない | 開発速度。設計を歪める形で回避しがち | **Sendable 境界を 3.2節の1か所に固定する**（`Chat.Message` を外へ出さない）。**詰まったら誤魔化さず「詰まった」と報告する** |
 | **13** | **単一プロセスのため、推論のクラッシュがアプリを巻き込む。** Electron の `utilityProcess` 隔離を失った | 会話が失われる | 生成中も逐次 DB へ書く（3.1節 / 第8章）。FR-02 の「既出力を残す」と実装を共通化する |
 | **14** | **GGUF 資産が使えない**【確認済】 | `modelfiles/` とトラックBの出力形式 | MLX形式（safetensors）へ。トラックBは最初から MLX で出す（第10章）。Ollama 側は計測基盤として残す |
 | **15** | **層ごとの実時間計測の方法論が無い**【未確認 / 未解決】。MLX は遅延評価で、`eval()` を挟むと測定行為が対象を壊す | **VISION 第3因子（早期終了）に着手できない** | **A2 で独立した作業項目として方法論を確立する**（4.5節③）。`GPU.startCapture` が代替になるか未検証。**A1 で解こうとしないこと** |
 | **16** | **ビルドが重い。** 初回5分34秒 / `.build` 1.4〜1.5GB【実測】 | 「開発機を強化しない」原則と衝突する | クリーンビルドを避ける。`swift build`（差分約1秒）を型検査に使い、`xcodebuild` は実行時のみ（3.4節） |
-| **17** | **NFR-06（本体300MB以内）の余裕が読めない**【未確認】 | 配布サイズ | 依存16パッケージ。**A2 で測る。**超えるなら経路C で `swift-huggingface` を外す（11.4節） |
+| **17** | **NFR-06（本体300MB以内）の余裕が読めない**【未確認】 | 配布サイズ | 依存17パッケージ。**A2 で測る。**超えるなら経路C で `swift-huggingface` を外す（11.4節） |
+| **18** | **A1 完成条件の実機検証がほぼ残っている**（2026-08-17 追加 / 同日更新）。ビルドとテスト80件は通り、**日本語入力と自己認識の2点は実機で確認できた**が、9つの完成条件（13.2節）のうち実行時の検証記録があるものは無い | 「動いているつもり」で A2 へ進み、土台の欠陥を後段で踏む | **13.2節の9項目を実機で1つずつ潰す。** 特に思考分離（条件5）は、本番で走る経路が実モデル出力に対して未検証（6.2節）。**このリスクが残っている間、A1 を完了と書かないこと** |
+| **19** | **アプリ側の数値が2往復ぶんしか無い**（2026-08-17 追加 / 同日更新）。第2章の実測はすべて Ollama + GGUF。MLX 構成は Debug ビルド（デバッガは非接続）で2往復だけ取れた（2.6節）が、**Release でも冷間/連続の別でもない** | 設計判断の根拠が別ランタイムの値のまま。NFR-03 / NFR-03b の達成可否を2点では判定できない | **2.6節と [BENCH_RESULTS.md](BENCH_RESULTS.md) を埋める。** Release ビルド・デバッガ非接続で取り直す。併せて 4.8節の system プロンプト増分も同じ手順で取る |
+| **21** | **2往復目でプリフィルが9.2倍崩れる**（2026-08-17 追加 / 同日更新）。TTFT 0.97秒 → **11.87秒**で **NFR-03 が破れている**。**デコードは無傷**（−1.3%）なので熱では説明がつかない。有力仮説は**待機中の重みのページアウト**で、コード調査により前提条件（wired していない / 都度ロードではない / `cacheLimit` 20MB）はすべて確認済み（2.6節） | 「初回だけ1秒以内」は満たしていないのと同じ。**体感速度を支配するのはこちら。** 対処が①設定②設計のどちらで済むかも未確定 | **A1 の最優先調査項目。ただし直す前に、静かな状態で再現するかを確かめること**（計測時スワップ4GB使用・並行作業中で、機体の状態を測った可能性がある）。切り分けは対照実験（合間0秒 vs 3〜5分）と `vm_stat` のページイン数差分 ─ 手順は [BENCH_RESULTS.md](BENCH_RESULTS.md)。**`peak_mb` は residency を測らないので判定に使わないこと** |
+| **20** | **思考トークン数の概算が壊れている**（2026-08-17 追加）。実測1点で `think_tok=296` に対し `out=166` ─ **出力全体より思考が多いことは原理的にありえない**。思考が英語のとき 0.5 tok/文字 の係数が約2倍過大に出ている | 思考の費用対効果（VISION の適応度関数）を数字で語れない。TUNING の判断も狂う | **文字数からの概算をやめ、トークナイザで数える。** 直せないなら概算値を出すのをやめる。**壊れた数字を出し続けるより無いほうが良い** |
 
 ---
 
@@ -1350,8 +1764,8 @@ v1.1 のリスク1に対する予防措置は、対象を替えてそのまま�
 | フェーズ | 内容 | 完了条件 | 状態 |
 |---|---|---|---|
 | A0 | ローカルモデル環境と計測基盤 | 実測値を取得し、制約を数値で把握 | **完了** |
-| **A1** | **SwiftUI 骨格 + `MLXEngine` + 思考分離 + 計測** | **CLAUDE.md の完成条件9項目** | **着手中** |
-| A2 | **公証の疎通確認** + 解剖可能性の基盤 + MLX 側の最適化 | 空アプリの公証が通る。層計測の方法論が決まる | 未着手 |
+| **A1** | **SwiftUI 骨格 + `MLXEngine` + 思考分離 + 計測** | **13.2節の9項目を実機で確認できる** | **着手中**（実装済み・検証中） |
+| A2 | **公証の疎通確認** + 解剖可能性の基盤 + ローカル環境の参照・操作（FR-19〜22） | 空アプリの公証が通る。層計測の方法論が決まる | 未着手 |
 | A3 | モデル管理・履歴永続化・全文検索 | 受入条件2〜7を満たす | 未着手 |
 | A4 | パッケージング・署名・公証 | 受入条件1を満たす | 未着手 |
 | 並行 | 独自モデル開発（第10章） | アプリの進行と独立 | 未着手 |
@@ -1367,18 +1781,50 @@ v1.1 の A2 は「`LlamaCppEngine` へ差し替え + 公証の疎通確認」だ
 |---|---|---|
 | 1 | **公証の疎通確認**（Metal シェーダバンドルを含む空アプリ） | リスク1。v1.1 から唯一残る A2 の項目 |
 | 2 | **層ごとの計測方法論の確立** | リスク15。**VISION 第3因子の前提** |
-| 3 | **`ChatSession` の KVキャッシュ持ち越しの実測** | VISION 第1因子。2ターン目以降のプリフィルがどれだけ減るか【未確認 / MLX_SWIFT 4.2】 |
+| 3 | **`ChatSession` の KVキャッシュ持ち越しの実測** | VISION 第1因子。2ターン目以降のプリフィルがどれだけ減るか【未確認 / MLX_SWIFT 4.2】。**system プロンプト（4.8節）が最も効く部分** |
 | 4 | `ThinkingBudgetProcessor` / `kvScheme = "turbo8v3"` の効果測定 | 6.4節 / 7.4節。16GB機のメモリ逼迫に直接効く見込み |
 | 5 | バイナリサイズの測定と、経路C（オフライン読み込み）の検討 | リスク17 / 11.4節。NFR-01 を entitlement で保証できる |
+| **6** | **ツール実行層の設計と実装（FR-19〜22）** | **本書に1行も設計が無い。** 注入方針（FR-21）・承認フロー（FR-20）・監査ログのスキーマ（FR-22）を起こす。**REQUIREMENTS は A2 の中心スコープと呼んでいる** |
+| **7** | **思考の量を実測で持つ（2.1節の未解決）** | `thinkingTokens` が常に概算で、生の文字数も残らない（4.6節）。どちらか一方を持てば解ける |
+| **8** | **役割の切替（FR-05）** | `ProfileRecord` は在るが読み手がいない。`engineMessages()` の読み先を `SophiaDefaults.systemPrompt` から差し替える（4.8節）。**その際、DB に system 行を書くかを決めること** |
 
-### 13.2 他文書への申し送り（**本書では変更していない**）
+### 13.2 A1 の完成条件（9項目）
+
+**参照先だった `CLAUDE.md` はリポジトリに存在しない。** 実体を本節へ移した。
+[MLX_SWIFT.md](MLX_SWIFT.md) 第0章の表は**同じ9項目に対する「MLX 側が可能か」の事前調査**であって、
+実装状況でも検証状況でもない。混同しないこと。
+
+| # | 条件 | 対応要件 | 現況（2026-08-17） |
+|---|---|---|:--|
+| 1 | Xcode でビルドでき、起動する | — | ビルド成功は確認済み。**起動の確認記録は無い** |
+| 2 | 日本語がトークン確定ごとに逐次表示される | FR-01 | 実装済み・**未検証** |
+| 3 | 生成中も UI が固まらない | NFR-02 | 実装済み・**未検証** |
+| 4 | 生成を中断でき、既出力が残る | FR-02 | 実装済み・**未検証**（プリフィル中の中断と生成中の中断は別経路。両方見ること） |
+| 5 | 思考テキストを本文と分けて表示する | FR-17 | 実装済み・**未検証**（本番で走るのは公式実装側。6.2節） |
+| 6 | 思考モードを ON/OFF できる | FR-18 | 実装済み・**未検証** |
+| 7 | コードブロックのシンタックスハイライト | FR-06 | **コードで確認できる**（自前実装。外部ライブラリも通信も使わない） |
+| 8 | UI にバージョン表示 | — | **コードで確認できる** |
+| 9 | TTFT / tok/s を計測して表示する | FR-14 | 実装済み・**未検証**（概算が混じる箇所は 4.6節の表） |
+
+> **9項目のうち、実装が無いものは0。コードだけで満たしていると言えるのは7と8の2つ。
+> 残り7項目は実機で動かさないと判定できない。**
+> **実行時検証の記録は9項目とも無い。** これがリスク18 である。
+>
+> 計測（条件9）を見るには `make app-run`（= `open`）では届かない。
+> LaunchServices 経由だと fd 0/1/2 が `/dev/null` になり、`[STATS]` 行が1バイトも残らない
+> （`log stream` でも拾えない ─ 生の `write(2)` のため）。**`make app-stats` を使う。**
+
+### 13.3 他文書への申し送り（**本書では変更していない**）
 
 | 文書 | 更新が必要な箇所 |
 |---|---|
-| [REQUIREMENTS.md](REQUIREMENTS.md) | 第8章 A1 行の「Electron骨格。開発用エンジン（Ollama）」/ A2 行の「配布用エンジンへ差し替え」。第4.2節「ネイティブモジュール（`.node`）」。第3章 用語の「GGUF」。未決事項#1（加入済みで閉じられる） |
 | [ROADMAP.md](ROADMAP.md) | 第1章 トラックAの A1 / A2 の内容。トラックBの成果物形式（GGUF → MLX形式） |
 | [UI_NATIVE.md](UI_NATIVE.md) | Electron 前提の節。**削除ではなく、9.3節の有効範囲表を頭に置く形が望ましい**（実測値そのものは資産である） |
-| [TUNING.md](TUNING.md) | 第11章「MLXバックエンド」が「効果：中 / Apple Silicon限定」の1項目として書かれている。**本命になったので位置づけを上げる** |
+| [TUNING.md](TUNING.md) | **第10章「システムプロンプトは `make models` で焼き直す」がアプリには当てはまらない**（4.8節）。第11章「MLXバックエンド」は Ollama 経由の MLX の話であり、アプリの MLX Swift とは別物である旨の注記が要る |
+| [MODELS.md](MODELS.md) | アプリが使う `mlx-community/Qwen3-8B-4bit` の記載が無い。ライセンス（apache-2.0）と、落ちてくる9ファイルに LICENSE が含まれない事実の記録先 |
+
+> **REQUIREMENTS.md への申し送りは 2026-08-17 に消化された**（同 v1.1）。
+> 第8章の段階表・第3章 用語・第4.2節・未決事項#1/#4 はいずれも書き換え済み。
 
 ---
 
