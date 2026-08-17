@@ -50,6 +50,40 @@ actor MLXEngine: InferenceEngine {
     /// **重みは 4.62GB ある。** 二重に走らせると 9GB を掴んで確実に落ちる。
     private var isLoading = false
 
+    // MARK: - MLX 側のメモリ会計（`[MEM]` 計測点）
+
+    /// 段階ごとの `MLX.Memory.snapshot()`。**古い順に積む。**
+    ///
+    /// 何を測っているか・なぜ `ProcessMetrics` の代わりにならないかは
+    /// ファイル末尾の `MLXMemoryReading` の解説に集めてある。**先にそれを読むこと。**
+    ///
+    /// 溜め込む理由は1つで、**プリフィル完了の瞬間は actor の外（MLX の計算スレッド）で
+    /// 起きる**ため、その場で読み手へ渡せないからである。いったんここへ積み、
+    /// `drainMemoryTrace()` で取り出す。
+    private var memoryTrace: [MLXMemoryReading] = []
+
+    /// 次に振る通し番号。**取り出しても戻さない**ので、
+    /// 読み手は `seq` の飛びを見れば「取りこぼした区間がある」と分かる。
+    private var memoryReadingCount = 0
+
+    /// 直前の1点。`[MEM]` 行の差分（`since=`）の基準に使う。
+    /// `memoryTrace` を空にしても消さない ── 取り出しの前後で差分の基準が変わると読めなくなる。
+    private var lastMemoryReading: MLXMemoryReading?
+
+    /// 生成のあとに `MLX.Memory.clearCache()` を呼ぶか。**既定は無効。**
+    ///
+    /// 有効にすると `cache_mb` が本当にキャッシュだったのかを切り分けられる
+    /// （`cacheLimit` は20MBなので、理屈では大きく減りようが無い。
+    ///  **それでも減るなら前提のほうが間違っている**）。
+    ///
+    /// **既定を有効にしてはいけない。** 捨てたバッファは次の生成で確保し直しになり、
+    /// その代金がプリフィル時間に乗る ── いま測ろうとしている当のものが動く。
+    /// 初期値は `SOPHIA_MEM_CLEAR_CACHE=1`、実行中の切り替えは
+    /// `setClearsCacheAfterGeneration(_:)`（プローブ用）。
+    /// （`Self` ではなく型名で書いてある。ストアドプロパティの既定値式で `Self` を
+    ///   参照すると Swift のバージョンによって弾かれるため。）
+    private var clearsCacheAfterGeneration = MLXEngine.clearsCacheAfterGenerationByDefault
+
     init() {
         // 起動時の1度きり。`static let` なので何度 init しても1回しか走らない。
         _ = Self.runtimeConfigured
@@ -68,6 +102,47 @@ actor MLXEngine: InferenceEngine {
         MLX.Memory.cacheLimit = SophiaDefaults.mlxCacheLimitBytes
         return true
     }()
+
+    // MARK: - 計測の入切（環境変数）
+
+    /// 段階ごとのスナップショットを**記録するか**。
+    ///
+    /// **既定は無効。** 通常利用でログが増えるのを避けるだけでなく、
+    /// 記録そのものを走らせない（`snapshot()` は安いが、無料ではない）。
+    ///
+    /// | 条件 | 効果 |
+    /// |---|---|
+    /// | `SOPHIA_LOG_MEM=1` | 記録する ＋ `[MEM]` 行を stderr へ出す |
+    /// | `SOPHIA_PROBE=1`   | 記録する（**行は出さない**） |
+    ///
+    /// `SOPHIA_PROBE=1` で記録だけ有効にしているのは、`PrefillProbeTests` が
+    /// 取り出して `[PROBE-MLX]` 行として自分で出すからである。
+    /// **両方が出すと同じ数字が2組ログに並び、grep の結果が二重になる。**
+    /// プローブ側の行を正とするのは `make probe` が `^\[PROBE` しか端末へ映さないため
+    /// （`[MEM]` 行はログファイルには入るが画面には出ない）。
+    ///
+    /// `let` にしてあるので**プロセス起動時の値で固定**される。
+    /// 途中で環境変数が変わっても計測条件が動かない ── 計測の道具としてはそれが正しい。
+    private static let memoryProbeRecords: Bool = {
+        let environment = ProcessInfo.processInfo.environment
+        return environment["SOPHIA_LOG_MEM"] == "1" || environment["SOPHIA_PROBE"] == "1"
+    }()
+
+    /// `[MEM]` 行を stderr へ出すか。**`SOPHIA_LOG_MEM=1` のときだけ。**
+    private static let memoryProbeWritesLog: Bool = {
+        ProcessInfo.processInfo.environment["SOPHIA_LOG_MEM"] == "1"
+    }()
+
+    /// `clearsCacheAfterGeneration` の初期値。**既定は無効**（理由は同プロパティ）。
+    private static let clearsCacheAfterGenerationByDefault: Bool = {
+        ProcessInfo.processInfo.environment["SOPHIA_MEM_CLEAR_CACHE"] == "1"
+    }()
+
+    /// 記録が有効か。プローブ側が「取れないのに待つ」のを避けるために公開している。
+    ///
+    /// `actor` の static は元から隔離されていないので `nonisolated` は付けない
+    /// （インスタンスの `identifier` と違い、ここでは冗長になる）。
+    static var isMemoryProbeEnabled: Bool { memoryProbeRecords }
 
     // MARK: - InferenceEngine（問い合わせ）
 
@@ -125,6 +200,9 @@ actor MLXEngine: InferenceEngine {
         reasoning = nil
         // 重みを手放したあとにキャッシュを返す。16GB機では効く。
         MLX.Memory.clearCache()
+        // **「全部手放した状態」の基準点。** ここでもなお `active_mb` が大きいなら、
+        // MLX がまだ握っているものがある ＝ 参照が残っている（＝ロード側のリークを疑う）。
+        recordMemory(.unloadEnd)
     }
 
     // MARK: - InferenceEngine（生成）
@@ -176,6 +254,12 @@ actor MLXEngine: InferenceEngine {
             if container != nil {
                 unload()
             }
+
+            // **ロードの基準点。** ここを「関数の入口」ではなく
+            // 「本当に読み込む直前」に置いたのは、上の2つの早期経路
+            // （同じモデルが既に載っている／別モデルを `unload()` した）を通ったあとの
+            // 値でないと基準にならないため。`load_begin` と `load_end` は必ず対で出る。
+            recordMemory(.loadBegin)
 
             let configuration = MLXModelCatalog.configuration(for: modelID)
             let alreadyOnDisk = MLXModelCatalog.isDownloaded(modelID)
@@ -239,6 +323,12 @@ actor MLXEngine: InferenceEngine {
             info.supportsThinking = declaredReasoning != nil
             current = info
 
+            // **ロードで何が載ったか。** 重みは 4.62GB なので、
+            // `d_active_mb` がその桁に届いていれば「重み＝MLXのアロケーション」と読める。
+            // 逆にここが 4.62GB 程度で収まっているのに OS 側のフットプリントが 9GB あるなら、
+            // **差の約4.4GB は MLX のアロケーションではない**（＝ここでは説明できない）。
+            recordMemory(.loadEnd)
+
             continuation.yield(LoadProgress(
                 stage: .ready, fraction: 1, detail: "準備できました"))
             continuation.finish()
@@ -277,6 +367,10 @@ actor MLXEngine: InferenceEngine {
         isGenerating = true
         defer { isGenerating = false }
 
+        // `defer` は**逆順**に走るので、これは `isGenerating = false` より先に動く。
+        // 生成中フラグが立っている間に測り終える ＝ 次の生成と窓が重ならない。
+        defer { finishMemoryMeasurement() }
+
         // ピークメモリの計測窓をこの生成に絞る。
         //
         // `Memory.peakMemory` は**プログラム開始からの最大値**なので、
@@ -288,6 +382,15 @@ actor MLXEngine: InferenceEngine {
         // （上の `isGenerating` がそれを担保している）。
         // ロードと生成が重なると汚れるが、A1 の使い方では重ならない。
         MLX.Memory.peakMemory = 0
+
+        // **この生成の基準点。** ピークをリセットした**あと**に取るのが要点で、
+        // ここでの `peak_mb` は「リセット直後の値」＝ほぼ `active_mb` になる。
+        // 以降の段階の `d_peak_mb` が、この生成だけで押し上げた分になる。
+        recordMemory(.generateBegin)
+
+        // プリフィル完了の瞬間を拾うための箱（詳細はファイル末尾 `PrefillMemoryProbe`）。
+        // **actor の外から書かれる**ので、ここでは受け皿を用意するだけ。
+        let prefillProbe = PrefillMemoryProbe(enabled: Self.memoryProbeRecords)
 
         // 中断された場合でも計測値を組み立てられるよう、`do` の外に置く。
         // 送信前の概算で初期化し、`prepare` が済んだら実測値で上書きする。
@@ -352,6 +455,10 @@ actor MLXEngine: InferenceEngine {
             configured.prefill.progress = { processed, total in
                 continuation.yield(.prefill(PrefillProgress(
                     processedTokens: processed, totalTokens: total)))
+                // **本丸の計測点。** ここは actor の外（MLX の計算スレッド）なので、
+                // 直接 `recordMemory` を呼べない（`@Sendable` クロージャから
+                // actor 隔離の状態には触れない）。箱へ落として actor 側で拾う。
+                prefillProbe.record(processed: processed, total: total)
             }
 
             // `var` のままだと `@Sendable` クロージャに捕まえられない
@@ -374,6 +481,24 @@ actor MLXEngine: InferenceEngine {
                     components: components)
             }
 
+            // --- プリフィル完了の1点を回収する -------------------------------------
+            //
+            // **ここで拾えるのは、プリフィルが `perform` の内側で終わっているから。**
+            // `MLXLMCommon.generate` は `TokenIterator` を**先に**組み立ててから
+            // ストリームを返す（Evaluate.swift の `generate(input:cache:...)`）。
+            // プリフィルはその `init` の中で同期的に走るので、この行に来た時点で完了している。
+            //
+            // ただし箱に入っているのは「最後に届いた進捗の時点」であって、
+            // **必ずしも `processed == total` ではない。**
+            //   - `.tokens` 経路 … 最終フォワードのあとに `progress(total, total)` が鳴る
+            //     （Evaluate.swift:876）。ただしその直前は `asyncEval` なので、
+            //     **計算が発行済み・完了前**の可能性がある ＝ 確保が出揃っていないことがある
+            //   - `.logits` 経路 … 終端の通知が無く、最後のチャンク時点で止まる
+            // だから `prefill_processed` / `prefill_total` を行に載せてある。
+            // **どこまで進んだ時点の値なのかを読み手が判断できないと、この数字は使えない。**
+            // 出揃った側が要るなら次の `first_token` を見ること。
+            if let reading = prefillProbe.take() { appendMemory(reading) }
+
             // --- 断片を流す -------------------------------------------------------
             //
             // **間引かない。** 受け取った断片をそのまま全件流す。
@@ -383,10 +508,20 @@ actor MLXEngine: InferenceEngine {
             // 1文字が複数トークンにまたがる場合、Unicode 境界が揃うまで出力を保留する
             // （`NaiveStreamingDetokenizer`）。文字化けした断片が画面に出ないのはこのため。
             var info: GenerateCompletionInfo?
+            var sawFirstChunk = false
 
             for await item in stream {
                 switch item {
                 case .chunk(let text):
+                    // **確保が出揃った側の計測点。** 断片が復号されて届いた ＝
+                    // プリフィルの最終フォワードも最初のデコードも `eval` が済んでいる。
+                    // `prefill_end` が下限側（発行済み・完了前を含む）なのに対して、
+                    // こちらは上限側（デコード1ステップぶんを余分に含む）である。
+                    // **2点で挟むのが目的**で、どちらか片方は必ず外れる。
+                    if !sawFirstChunk {
+                        sawFirstChunk = true
+                        recordMemory(.firstToken)
+                    }
                     for segment in separator.process(text) {
                         emit(segment, clock: &clock, into: continuation)
                     }
@@ -564,6 +699,98 @@ actor MLXEngine: InferenceEngine {
         GenerationComponents()
     }
 
+    // MARK: - 計測点の記録と取り出し
+
+    /// 溜まった計測点を**取り出して空にする。**
+    ///
+    /// 空にするのは、読み手（`PrefillProbeTests`）が「前回以降に増えたぶん」だけを
+    /// 往復ごとに出せるようにするため。取りこぼしは `seq` の飛びで検出できる。
+    ///
+    /// 呼ばれないまま生成を繰り返しても `memoryTraceCapacity` で頭打ちになる
+    /// ── **計測のための配列がメモリを食う**のは本末転倒なので上限を置いてある。
+    func drainMemoryTrace() -> [MLXMemoryReading] {
+        let drained = memoryTrace
+        memoryTrace.removeAll(keepingCapacity: true)
+        return drained
+    }
+
+    /// 生成のあとに `MLX.Memory.clearCache()` を呼ぶかを切り替える。**計測専用。**
+    ///
+    /// アプリの通常経路からは呼ばないこと。呼ぶと次の生成が再確保の代金を払い、
+    /// `prefill_s` が伸びる ── 退避の時定数を測っている最中にこれをやると、
+    /// **測定行為が現象を作ってしまう。**
+    func setClearsCacheAfterGeneration(_ enabled: Bool) {
+        clearsCacheAfterGeneration = enabled
+    }
+
+    /// 溜め込みの上限。超えたら古いほうから捨てる。
+    private static let memoryTraceCapacity = 256
+
+    /// いまの `MLX.Memory.snapshot()` を1点取って積む。記録が無効なら何もしない。
+    @discardableResult
+    private func recordMemory(
+        _ stage: MLXMemoryReading.Stage,
+        prefill: (processed: Int, total: Int)? = nil
+    ) -> MLXMemoryReading? {
+        guard Self.memoryProbeRecords else { return nil }
+        return appendMemory(captureMLXMemory(stage: stage, prefill: prefill))
+    }
+
+    /// 外（MLX の計算スレッド）で取った1点を積む。通し番号はここで振る。
+    ///
+    /// **番号を actor 側で振るのが要点。** 取った場所がどこであれ、
+    /// 積まれた順＝観測順であることが番号で保証される。
+    @discardableResult
+    private func appendMemory(_ reading: MLXMemoryReading) -> MLXMemoryReading {
+        var stamped = reading
+        stamped.sequence = memoryReadingCount
+        memoryReadingCount += 1
+
+        memoryTrace.append(stamped)
+        if memoryTrace.count > Self.memoryTraceCapacity {
+            memoryTrace.removeFirst(memoryTrace.count - Self.memoryTraceCapacity)
+        }
+
+        if Self.memoryProbeWritesLog {
+            writeMemoryLine(stamped, since: lastMemoryReading)
+        }
+        lastMemoryReading = stamped
+        return stamped
+    }
+
+    /// `[MEM]` 行を stderr へ1行で吐く。
+    ///
+    /// **`print` を使わない。** `ChatViewModel.logMeasurement` の `[STATS]` 行と
+    /// 同じ経路（生の `write(2)`）に揃えてあり、`2> ログ` でそのまま拾える。
+    /// キーの並びも `key=value` を空白区切り ── **値に空白を入れないこと。**
+    private func writeMemoryLine(_ reading: MLXMemoryReading, since earlier: MLXMemoryReading?) {
+        var fields = [
+            "stage=\(reading.stage.rawValue)",
+            "seq=\(reading.sequence)",
+            "model=\(current?.id ?? "-")",
+            reading.logFields,
+        ]
+        if let earlier {
+            fields.append("since=\(earlier.stage.rawValue)")
+            fields.append(reading.deltaFields(since: earlier))
+        }
+        FileHandle.standardError.write(
+            Data("[MEM] \(fields.joined(separator: " "))\n".utf8))
+    }
+
+    /// 生成の終わりで必ず1回だけ通る後始末。**`performChat` の `defer` から呼ぶ。**
+    ///
+    /// `defer` に置いたのは、正常終了・中断・失敗の**3経路すべて**で同じ点を測るため。
+    /// 経路ごとに書くと、いちばん知りたい異常時にだけ計測が抜ける。
+    private func finishMemoryMeasurement() {
+        recordMemory(.generateEnd)
+
+        // ここから先は**切り替えたときだけ。** 既定では素通りする。
+        guard clearsCacheAfterGeneration else { return }
+        MLX.Memory.clearCache()
+        recordMemory(.afterClearCache)
+    }
+
     // MARK: - 小物
 
     private static func stopReason(
@@ -586,6 +813,234 @@ actor MLXEngine: InferenceEngine {
         formatter.allowedUnits = [.useGB]
         formatter.countStyle = .file
         return formatter.string(fromByteCount: bytes)
+    }
+}
+
+// =============================================================================
+//  MLX 側のメモリ会計 ── 「MLX が何をどれだけ確保しているか」だけを測る
+// -----------------------------------------------------------------------------
+//  ## なぜ `ProcessMetrics`（RSS / footprint）ではなく `MLX.Memory` なのか
+//
+//  **問いが違うからである。** いま追っているのは次の食い違いで、
+//
+//  | | 値 |
+//  |---|--:|
+//  | モデルの重み | 4.62 GB |
+//  | 生成中のフットプリント | 約 9 GB |
+//  | うち `IOAccelerator (graphics)` ＝ Metal のバッファ | 8,952 MB |
+//
+//  **余分な約4.4GB が何なのか分かっていない。**
+//  この問いは2つに割れる ── 「MLX が確保しているのか」と「物理RAMに載っているのか」。
+//
+//  | 知りたいこと | 読むべき指標 | このファイルの担当 |
+//  |---|---|---|
+//  | **何をどれだけ確保したか** | `MLX.Memory.snapshot()` | **これ** |
+//  | 確保したものが物理RAMにあるか | `ProcessMetrics`（RSS / footprint） | 別ファイル |
+//
+//  これまで使ってきた3つの指標は、**3つとも前者の問いに答えていなかった。**
+//
+//  | 指標 | 何を外したか |
+//  |---|---|
+//  | `MLX.Memory.peakMemory` 単独 | プログラム開始以来の**アクティブの最大値**しか無く、内訳（active／cache）が無い |
+//  | `RSS` | **`IOAccelerator` を数えない。** Metal のバッファが丸ごと視界の外 |
+//  | `TASK_EVENTS_INFO.pageins` | compressor からの伸長と GPU フォルトを数えない |
+//
+//  ## なぜこれを residency の証拠に使ってはいけないのか ── **ここを取り違えると同じ誤診に戻る**
+//
+//  `MLX.Memory` が数えているのは**アロケータの帳簿**である。
+//  **そのページが物理RAMにあるかスワップにあるかを一切知らない。**
+//  4.62GB の重みが全部スワップへ落ちていても、`activeMemory` は1バイトも動かない。
+//
+//  この取り違えは既に一度、実際に誤診を生んでいる
+//  （BENCH_RESULTS.md 2026-08-16 の「ピークメモリが+40MBしか動いていないので
+//  メモリ不足では説明がつかない」は**後に撤回された**）。
+//  **`ProcessMetrics` の解説と対で読むこと** ── あちらの冒頭には
+//  「`MLX.Memory.snapshot()` へ置き換えないこと」と書いてある。逆もまた真である。
+//
+//  > **併読するものであって、代替ではない。**
+//  > - `MLX.Memory` が小さいのに footprint が大きい → **MLX 以外**が確保している
+//  >   （Metal のドライバ側、コンパイル済みシェーダ、Foundation Models など）
+//  > - `MLX.Memory` も footprint も大きいのに RSS が小さい → 退避が進んでいる
+//  > - `MLX.Memory` が大きい → MLX が確保している。**内訳を `active` と `cache` で割る**
+//
+//  ## `activeMemory` と `cacheMemory` の割り方が、今回の分岐そのもの
+//
+//  MLX の解説（`Memory.swift` 冒頭）はこう言っている ──
+//  `activeMemory` ＋ `cacheMemory` ＝ MLX が確保した総量。
+//  `activeMemory` は生きている `MLXArray` が握っている分、
+//  `cacheMemory` は**解放済みだが OS へ返さずプールしてある分**である。
+//
+//  `SophiaDefaults.mlxCacheLimitBytes` は 20MB に設定してあるので、
+//  **理屈の上では `cacheMemory` は20MBを大きく超えないはず**である。
+//  だから切り分けはこうなる。
+//
+//  | 観測 | 読み |
+//  |---|---|
+//  | `cache_mb` が20MB程度 かつ `active_mb` が約4.6GB | MLX は重みしか持っていない。**余分な4.4GBは MLX の外** |
+//  | `cache_mb` が数GB | `cacheLimit` が効いていない。**前提のほうが間違っている** |
+//  | `after_clear_cache` で大きく減る | 同上。減った分はキャッシュだった |
+//  | `after_clear_cache` で減らない | live なアロケーション。重みか KV キャッシュ |
+//
+//  **最後の2行のために `clearCache()` の切り替えを用意してある**
+//  （`MLXEngine.setClearsCacheAfterGeneration(_:)` ／ `SOPHIA_MEM_CLEAR_CACHE=1`）。
+// =============================================================================
+
+/// `MLX.Memory.snapshot()` を1点取ったもの。**MLX の帳簿だけを映す**（residency は映さない）。
+///
+/// 何のためにあるかは直上の解説を読むこと。**この型を residency の証拠に使わないこと。**
+struct MLXMemoryReading: Sendable, Equatable {
+
+    /// どの時点の1点か。**stage の意味を勝手に変えないこと** ── 過去のログが読めなくなる。
+    enum Stage: String, Sendable {
+        /// ロードに入る直前（早期経路を抜けたあと）。ロードの基準。
+        case loadBegin = "load_begin"
+        /// 重みが載った直後。**ロードで何が載ったか。**
+        case loadEnd = "load_end"
+        /// 生成に入る直前。`peakMemory` をリセットした**あと**。生成の基準。
+        case generateBegin = "generate_begin"
+        /// プリフィルの最後の進捗が届いた時点。**本丸。ただし下限側**（`prefill_processed` を必ず見ること）。
+        case prefillEnd = "prefill_end"
+        /// 最初の断片が復号されて届いた時点。**上限側**（デコード1ステップを含む）。
+        case firstToken = "first_token"
+        /// 生成が終わった直後（正常・中断・失敗のいずれでも通る）。
+        case generateEnd = "generate_end"
+        /// `MLX.Memory.clearCache()` の直後。**切り替えたときだけ出る。**
+        case afterClearCache = "after_clear_cache"
+        /// `unload()` の直後。全部手放した状態の基準。
+        case unloadEnd = "unload_end"
+    }
+
+    var stage: Stage
+    /// 観測順の通し番号。**飛んでいたら取りこぼした区間がある。**
+    var sequence: Int = 0
+    /// 生きている `MLXArray` が握っているバイト数（`Memory.activeMemory`）。
+    var activeMemory: Int
+    /// 解放済みだがプールに残っているバイト数（`Memory.cacheMemory`）。
+    var cacheMemory: Int
+    /// プログラム開始（または直近のリセット）以来のアクティブの最大値（`Memory.peakMemory`）。
+    var peakMemory: Int
+    /// `prefillEnd` のときだけ入る。**どこまで進んだ時点の値なのか。**
+    var prefillProcessed: Int? = nil
+    /// 同上、入力トークンの総数。`prefillProcessed == prefillTotal` でなければ途中の値である。
+    var prefillTotal: Int? = nil
+
+    /// MLX が確保している総量。**MLX の解説どおり active + cache。**
+    /// 4.62GB という重みのサイズと直接並べられるのはこの値である。
+    var totalMemory: Int { activeMemory + cacheMemory }
+
+    /// 絶対値の `key=value` 列。
+    ///
+    /// `peak_mb` は `[STATS]` / `[PROBE]` 行の同名キーと**同じ意味**（MLX の `peakMemory`）に
+    /// 揃えてある。キー名の意味を行ごとに変えないための約束である。
+    /// 単位を MiB にしてあるのも同じ理由（BENCH_RESULTS.md の表がすべて MB 表記）。
+    var logFields: String {
+        var fields = [
+            "active_mb=\(Self.megabytes(activeMemory))",
+            "cache_mb=\(Self.megabytes(cacheMemory))",
+            "total_mb=\(Self.megabytes(totalMemory))",
+            "peak_mb=\(Self.megabytes(peakMemory))",
+        ]
+        // プリフィル以外の段階では出さない。**無意味なキーを毎行並べない。**
+        if let prefillProcessed, let prefillTotal {
+            fields.append("prefill_processed=\(prefillProcessed)")
+            fields.append("prefill_total=\(prefillTotal)")
+        }
+        return fields.joined(separator: " ")
+    }
+
+    /// 差分の `key=value` 列。**符号を必ず付ける**（`ProcessMetricsDelta.logFields` と同じ約束）。
+    /// 絶対値のキーとは重ならないので、同じ行に並べても曖昧にならない。
+    func deltaFields(since earlier: MLXMemoryReading) -> String {
+        func signed(_ now: Int, _ before: Int) -> String {
+            String(format: "%+.1f", Double(now - before) / 1_048_576)
+        }
+        return [
+            "d_active_mb=\(signed(activeMemory, earlier.activeMemory))",
+            "d_cache_mb=\(signed(cacheMemory, earlier.cacheMemory))",
+            "d_total_mb=\(signed(totalMemory, earlier.totalMemory))",
+            "d_peak_mb=\(signed(peakMemory, earlier.peakMemory))",
+        ].joined(separator: " ")
+    }
+
+    /// MiB 表記。`ProcessMetrics` の `megabytes` と同じ 1_048_576 で割る。
+    /// **桁を揃えないと突き合わせのたびに換算ミスが出る。**
+    private static func megabytes(_ bytes: Int) -> String {
+        String(format: "%.1f", Double(bytes) / 1_048_576)
+    }
+}
+
+/// いまの `MLX.Memory.snapshot()` を1点取る。
+///
+/// `activeMemory` / `cacheMemory` / `peakMemory` を個別に3回読まず `snapshot()` を使うのは、
+/// **3つが同じ瞬間の値であることを保証するため。**
+/// プリフィル中に個別に読むと、読んでいる間に確保が進んで内訳が食い違う。
+private func captureMLXMemory(
+    stage: MLXMemoryReading.Stage,
+    prefill: (processed: Int, total: Int)? = nil
+) -> MLXMemoryReading {
+    let snapshot = MLX.Memory.snapshot()
+    return MLXMemoryReading(
+        stage: stage,
+        activeMemory: snapshot.activeMemory,
+        cacheMemory: snapshot.cacheMemory,
+        peakMemory: snapshot.peakMemory,
+        prefillProcessed: prefill?.processed,
+        prefillTotal: prefill?.total)
+}
+
+/// プリフィルの進捗コールバックから届いた**最後の1点**だけを持つ箱。
+///
+/// ## なぜ箱が要るのか（actor に直接書けない）
+///
+/// `GenerateParameters.prefill.progress` は `@Sendable (Int, Int) -> Void` で、
+/// **MLX の計算スレッドから同期的に呼ばれる。** `MLXEngine` は actor なので、
+/// そこから隔離された状態へは触れない（触ろうとすると Swift 6 の strict concurrency が弾く）。
+/// `await` で入るわけにもいかない ── コールバックは同期であり、
+/// **待たせた時間がそのままプリフィルの実測時間に乗ってしまう。**
+///
+/// そこで「取るのは外・積むのは actor」に割った。
+/// 通し番号は積む側（`MLXEngine.appendMemory`）が振るので、観測順は保たれる。
+///
+/// ## なぜ最後の1点だけなのか
+///
+/// プリフィルは512トークン単位で刻まれ、その回数だけコールバックが鳴る。
+/// 全部持つと長いプロンプトで配列が伸びるだけで、**知りたいのは「終わった時点」**である。
+/// 途中経過は既存の `.prefill` チャンク（UI の進捗表示）が担当している。
+///
+/// ## `@unchecked Sendable` にしている理由
+///
+/// 中身は `NSLock` で完全に囲ってあるが、コンパイラにはそれが見えない。
+/// `Mutex`（Synchronization）を使えば `@unchecked` を外せるが、**あちらは macOS 15 以上**で、
+/// このアプリの下限は macOS 14 である（`MACOSX_DEPLOYMENT_TARGET = 14.0`）。
+private final class PrefillMemoryProbe: @unchecked Sendable {
+
+    private let enabled: Bool
+    private let lock = NSLock()
+    private var latest: MLXMemoryReading?
+
+    init(enabled: Bool) {
+        self.enabled = enabled
+    }
+
+    /// 進捗コールバックから呼ぶ。**無効なら `snapshot()` すら呼ばない。**
+    /// 既定で無効なのはログを出さないためだけでなく、
+    /// 計測用の処理がプリフィルの実測時間に混ざらないようにするためでもある。
+    func record(processed: Int, total: Int) {
+        guard enabled else { return }
+        let reading = captureMLXMemory(
+            stage: .prefillEnd, prefill: (processed: processed, total: total))
+        lock.lock()
+        defer { lock.unlock() }
+        latest = reading
+    }
+
+    /// actor 側から取り出す。取り出したら空にする（1回の生成で1点しか積まない）。
+    func take() -> MLXMemoryReading? {
+        lock.lock()
+        defer { lock.unlock() }
+        let value = latest
+        latest = nil
+        return value
     }
 }
 
