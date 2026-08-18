@@ -68,55 +68,18 @@ final class ToolCallProbeTests: XCTestCase {
 
     // MARK: - ツール定義（DESIGN 16.4節の3つ）
 
-    /// JSON Schema 形式のツール定義。`ToolSpec = [String: any Sendable]`。
+    /// **出荷する定義そのものを測る。** ここに定義を書き写さないこと。
+    ///
+    /// > **2026-08-18 に差し替えた。記録を残す。**
+    /// > 以前はこの関数が**自前の定義を持っていた**（「ディレクトリのパス」等）。
+    /// > その状態で 12/12 という結果を出し、**それを「実装の成功率」として設計書に書いた。**
+    /// > **測っていたのは出荷される経路ではない。**
+    /// > 同じ罠が `EngineToolWiringTests` の費用計測にもあり、
+    /// > **716トークンという嘘の実費**を生んだ（実費は 1,182）。
+    /// >
+    /// > **定義を写した瞬間、このプローブは「プローブ自身」を測る道具になる。**
     private static func toolSpecs() -> [ToolSpec] {
-        [
-            [
-                "type": "function",
-                "function": [
-                    "name": "list_directory",
-                    "description": "指定したディレクトリの中身を一覧する",
-                    "parameters": [
-                        "type": "object",
-                        "properties": [
-                            "path": ["type": "string", "description": "ディレクトリのパス"]
-                        ],
-                        "required": ["path"],
-                    ] as [String: any Sendable],
-                ] as [String: any Sendable],
-            ],
-            [
-                "type": "function",
-                "function": [
-                    "name": "read_file",
-                    "description": "ファイルの中身を読む。長い場合は範囲を指定する",
-                    "parameters": [
-                        "type": "object",
-                        "properties": [
-                            "path": ["type": "string", "description": "ファイルのパス"],
-                            "offset": ["type": "integer", "description": "開始行（1始まり）"],
-                            "limit": ["type": "integer", "description": "読む行数"],
-                        ] as [String: any Sendable],
-                        "required": ["path"],
-                    ] as [String: any Sendable],
-                ] as [String: any Sendable],
-            ],
-            [
-                "type": "function",
-                "function": [
-                    "name": "search_files",
-                    "description": "ディレクトリ配下から文字列を含むファイルを探す",
-                    "parameters": [
-                        "type": "object",
-                        "properties": [
-                            "path": ["type": "string", "description": "探索の起点"],
-                            "query": ["type": "string", "description": "探す文字列"],
-                        ] as [String: any Sendable],
-                        "required": ["path", "query"],
-                    ] as [String: any Sendable],
-                ] as [String: any Sendable],
-            ],
-        ]
+        FolderTool.jsonSchemas.map { $0 as ToolSpec }
     }
 
     /// スキーマ上の必須キー。**引数の妥当性はここで判定する**（JSON の妥当性ではない）。

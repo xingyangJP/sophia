@@ -14,6 +14,22 @@ import Foundation
 /// だから定義は3つに固定し、説明文も短く書いてある ── 読みやすさのために1文足すと、
 /// **その1文を会話のターン数だけ払う。**
 ///
+/// # 説明文を英語で書く理由（**2026-08-18 実測。日本語へ戻す前に読むこと**）
+///
+/// **テンプレートの `tool | tojson` は非ASCIIを `\uXXXX` へ展開する。**
+/// 日本語1文字が ASCII 6文字になり、**素の158トークンが約1,100トークンに膨らむ**（約7倍）。
+/// 出荷する定義を日本語で書くと **1,182トークン ＝ 入力予算1,000 の 118%** で、
+/// **利用者が1文字も打つ前に予算を超える。** プリフィルは毎ターン約8.2秒。
+///
+/// **英語なら 324トークン（-73%）、プリフィル 2.7秒。**
+/// 他の案（引数を削る・ツールを減らす）はどれも100トークン台で、桁が違う。
+///
+/// **これは「日本語が高い」という一般則ではない。** `tojson` を通る場所だけの話で、
+/// **system プロンプトも会話本文も展開されない**（`make toolbreakdown` が実物を出す）。
+/// 利用者に見せる文言（`FolderAccessError` / `ReadOutcome`）は日本語のままでよい。
+///
+/// **戻すなら `make toolbreakdown` と `make toolprobe` を両方流すこと。**
+///
 /// # 名前は実測に合わせてある（`find_files` ではない）
 ///
 /// DESIGN 16.4節の表は3つ目を `find_files`（`pattern` / `path`）と書いているが、
@@ -68,32 +84,37 @@ enum FolderTool: String, Sendable, Equatable, CaseIterable {
         [
             schema(
                 name: FolderTool.listDirectory.rawValue,
-                description: "指定したフォルダの直下を一覧する",
+                description: "List the direct children of a folder",
                 properties: [
                     Argument.path: property(
-                        "string", "結び付けたフォルダからの相対パス。フォルダ自身は空文字。絶対パスと ~ は使えない")
+                        "string",
+                        "Path relative to the bound folder. Empty string for the folder "
+                            + "itself. Absolute paths and ~ are rejected")
                 ],
                 required: [Argument.path]
             ),
             schema(
                 name: FolderTool.readFile.rawValue,
-                description: "テキストファイルを行の範囲で読む。長い場合は切られるので続きは offset で読む",
+                description:
+                    "Read the contents of a text file. Long files are clipped; "
+                    + "continue with offset",
                 properties: [
                     Argument.path: property(
-                        "string", "結び付けたフォルダからの相対パス。絶対パスと ~ は使えない"),
-                    Argument.offset: property("integer", "何行目から読むか（1始まり）"),
+                        "string",
+                        "Path relative to the bound folder. Absolute paths and ~ are rejected"),
+                    Argument.offset: property("integer", "Line to start from (1-based)"),
                     Argument.limit: property(
-                        "integer", "何行読むか（上限 \(FolderReadLimits.lineLimit)）"),
+                        "integer", "How many lines to read (max \(FolderReadLimits.lineLimit))"),
                 ],
                 required: [Argument.path]
             ),
             schema(
                 name: FolderTool.searchFiles.rawValue,
-                description: "名前に指定の語を含むファイル・フォルダを配下から探す",
+                description: "Find files and folders whose name contains the given word",
                 properties: [
                     Argument.path: property(
-                        "string", "探索の起点。結び付けたフォルダ全体なら空文字"),
-                    Argument.query: property("string", "ファイル名に含まれる語"),
+                        "string", "Where to start. Empty string for the whole bound folder"),
+                    Argument.query: property("string", "Word contained in the file name"),
                 ],
                 required: [Argument.path, Argument.query]
             ),
