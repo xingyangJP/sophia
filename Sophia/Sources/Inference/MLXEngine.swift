@@ -21,6 +21,8 @@ import Tokenizers  // #huggingFaceTokenizerLoader() の展開結果が要求す�
 //  | `[Chat.Message]` を引数で渡さない | `Chat.Message` / `UserInput` が `Sendable` ではない。Task 境界を越えるとコンパイルエラー（MLX_SWIFT.md 第4.4節） |
 //  | 思考分離は公式 `ReasoningEventEmitter` | 区切り文字をモデルの宣言から取るので、モデルを差し替えても壊れない |
 //  | `primedInside` を推測しない | 描画済みプロンプトの末尾から導出する。Qwen3 で `true` にすると全崩壊する |
+//  | **ツールの往復を `performChat` の中で閉じる** | 呼び出し側は `.toolCall` を見なくても正しく動く。生の往復は外へ出さない（FR-19 / 16章。`RoundTripMessage` の解説を読むこと） |
+//  | 実行役は `Shared/` の protocol 越しに受け取る | `Sources/Files/` を知った瞬間、エンジンを差し替えると実行役ごと作り直しになる（NFR-09） |
 //
 //  ## 未確認（このファイルについて）
 //
@@ -49,6 +51,37 @@ actor MLXEngine: InferenceEngine {
     /// 読み込みが同時に2本走らないようにする。
     /// **重みは 4.62GB ある。** 二重に走らせると 9GB を掴んで確実に落ちる。
     private var isLoading = false
+
+    // MARK: - ツールの実行役（FR-19 / DESIGN.md 第16章 / NFR-09）
+
+    /// モデルがツールを呼んだときに、実際に実行する役。**未設定なら往復は起きない。**
+    ///
+    /// ## ここに `FolderToolRunner` と書かないこと（NFR-09）
+    ///
+    /// 型は `Shared/` の protocol（`ToolExecuting`）だけである。
+    /// **このファイルは `Sources/Files/` も `Sources/Tools/` も1文字も知らない** ──
+    /// 知った瞬間、エンジンを差し替えると実行役ごと作り直しになる。
+    /// 差し込むのはアプリ側（`init(toolExecutor:)` か `setToolExecutor(_:)`）。
+    ///
+    /// ## 刺さっているだけでは何も起きない（**重要**）
+    ///
+    /// 実行役に触るのは `options.tools` が空でないときだけである（16.6節 約束3）。
+    /// 引き金は**利用者の操作**（＝ツール定義を渡したこと）であって、
+    /// 実行役の有無ではない。**古い実行役が残っていても、門が閉じていれば無害**である。
+    private var toolExecutor: (any ToolExecuting)?
+
+    /// 往復の回数の**安全弁**。上限そのものではない。
+    ///
+    /// > 上限は実行役（`FolderToolRunner.callLimit`、既定6）が数える。**そちらが本物である。**
+    ///
+    /// ここにあるのは「実行役が `stopsRoundTrips` を一度も返さない」場合に
+    /// **生成が永久に回り続けるのを防ぐ**ためだけの数である。
+    /// 16GB機で無限に回るということは、利用者が見ている前で機械を占有し続けるということで、
+    /// 「落ちないまま黙っている」（取得の見張りと同じ症状）になる。
+    ///
+    /// **正常な往復でここに当たってはいけない。** 当たったら `[TOOL] event=round_limit`
+    /// が出る ── 出たなら、それは実行役の上限が効いていないという報せである。
+    static let maximumToolRounds = 16
 
     // MARK: - MLX 側のメモリ会計（`[MEM]` 計測点）
 
@@ -84,9 +117,22 @@ actor MLXEngine: InferenceEngine {
     ///   参照すると Swift のバージョンによって弾かれるため。）
     private var clearsCacheAfterGeneration = MLXEngine.clearsCacheAfterGenerationByDefault
 
-    init() {
+    /// - Parameter toolExecutor: ツールの実行役（FR-19）。**既定は nil＝往復しない。**
+    ///   既存の呼び出し（`MLXEngine()`）はそのまま通る ── 危険な側（実行できる側）を
+    ///   明示的にしておくための既定である（`ChatOptions.tools` が空既定なのと同じ順序）。
+    init(toolExecutor: (any ToolExecuting)? = nil) {
+        self.toolExecutor = toolExecutor
         // 起動時の1度きり。`static let` なので何度 init しても1回しか走らない。
         _ = Self.runtimeConfigured
+    }
+
+    /// 実行役を差し替える（**会話ごとに変わる**ので `init` だけでは足りない）。
+    ///
+    /// 実行役は「この会話が読んでよいフォルダ」を握っている。
+    /// 利用者がフォルダを結び付けた／外したときに、アプリ側がここで入れ替える。
+    /// **nil を入れれば往復は起きなくなる**（ただし門を閉じる本体は `ChatOptions.tools`）。
+    func setToolExecutor(_ executor: (any ToolExecuting)?) {
+        toolExecutor = executor
     }
 
     // MARK: - 起動時の設定
@@ -620,19 +666,46 @@ actor MLXEngine: InferenceEngine {
         // **actor の外から書かれる**ので、ここでは受け皿を用意するだけ。
         let prefillProbe = PrefillMemoryProbe(enabled: Self.memoryProbeRecords)
 
-        // 中断された場合でも計測値を組み立てられるよう、`do` の外に置く。
-        // 送信前の概算で初期化し、`prepare` が済んだら実測値で上書きする。
-        var inputTokens = messages.estimatedTokenCount
+        // --- 往復をまたいで足し合わせる計測値（FR-14 / 16章）---------------------
+        //
+        // **ツールの往復は「1回の生成」ではなく「複数回の生成」である。**
+        // 最後の1回ぶんだけを `.done` に載せると、読みに行くために払った
+        // プリフィルが数字から消える ── VISION の一次資料として、消えるのがいちばん困る。
+        //
+        // 往復が起きない会話（`idle`。既定）は1周で抜けるので、
+        // **これらの値は往復を入れる前と1トークンも変わらない。**
+        // （`prefillTokensPerSecond` も `promptTokenCount / promptTime` の定義どおり同値になる）
+        //
+        // `do` の外に置いてあるのは、中断（`CancellationError`）の経路でも
+        // 同じ値から `.done` を組むためである。
+        var promptTokenTotal = 0
+        /// **時間の分かっている**プリフィルのトークン数だけを数える。
+        /// 速度の分母（`prefillSecondsTotal`）と分子の出所を揃えるためで、
+        /// 中断された周（時間が無い）を分子だけに足すと**速度が水増しされる。**
+        var timedPromptTokens = 0
+        var outputTokenTotal = 0
+        var prefillSecondsTotal: Double = 0
+        var decodeSecondsTotal: Double = 0
+        var sawCompletionInfo = false
+
+        // まだ `.info` で確定していない、**いまの周**のプリフィル。
+        // 中断で `.info` が届かないまま抜けたとき、この周ぶんを落とさないために持つ。
+        // `prepare` へ到達する前に落ちた場合は送信前の概算のまま（従来と同じ）。
+        var pendingPromptTokens = messages.estimatedTokenCount
 
         do {
             // --- 入力を組む -----------------------------------------------------
-            // `Chat.Message` は Sendable ではない。**このタスクの内側で組み立てる。**
-            // 引数で受け取ろうとすると `sending 'input' risks causing data races`。
-            let chat: [Chat.Message] = messages.map { message in
+            //
+            // **`[Chat.Message]` を往復のあいだ持ち回らないこと。**
+            // あれは `Sendable` ではなく、`ModelContainer.prepare(input:)` は
+            // `consuming sending UserInput` で受け取る。持ち回ると領域解析（SE-0414）に
+            // 「送ったあとに触っている」と言われる ── **Sendable な記録で持ち、
+            // 毎周そこから組み直す**のが素直な形である（`RoundTripMessage`）。
+            var transcript: [RoundTripMessage] = messages.map { message in
                 switch message.role {
                 case .system: .system(message.content)
                 case .user: .user(message.content)
-                case .assistant: .assistant(message.content)
+                case .assistant: .assistant(message.content, toolCalls: [])
                 }
             }
 
@@ -653,29 +726,28 @@ actor MLXEngine: InferenceEngine {
             // ここに「利用者の文を見てツールが要るか推定する」判定を書かないこと（16.2節）。
             // **引き金は利用者の操作だけ**であり、この関数に届く時点では
             // `options.tools` が空かどうかに潰れている。
-            let toolSpecs = Self.toolSpecs(for: options.tools)
+            //
+            // **`var` なのは往復の途中で門を閉じることがあるから**である
+            // （上限に達したとき。下の往復ループの解説を読むこと）。
+            var toolSpecs = Self.toolSpecs(for: options.tools)
 
-            // チャットテンプレート（Jinja）はこの `prepare` の内側で
-            // トークナイザが適用する。Ollama ではサーバの仕事だった部分。
-            let userInput = UserInput(
-                chat: chat, tools: toolSpecs, additionalContext: additionalContext)
-            let lmInput = try await container.prepare(input: userInput)
-
-            let promptTokens = lmInput.text.tokens.asArray(Int.self)
-            inputTokens = promptTokens.count
-
-            guard inputTokens < options.contextLength else {
-                throw SophiaError(
-                    code: .contextOverflow,
-                    hint: "入力が \(inputTokens) トークンで、上限 \(options.contextLength) を超えています。"
-                        + "会話を新しく始めるか、入力を短くしてください。")
+            // --- ツールの実行役（FR-19 / 16.6節 約束3）-----------------------------
+            //
+            // **門が閉じている会話では、実行役に一度も触らない。**
+            // 実行役が刺さっているかどうかで振る舞いが変わってはいけない ──
+            // `idle` → `armed` の引き金は**利用者の操作だけ**である（約束3）。
+            let executor = Self.activeToolExecutor(toolExecutor, toolsWereSent: toolSpecs != nil)
+            if toolSpecs != nil, executor == nil {
+                // **ツールを見せているのに、実行できる役がいない。**
+                // モデルは呼ぶが誰も答えない ＝ 往復が成立しない。
+                // 黙って捨てない（16.8節）ので、必ず1行残す。
+                writeToolLine("no_executor", fields: [("tools", "\(options.tools.count)")])
             }
+            // **新しい利用者の発言。** 往復の回数を戻すのはここ1か所だけ（16.8節）。
+            // 呼び出し側に任せると、呼び忘れた会話だけが2回目から読めなくなる。
+            await executor?.beginRoundTrip()
 
-            // --- 思考分離器を用意する（FR-17）------------------------------------
-            var separator = await makeSeparator(
-                container: container, promptTokens: promptTokens)
-
-            // --- 生成パラメータ ---------------------------------------------------
+            // --- 生成パラメータ（往復しても変えない）-------------------------------
             var configured = GenerateParameters(
                 maxTokens: options.maxTokens,
                 maxKVSize: options.maxKVSize,
@@ -693,6 +765,9 @@ actor MLXEngine: InferenceEngine {
             // **これが A1 の隠れた要件に効く。** 思考モードでは本文が出るまで
             // 15〜29秒かかるが、その前半はプリフィルである。ここを出せると
             // 「無言でフリーズしているように見える時間」が消える。
+            //
+            // **往復の2周目以降もここが鳴る。** ツールを実行したあとの無言は、
+            // 実際には次のプリフィルであり、既存の進捗表示がそのまま埋めてくれる。
             configured.prefill.progress = { processed, total in
                 continuation.yield(.prefill(PrefillProgress(
                     processedTokens: processed, totalTokens: total)))
@@ -708,110 +783,260 @@ actor MLXEngine: InferenceEngine {
             let parameters = configured
             let components = makeGenerationComponents(options: options)
 
-            // --- 生成ストリームを開く ---------------------------------------------
-            //
-            // 注意: プリフィルは `TokenIterator.init` の中、つまり
-            // **この `generate` 呼び出しの内側で同期的に走る。**
-            // 上の progress コールバックはストリームが返る前に発火する。
-            // `continuation` は既に存在しているので取りこぼさない。
-            //
-            // **`tools:` をここでも渡すこと。`UserInput` に入れただけでは足りない。**
-            // 別経路である ── `UserInput.tools` はテンプレートの描画にしか効かず、
-            // `generate` の `tools:` は `ToolCallProcessor` の `allowedToolNames` になる
-            // （`Evaluate.swift:1746-1763` → `ToolCallProcessor.init`）。
-            // 渡さないと `allowedToolNames` が nil になり、**未宣言の名前でも
-            // そのまま `.toolCall` として通る**（`?? true` に落ちる）。
-            // 渡してあれば、モデルが名前を捏造したとき `.rejectedToolCall(.undeclaredTool)`
-            // として弾かれる ── 16.8節「ツール名が一致しない」の第一の防壁である。
-            // スキーマは引数の型付けにも使われる（宣言した型へ寄せてくれる）。
-            let stream = try await container.perform(nonSendable: lmInput) { context, input in
-                try MLXLMCommon.generate(
-                    input: input,
-                    parameters: parameters,
-                    context: context,
-                    components: components,
-                    tools: toolSpecs)
-            }
-
-            // --- プリフィル完了の1点を回収する -------------------------------------
-            //
-            // **ここで拾えるのは、プリフィルが `perform` の内側で終わっているから。**
-            // `MLXLMCommon.generate` は `TokenIterator` を**先に**組み立ててから
-            // ストリームを返す（Evaluate.swift の `generate(input:cache:...)`）。
-            // プリフィルはその `init` の中で同期的に走るので、この行に来た時点で完了している。
-            //
-            // ただし箱に入っているのは「最後に届いた進捗の時点」であって、
-            // **必ずしも `processed == total` ではない。**
-            //   - `.tokens` 経路 … 最終フォワードのあとに `progress(total, total)` が鳴る
-            //     （Evaluate.swift:876）。ただしその直前は `asyncEval` なので、
-            //     **計算が発行済み・完了前**の可能性がある ＝ 確保が出揃っていないことがある
-            //   - `.logits` 経路 … 終端の通知が無く、最後のチャンク時点で止まる
-            // だから `prefill_processed` / `prefill_total` を行に載せてある。
-            // **どこまで進んだ時点の値なのかを読み手が判断できないと、この数字は使えない。**
-            // 出揃った側が要るなら次の `first_token` を見ること。
-            if let reading = prefillProbe.take() { appendMemory(reading) }
-
-            // --- 断片を流す -------------------------------------------------------
-            //
-            // **間引かない。** 受け取った断片をそのまま全件流す。
-            // 16ms のバッファリングは UI 側の責務（エンジンが間引くと計測が汚れる）。
-            //
-            // 1トークン = 1 `.chunk` ではない。デトークナイザは日本語のように
-            // 1文字が複数トークンにまたがる場合、Unicode 境界が揃うまで出力を保留する
-            // （`NaiveStreamingDetokenizer`）。文字化けした断片が画面に出ないのはこのため。
-            var info: GenerateCompletionInfo?
             var sawFirstChunk = false
+            var round = 0
+            var gateClosedByLimit = false
+            /// 最後の周の `.info` から取った終了理由。**周ごとに上書きする**
+            /// （前の周の値が残ると、中断した周を「正常終了」と申告してしまう）。
+            var lastStopReason: StopReason?
 
-            // 振り分けの規則は `MLXEngine.route(_:toolsWereSent:)` に切り出してある。
-            // **モデルを読み込まずにテストできるようにするため**であり、
-            // `EngineToolWiringTests` が「`.toolCall` は分離器を通らない」を固定している。
-            for await item in stream {
-                switch Self.route(item, toolsWereSent: toolSpecs != nil) {
+            // =====================================================================
+            //  往復のループ（FR-19 / DESIGN.md 第16章）
+            // ---------------------------------------------------------------------
+            //  **必ず終わる。** 終わり方は3つで、どれも「エンジンが回数を数えること」に
+            //  頼っていない ── 上限を数える場所は実行役ただ1つである（16.8節）。
+            //
+            //  | 抜ける条件 | 決めたのは誰か |
+            //  |---|---|
+            //  | この周でツールを呼ばなかった | モデル。**普通はここで抜ける** |
+            //  | 実行役が「もう渡すな」と言った → **門を閉じてあと1周** | 実行役（往復の上限） |
+            //  | 実行役がいない | アプリ（差し込まれていない） |
+            //  | 安全弁 `maximumToolRounds` | ここ。**正常時は当たらない** |
+            //
+            //  門を閉じた周は `toolSpecs == nil` なので、`route(_:toolsWereSent:)` が
+            //  呼び出しを1件も通さない ＝ **その周で `calls` が必ず空になり、ループが終わる。**
+            //  「あと1周だけ回す」のは、上限に達したことをモデルへ伝えて
+            //  **いま分かっている範囲で答えさせる**ためである（16.8節）。
+            //  ここで打ち切ると、利用者には**読んだきり黙って終わった**ように見える。
+            //
+            //  ## 毎周プリフィルし直している（**承知の上の代償**）
+            //
+            //  周ごとに `prepare` からやり直すので、**会話全体を毎回プリフィルする。**
+            //  KVキャッシュの再利用（`PromptCacheReusePolicy`）は入れていない ──
+            //  書き戻した `<tool_call>` の綴りがモデルの出力と1文字でも違えば
+            //  接頭辞が一致せず、**再利用が黙って壊れた結果を作る**ほうが怖い。
+            //  費用は `.done` の `inputTokens`（周ごとの合計）に必ず載るので、
+            //  **測ってから手を入れること。**
+            // =====================================================================
+            rounds: while true {
+                round += 1
+                try Task.checkCancellation()
 
-                case .separatorText(let text):
-                    // **確保が出揃った側の計測点。** 断片が復号されて届いた ＝
-                    // プリフィルの最終フォワードも最初のデコードも `eval` が済んでいる。
-                    // `prefill_end` が下限側（発行済み・完了前を含む）なのに対して、
-                    // こちらは上限側（デコード1ステップぶんを余分に含む）である。
-                    // **2点で挟むのが目的**で、どちらか片方は必ず外れる。
-                    if !sawFirstChunk {
-                        sawFirstChunk = true
-                        recordMemory(.firstToken)
-                    }
-                    for segment in separator.process(text) {
-                        emit(segment, clock: &clock, into: continuation)
-                    }
+                // **毎周ここで組み直す。** Sendable な記録から作るので、
+                // 出来た配列は独立した領域に入り、そのまま `prepare` へ送れる。
+                let chat = Self.chatMessages(for: transcript)
+                // クロージャへ渡すので不変にする（`toolSpecs` は var である）。
+                let roundTools = toolSpecs
 
-                case .passThrough(let chunk):
-                    // **分離器を通さずに流す。** ツール呼び出しは本文でも思考でもない。
-                    clock.record(chunk)
-                    continuation.yield(chunk)
+                // チャットテンプレート（Jinja）はこの `prepare` の内側で
+                // トークナイザが適用する。Ollama ではサーバの仕事だった部分。
+                let lmInput = try await container.prepare(input: UserInput(
+                    chat: chat, tools: roundTools, additionalContext: additionalContext))
 
-                case .completion:
-                    info = item.info
+                let promptTokens = lmInput.text.tokens.asArray(Int.self)
+                pendingPromptTokens = promptTokens.count
 
-                case .unexpectedToolCall(let name):
-                    // **ツールを渡していないのに呼んできた。** 実行できるものが無いので流さない。
-                    // 16.6節の約束3 ── 注入の状態をモデルの出力で変えない。
-                    // **黙って捨てない**（16.8節）ので、ログには必ず残す。
-                    writeToolLine("unexpected_call", fields: [("tool", name)])
-
-                case .rejected(let reason, let name):
-                    // 形式が壊れていた／宣言していない名前だった。
-                    // **原文は絶対に出さない** ── `RejectedToolCall.rawTextPreview` は
-                    // 「ライブラリが自動でログや永続化に載せてはならない」と明記されており、
-                    // 引数には利用者のファイル名や検索語が入る（NFR-01）。
-                    writeToolLine(
-                        "rejected", fields: [("reason", reason), ("tool", name ?? "-")])
-
-                case .ignored:
-                    break
+                guard promptTokens.count < options.contextLength else {
+                    // **2周目以降は文言を変える。** 「入力を短くしてください」と言われても、
+                    // 利用者は短い一文しか打っていない ── 膨らませたのは読み込んだ中身である。
+                    throw SophiaError(
+                        code: .contextOverflow,
+                        hint: round == 1
+                            ? "入力が \(promptTokens.count) トークンで、"
+                                + "上限 \(options.contextLength) を超えています。"
+                                + "会話を新しく始めるか、入力を短くしてください。"
+                            : "読み込んだ内容を足したところ \(promptTokens.count) トークンになり、"
+                                + "上限 \(options.contextLength) を超えました。"
+                                + "読む範囲を狭めるか、会話を新しく始めてください。")
                 }
-            }
 
-            // 保留していた末尾を吐き出す。**呼び忘れると末尾が消える。**
-            for segment in separator.finalize() {
-                emit(segment, clock: &clock, into: continuation)
+                // --- 思考分離器を用意する（FR-17）------------------------------
+                // **周ごとに作り直す。** `primedInside` は描画済みプロンプトの末尾から
+                // 導出するので、周が変われば判定もやり直しになる。
+                var separator = await makeSeparator(
+                    container: container, promptTokens: promptTokens)
+
+                // --- 生成ストリームを開く ---------------------------------------
+                //
+                // 注意: プリフィルは `TokenIterator.init` の中、つまり
+                // **この `generate` 呼び出しの内側で同期的に走る。**
+                // 上の progress コールバックはストリームが返る前に発火する。
+                // `continuation` は既に存在しているので取りこぼさない。
+                //
+                // **`tools:` をここでも渡すこと。`UserInput` に入れただけでは足りない。**
+                // 別経路である ── `UserInput.tools` はテンプレートの描画にしか効かず、
+                // `generate` の `tools:` は `ToolCallProcessor` の `allowedToolNames` になる
+                // （`Evaluate.swift:1746-1763` → `ToolCallProcessor.init`）。
+                // 渡さないと `allowedToolNames` が nil になり、**未宣言の名前でも
+                // そのまま `.toolCall` として通る**（`?? true` に落ちる）。
+                // 渡してあれば、モデルが名前を捏造したとき `.rejectedToolCall(.undeclaredTool)`
+                // として弾かれる ── 16.8節「ツール名が一致しない」の第一の防壁である。
+                let stream = try await container.perform(nonSendable: lmInput) { context, input in
+                    try MLXLMCommon.generate(
+                        input: input,
+                        parameters: parameters,
+                        context: context,
+                        components: components,
+                        tools: roundTools)
+                }
+
+                // --- プリフィル完了の1点を回収する -------------------------------
+                //
+                // **ここで拾えるのは、プリフィルが `perform` の内側で終わっているから。**
+                // `MLXLMCommon.generate` は `TokenIterator` を**先に**組み立ててから
+                // ストリームを返す（Evaluate.swift の `generate(input:cache:...)`）。
+                // プリフィルはその `init` の中で同期的に走るので、この行に来た時点で完了している。
+                //
+                // ただし箱に入っているのは「最後に届いた進捗の時点」であって、
+                // **必ずしも `processed == total` ではない**（`prefill_processed` を必ず見ること）。
+                // 出揃った側が要るなら次の `first_token` を見ること。
+                if let reading = prefillProbe.take() { appendMemory(reading) }
+
+                // --- 断片を流す ---------------------------------------------------
+                //
+                // **間引かない。** 受け取った断片をそのまま全件流す。
+                // 16ms のバッファリングは UI 側の責務（エンジンが間引くと計測が汚れる）。
+                //
+                // 振り分けの規則は `MLXEngine.route(_:toolsWereSent:)` に切り出してある。
+                // **モデルを読み込まずにテストできるようにするため**であり、
+                // `EngineToolWiringTests` が「`.toolCall` は分離器を通らない」を固定している。
+                var info: GenerateCompletionInfo?
+                /// この周でモデルが呼んだツール。**流し終えてからまとめて実行する。**
+                var calls: [ModelToolCall] = []
+                /// この周の**本文**（思考は入らない）。会話へ書き戻すのはこちらだけ。
+                var visibleText = ""
+
+                for await item in stream {
+                    switch Self.route(item, toolsWereSent: roundTools != nil) {
+
+                    case .separatorText(let text):
+                        // **確保が出揃った側の計測点。** 断片が復号されて届いた ＝
+                        // プリフィルの最終フォワードも最初のデコードも `eval` が済んでいる。
+                        // 往復しても**1回だけ**取る（2周目は「最初の」ではない）。
+                        if !sawFirstChunk {
+                            sawFirstChunk = true
+                            recordMemory(.firstToken)
+                        }
+                        for segment in separator.process(text) {
+                            // **思考は溜めない。** 書き戻さないものを持たない
+                            // （`InferenceEngine` の約束6）。
+                            if case .content(let body) = segment { visibleText += body }
+                            emit(segment, clock: &clock, into: continuation)
+                        }
+
+                    case .passThrough(let chunk):
+                        // **分離器を通さずに流す。** ツール呼び出しは本文でも思考でもない。
+                        clock.record(chunk)
+                        continuation.yield(chunk)
+                        // **ここでは溜めるだけ。** 途中で実行すると、まだ流れてくる断片と
+                        // ファイルの I/O が重なる（同じ周に2つ目の呼び出しが来ることがある）。
+                        if case .toolCall(let call) = chunk { calls.append(call) }
+
+                    case .completion:
+                        info = item.info
+
+                    case .unexpectedToolCall(let name):
+                        // **ツールを渡していないのに呼んできた。** 実行できるものが無いので流さない。
+                        // 16.6節の約束3 ── 注入の状態をモデルの出力で変えない。
+                        //
+                        // ただし**2つの事情を同じ行にしない。**
+                        //   `call_after_limit` … 上限で門を閉じた周。**正常な帰結**
+                        //   `unexpected_call`  … そもそも渡していない会話。**前提が揺れる報せ**
+                        writeToolLine(
+                            gateClosedByLimit ? "call_after_limit" : "unexpected_call",
+                            fields: [("tool", name)])
+
+                    case .rejected(let reason, let name):
+                        // 形式が壊れていた／宣言していない名前だった。
+                        // **原文は絶対に出さない** ── `RejectedToolCall.rawTextPreview` は
+                        // 「ライブラリが自動でログや永続化に載せてはならない」と明記されており、
+                        // 引数には利用者のファイル名や検索語が入る（NFR-01）。
+                        writeToolLine(
+                            "rejected", fields: [("reason", reason), ("tool", name ?? "-")])
+
+                    case .ignored:
+                        break
+                    }
+                }
+
+                // 保留していた末尾を吐き出す。**呼び忘れると末尾が消える。**
+                for segment in separator.finalize() {
+                    if case .content(let body) = segment { visibleText += body }
+                    emit(segment, clock: &clock, into: continuation)
+                }
+
+                // --- この周の計測を足す -------------------------------------------
+                if let info {
+                    sawCompletionInfo = true
+                    promptTokenTotal += info.promptTokenCount
+                    timedPromptTokens += info.promptTokenCount
+                    outputTokenTotal += info.generationTokenCount
+                    prefillSecondsTotal += info.promptTime
+                    decodeSecondsTotal += info.generateTime
+                } else {
+                    // 中断などで `.info` が届かなかった周。**入力ぶんだけは実測値がある。**
+                    promptTokenTotal += pendingPromptTokens
+                }
+                // **周ごとに上書きする**（nil も含めて）。前の周の値を残さない。
+                lastStopReason = info.map { Self.stopReason(from: $0, cancelled: false) }
+                pendingPromptTokens = 0
+
+                // --- 往復するか ----------------------------------------------------
+                //
+                // 16.8節「モデルがツールを呼ばずに答えた」も**異常ではない。**
+                // ここを抜けるのが普通の経路である。
+                guard !calls.isEmpty else { break rounds }
+                guard let executor else {
+                    // 実行できる役がいない。呼び出しは画面へ流したが、往復はしない
+                    // （`no_executor` の行は生成に入る前に出している）。
+                    break rounds
+                }
+                // **中断されたなら読みに行かない。** 停止を押した直後にファイルを開かない。
+                if Task.isCancelled { break rounds }
+
+                // --- モデル自身の呼び出しを会話へ書き戻す（16.1節）--------------------
+                //
+                // **これを省くと往復が壊れる。** テンプレートの assistant の枝は
+                // `{%- if message.tool_calls %}` で `<tool_call>` を描く。書き戻さないと
+                // `<tool_response>` が**対応する `<tool_call>` なしで現れ**、
+                // モデルから見て「誰が何を訊いたのか分からない返事」になる。
+                //
+                // 本文は `visibleText`（分離器が本文として出したぶん）だけ。
+                // **思考は書き戻さない**（`InferenceEngine` の約束6）。
+                transcript.append(
+                    .assistant(visibleText, toolCalls: calls.map(Self.toolCall(from:))))
+
+                for call in calls {
+                    // **実行する。throw しない**（失敗も戻り値。16.8節）。
+                    let outcome = await executor.execute(call)
+
+                    // 連続する tool メッセージは、テンプレートが**1つの user ターンに
+                    // まとめて**描画する（16.1節）。だから素直に並べてよい。
+                    transcript.append(.toolResult(
+                        text: outcome.responseText, id: outcome.callID, name: outcome.toolName))
+
+                    // **無言の時間を埋める。** 区間の始まりは `.toolCall` が既に伝えており、
+                    // ここが終わりである（16.7節「何を読んだか」）。
+                    continuation.yield(.toolResult(outcome.activity(round: round)))
+
+                    if outcome.stopsRoundTrips, !gateClosedByLimit {
+                        gateClosedByLimit = true
+                        writeToolLine(
+                            "limit_reached",
+                            fields: [("round", "\(round)"), ("tool", outcome.toolName)])
+                    }
+                }
+
+                if gateClosedByLimit {
+                    // **あと1周だけ、道具無しで回す。** 門を閉じればテンプレートに
+                    // `<tools>` が描かれず、モデルは呼びようがない（FR-21 と同じ仕掛け）。
+                    // 上限に達した旨は、いま足した戻り値の文がモデルへ伝えている。
+                    toolSpecs = nil
+                } else if round >= Self.maximumToolRounds {
+                    // **安全弁。** ここに当たるのは実行役の上限が効いていないときだけである。
+                    writeToolLine("round_limit", fields: [("rounds", "\(round)")])
+                    toolSpecs = nil
+                }
             }
 
             // --- 終端と計測（FR-14）------------------------------------------------
@@ -821,21 +1046,28 @@ actor MLXEngine: InferenceEngine {
             //   2. 中断 → `AsyncStream` は nil を返して抜ける。`.info` は届かないことがある
             //   3. 上限打ち切り → `.info` の `stopReason` が `.length`
             let cancelled = Task.isCancelled
-            let stopReason = Self.stopReason(from: info, cancelled: cancelled)
+            let stopReason = lastStopReason ?? (cancelled ? .cancelled : .completed)
 
-            // 中断時に `.info` が来なかった場合だけ、文字数から概算する。
+            // 中断時に `.info` が1周も来なかった場合だけ、文字数から概算する。
             // 概算であることは `EngineCapabilities.reportsExactTokenCounts` では
             // 表現できないので、BENCH に載せるときは `stopReason == .cancelled` を見ること。
+            //
+            // **[承知の上の粗さ]** 「前半の周は `.info` が来て、最後の周が中断された」
+            // 場合、最後の周の出力トークンは数に入らない（**過少に出る**）。
+            // 過大に出すより害が小さいほうへ倒してある。
             let estimatedOutput = Int(ceil(
                 Double(clock.thinkingCharacterCount + clock.contentCharacterCount) * 0.5))
 
             continuation.yield(.done(clock.finish(
-                inputTokens: info?.promptTokenCount ?? inputTokens,
-                outputTokens: info?.generationTokenCount ?? estimatedOutput,
+                inputTokens: promptTokenTotal,
+                outputTokens: sawCompletionInfo ? outputTokenTotal : estimatedOutput,
                 stopReason: stopReason,
-                prefillSeconds: info?.promptTime,
-                prefillTokensPerSecond: info?.promptTokensPerSecond,
-                decodeSeconds: info?.generateTime,
+                prefillSeconds: sawCompletionInfo ? prefillSecondsTotal : nil,
+                // **率は足さずに、合計から割り直す。** 率の平均は率ではない。
+                prefillTokensPerSecond: prefillSecondsTotal > 0
+                    ? Double(timedPromptTokens) / prefillSecondsTotal
+                    : nil,
+                decodeSeconds: sawCompletionInfo ? decodeSecondsTotal : nil,
                 // 思考トークンは実測できない（分離器は復号後のテキストしか見ない）。
                 // nil を渡すと `GenerationClock` が文字数から概算し、
                 // `thinkingTokensAreEstimated` を立ててくれる。
@@ -856,16 +1088,21 @@ actor MLXEngine: InferenceEngine {
             // プリフィルは 512 トークン単位で刻まれ、その境目で
             // `Task.checkCancellation()` が入っている（`PrefillParameters.forEachChunk`）。
             // つまり長いプロンプトの処理中でも中断が効き、そのとき例外として上がる。
+            // 往復のループ先頭の `Task.checkCancellation()` もここへ来る。
             //
             // 生成ループまで進んでいた場合はここへ来ず、上の正常経路で `.done` を出す
             // （`AsyncStream` はキャンセル時に例外ではなく終端で抜けるため）。
             // **どちらの経路でも `.done` の出し方を揃えておく。**
             // 消費側が既に離脱していればこの yield は捨てられる。それで正しい。
             continuation.yield(.done(clock.finish(
-                inputTokens: inputTokens,
-                outputTokens: Int(ceil(
-                    Double(clock.thinkingCharacterCount + clock.contentCharacterCount) * 0.5)),
+                inputTokens: promptTokenTotal + pendingPromptTokens,
+                outputTokens: sawCompletionInfo
+                    ? outputTokenTotal
+                    : Int(ceil(Double(
+                        clock.thinkingCharacterCount + clock.contentCharacterCount) * 0.5)),
                 stopReason: .cancelled,
+                prefillSeconds: sawCompletionInfo ? prefillSecondsTotal : nil,
+                decodeSeconds: sawCompletionInfo ? decodeSecondsTotal : nil,
                 modelID: current?.id,
                 thinkingEnabled: options.thinking,
                 peakMemoryBytes: MLX.Memory.peakMemory
@@ -911,6 +1148,25 @@ actor MLXEngine: InferenceEngine {
     nonisolated static func toolSpecs(for tools: [ToolDefinition]) -> [ToolSpec]? {
         guard !tools.isEmpty else { return nil }
         return tools.map(toolSpec(for:))
+    }
+
+    /// **門が閉じている会話では、実行役を取り出さない**（FR-21 / 16.6節 約束3）。
+    ///
+    /// 実行役はアプリの寿命に近い長さで刺さりうる（会話ごとに付け替える）。
+    /// 一方でツールを見せるかどうかは**そのターンの `options.tools`** で決まる。
+    /// **この2つを掛け算するのがここ**である ── 掛けずに実行役だけを見ると、
+    /// 「刺さっているから使える」という経路ができ、
+    /// **利用者の操作以外で `idle` が `armed` に変わる**（約束3が破れる）。
+    ///
+    /// `route(_:toolsWereSent:)` が「渡していないのに来た呼び出し」を落とすので
+    /// 二重の守りになるが、**片方に頼らない。** あちらはモデルの出力に対する門、
+    /// こちらは実行役に対する門で、守っているものが違う。
+    ///
+    /// **`static` にしてあるのはテストのため**（`ToolRoundTripTests`）。
+    nonisolated static func activeToolExecutor(
+        _ installed: (any ToolExecuting)?, toolsWereSent: Bool
+    ) -> (any ToolExecuting)? {
+        toolsWereSent ? installed : nil
     }
 
     /// `ToolDefinition` を OpenAI 互換の JSON Schema へ落とす。
@@ -972,6 +1228,72 @@ actor MLXEngine: InferenceEngine {
 
         return ModelToolCall(
             name: call.function.name, argumentsJSON: json, callID: call.id)
+    }
+
+    /// **`modelToolCall(from:)` の逆。** 会話へ書き戻すために MLX の `ToolCall` へ戻す。
+    ///
+    /// ## なぜ「戻す」形なのか（元の値を持ち回らないのはなぜか）
+    ///
+    /// 生成ストリームから来た `ToolCall` をそのまま取っておく手もあるが、
+    /// それには `GenerationRoute` に MLX の型を載せることになり、
+    /// **`route` を固定している既存の試験（`EngineToolWiringTests`）が形ごと変わる。**
+    /// 往復のために試験の形を崩すのは順序が逆である。
+    ///
+    /// ## 欠落しない根拠
+    ///
+    /// `argumentsJSON` は `JSONValue` を符号化した文字列であり、
+    /// `JSONValue` は `Codable` なので**同じ型付き値に戻る**
+    /// （`Int` は `Int` のまま。`JSONValue.init(from:)` が Bool → Int → Double の順に試す）。
+    /// **往復して等しくなることは `ToolRoundTripTests` が固定している。**
+    ///
+    /// 読めなかったときは**空の引数として戻す。** 呼び出しごと消すと、
+    /// モデルには「無視された」としか見えず、同じ手を繰り返す（16.8節）。
+    nonisolated static func toolCall(from call: ModelToolCall) -> ToolCall {
+        let arguments =
+            (try? JSONDecoder().decode([String: JSONValue].self, from: call.argumentsData)) ?? [:]
+        return ToolCall(
+            function: .init(name: call.name, arguments: arguments), id: call.callID)
+    }
+
+    /// 往復の記録を、テンプレートへ渡す `[Chat.Message]` に組み直す。
+    ///
+    /// ## なぜ毎周組み直すのか
+    ///
+    /// `Chat.Message` は `Sendable` ではなく、`ModelContainer.prepare(input:)` は
+    /// `consuming sending UserInput` で受け取る。**持ち回ると領域解析に引っかかる。**
+    /// `RoundTripMessage`（Sendable）から作り直せば、出来た配列は独立した領域に入る。
+    ///
+    /// ## テンプレートのどの枝へ行くか（**ここが往復の要である**）
+    ///
+    /// | 記録 | 出来る辞書 | Qwen3 テンプレートの枝 |
+    /// |---|---|---|
+    /// | `.assistant(text, toolCalls: [])` | `role=assistant` | 通常の assistant |
+    /// | `.assistant(text, toolCalls: [c])` | `role=assistant` ＋ **`tool_calls`** | `{%- if message.tool_calls %}` → `<tool_call>` を描く |
+    /// | `.toolResult` | **`role=tool`** ＋ `tool_call_id` / `name` | `{%- elif message.role == "tool" %}` → `<tool_response>` |
+    ///
+    /// 辞書へ落とすのは `MessageGenerator.addToolMetadata(to:for:)`（MLX 側の既定実装）で、
+    /// `Chat.Message.Tool` の中身を `tool_calls` / `tool_call_id` へ振り分けている。
+    /// **`Chat.Message.assistant(_:toolCalls:)` を使わずに content へ `<tool_call>` を
+    /// 自分で書かないこと** ── 綴りが1文字違えば、モデルには別物として見える。
+    ///
+    /// **`static` にしてあるのはテストのため。** モデルもトークナイザも要らないので、
+    /// `ToolRoundTripTests` が 4.6GB を読まずに「どの枝へ行くか」を確かめられる。
+    nonisolated static func chatMessages(for transcript: [RoundTripMessage]) -> [Chat.Message] {
+        transcript.map { message in
+            switch message {
+            case .system(let text):
+                return Chat.Message.system(text)
+            case .user(let text):
+                return Chat.Message.user(text)
+            case .assistant(let text, let toolCalls):
+                // 空配列を `[]` のまま渡すと `tool_calls: []` が辞書に載る。
+                // **載せない** ── テンプレートは `{%- if message.tool_calls %}` で見るので
+                // 空配列でも偽になるが、依存先の真偽値の扱いに頼らない（FR-21 と同じ規律）。
+                return Chat.Message.assistant(text, toolCalls: toolCalls.isEmpty ? nil : toolCalls)
+            case .toolResult(let text, let id, let name):
+                return Chat.Message.tool(text, id: id, name: name)
+            }
+        }
     }
 
     /// 生成ストリームの1項目の行き先を決める。**思考分離（FR-17）との交点である。**
@@ -1620,6 +1942,54 @@ func formatDownloadedBytes(completed: Int64, total: Int64) -> String {
     return "\(megabytes(completed)) / \(megabytes(total))"
 }
 
+/// **往復の最中だけ存在する会話**（FR-19 / DESIGN.md 第16章）。
+///
+/// ---
+///
+/// # これは `SophiaMessage` ではない。そして `SophiaMessage` にしないと決めた
+///
+/// 生の往復（`<tool_call>` と `<tool_response>`）は**エンジンの中だけに存在し、
+/// 外へは1つも出ない。** 履歴に残るのは栞1行である（16.3節 第2段 / `ContextTranscript`）。
+///
+/// | 足さない理由 | 中身 |
+/// |---|---|
+/// | 残す必要が無い | 往復が終われば生の戻り値は落ちて `読んだ: notes.md（…）` に置き換わる |
+/// | 代金が高い | `MessageRole` を増やすと `messages.role` の CHECK 制約（`SophiaMigrations.swift`）と `StoreSchemaTests` に波及する。**移行を1つ増やすことになる** |
+/// | 得るものが無い | `Chunk` の流れは途切れないので FR-17 と既存 UI はそのまま生きる |
+///
+/// # なぜ `[Chat.Message]` を直接持ち回らないのか
+///
+/// あちらは `Sendable` ではない。`ModelContainer.prepare(input:)` は
+/// `consuming sending UserInput` で受け取るので、**送ったあとに触ると
+/// 領域解析（SE-0414）が弾く。** こちらは全部 `Sendable`（`ToolCall` も `Sendable`）なので、
+/// 往復のあいだ持っていられる。`Chat.Message` へは毎周
+/// `MLXEngine.chatMessages(for:)` で組み直す。
+enum RoundTripMessage: Sendable, Equatable {
+
+    case system(String)
+
+    case user(String)
+
+    /// アシスタントの発言。**`toolCalls` が空でなければ、自分の呼び出しを次ターンへ書き戻す。**
+    ///
+    /// 書き戻さないと `<tool_response>` が**対応する `<tool_call>` なしで**現れ、
+    /// モデルから見て「誰が何を訊いたのか分からない返事」になる（16.1節）。
+    ///
+    /// `content` に入るのは**本文だけ**である ── 思考は入れない
+    /// （`InferenceEngine` の約束6。テンプレート側も直前ターン以外の思考は捨てる）。
+    case assistant(String, toolCalls: [ToolCall])
+
+    /// ツールの戻り値。テンプレート上は **user ターンの中**に `<tool_response>` として出る。
+    ///
+    /// **つまりファイルの中身は、利用者の発言と同じ場所に入る**（16.6節）。
+    /// 囲いと但し書きは実行側（`ToolResult` / `ReadOutcome`）で済んでいる前提であり、
+    /// ここでは1文字も足さない。
+    ///
+    /// 連続する tool メッセージは、テンプレートが**1つの user ターンにまとめて**描く。
+    /// だから1周で複数のツールを呼ばれても、素直に並べてよい。
+    case toolResult(text: String, id: String?, name: String)
+}
+
 /// 生成ストリームの1項目の行き先（`MLXEngine.route(_:toolsWereSent:)` の戻り値）。
 ///
 /// **`GenerateCompletionInfo` を運んでいないのは意図的である。** あれは `Equatable` ではなく、
@@ -1795,4 +2165,29 @@ extension SophiaError {
 //  18. **`[TOOL]` 行が出ないこと（普段は）。** `event=rejected` が出るなら
 //      モデルが形式を守れていない。`event=unexpected_call` が出るなら
 //      **ツールを渡していない会話で呼びに来ている** ── どちらも設計の前提が揺れる報せ
+//
+//  ## 往復について確かめること（2026-08-18 追加 / FR-19・16.8節）
+//
+//  **形は `ToolRoundTripTests` がモデル無しで固定している**（書き戻しの辞書・
+//  実行役・上限・門の閉じ方）。実機でしか分からないのは、**モデルがその形を
+//  受け取ってどう振る舞うか**である。
+//
+//  19. **1往復が閉じること（本丸）。** フォルダを結び付けて「notes.md に何が
+//      書いてある？」と訊き、**読んだ内容に基づく答えが返ること。**
+//      `.toolCall` → `.toolResult` → 本文、の順に届くこと
+//  20. **書き戻しが効いていること。** 2周目のプリフィルで
+//      `<tool_call>` と `<tool_response>` が**対で**描かれていること
+//      （`SOPHIA_LOG_MEM=1` の `prefill_total` が1周目より増えていれば、
+//       少なくとも足された分は入力に載っている）。
+//      **モデルが「何を訊いたか分からない」旨を答え始めたら、ここを疑う**
+//  21. **上限に達したときに黙って終わらないこと。** `callLimit` を 1〜2 に
+//      下げて長い探索をさせ、`[TOOL] event=limit_reached` のあとに
+//      **「いま分かっている範囲」の答えが出ること**（無言で終わったら、
+//      門を閉じた最後の1周が回っていない）
+//  22. **思考ONで往復すること（16.9節 項目3の続き）。** 思考が
+//      `<tool_call>` を巻き込まないこと ── 巻き込むと `visibleText` が汚れ、
+//      書き戻す assistant の本文に思考が混ざる
+//  23. **往復の代金を測ること。** `.done` の `inputTokens` は**周ごとの合計**である。
+//      1往復で何トークン払ったのかを BENCH に残すこと ──
+//      毎周プリフィルし直している（承知の上の代償）ので、ここがいちばん高い
 // =============================================================================

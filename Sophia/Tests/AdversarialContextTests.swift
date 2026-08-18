@@ -19,21 +19,25 @@ import XCTest
 /// | `throw XCTSkip` | **走らせるとプロセスごと落ちる**ので、再現手順だけを置いてある |
 /// | 印なし | **破ろうとして破れなかった**（防御が効いている確認）か、いまの挙動を杭として打ったもの |
 ///
-/// **緑だから安全、ではない。** 期待付き失敗の6件が、このファイルの主な収穫である ──
-/// 上ほど**実際に届きやすい。**
+/// **緑だから安全、ではない。** 期待付き失敗の6件が、このファイルの主な収穫だった ──
+/// 上ほど**実際に届きやすい。** **2026-08-18 に 1〜5 を直し、印を外した**（6 だけが残っている）。
 ///
-/// 1. **行き過ぎた `offset` が、ファイルの行数そのものに化ける**（3行のファイルが「全998行」になる）。
-///    ツール層の合成をそのまま踏んだ形で、**栞として履歴にも残る**
-/// 2. 終端に届く窓が、丸ごと入るのに切られる ── 読み手から受け取る入口（**実運用の経路**）
-/// 3. 同じことが、全文を渡す入口でも起きる
-/// 4. 末尾の空行が、読み手と切る層のあいだで消え、続きの案内と食い違う
-/// 5. **CRLF で終わるファイルは、行が1つ増える**（`hasSuffix("\n")` が Character 単位）
+/// 1. ~~**行き過ぎた `offset` が、ファイルの行数そのものに化ける**（3行のファイルが「全998行」になる）。
+///    ツール層の合成をそのまま踏んだ形で、**栞として履歴にも残る**~~ **済**
+/// 2. ~~終端に届く窓が、丸ごと入るのに切られる ── 読み手から受け取る入口（**実運用の経路**）~~ **済**
+/// 3. ~~同じことが、全文を渡す入口でも起きる~~ **済**（2 と同じ1か所の修正で消えた）
+/// 4. ~~末尾の空行が、読み手と切る層のあいだで消え、続きの案内と食い違う~~ **済**
+/// 5. ~~**CRLF で終わるファイルは、行が1つ増える**（`hasSuffix("\n")` が Character 単位）~~ **済**
 /// 6. ファイル名で囲い（`--- ここから ---`）を偽造できる（**いまは呼び手が肩代わりしている**）
 ///
-/// 2・3・5 は、どれも**この層が既に一度踏んだ罠と同じ型**である ──
+/// 2・3・5 は、どれも**この層が既に一度踏んだ罠と同じ型**だった ──
 /// 2・3 は「全部入った瞬間にサイズが逆転する」、5 は「Swift の `Character` が CRLF を1文字と見る」。
-/// **直した場所には二度と出ないが、直さなかった場所には同じ形で残っている。**
-/// 1 は新しい型で、**2つの正しい判断が境目で嘘を作っている**（どちらの層にも単独の非は無い）。
+/// **直した場所には二度と出ないが、直さなかった場所には同じ形で残っていた。**
+/// 5 に至っては**同じ関数の4行下**である。1 は新しい型で、
+/// **2つの正しい判断が境目で嘘を作っていた**（どちらの層にも単独の非は無い）。
+///
+/// **印を外したテストは消さずに残してある。** どう破れたかの記録であり、
+/// 同じ形で戻ってきたときに最初に落ちるのがここだからである。
 ///
 /// # 数え方をテスト用に固定している理由
 ///
@@ -43,9 +47,12 @@ final class AdversarialContextTests: XCTestCase {
 
     // MARK: - 昨日と同じ穴が、昨日の修正が届かない場所に残っている
 
-    /// **昨日直した「丸ごと入るのに切る」が、`offset > 1` では直っていない。**
+    /// **昨日直した「丸ごと入るのに切る」が、`offset > 1` では直っていなかった。**
     ///
-    /// ## 何が起きているか
+    /// **2026-08-18 修正済み**（下の印を外した理由と直し方は、表明の直前に書いてある）。
+    /// 以下は**どう破れていたか**の記録である。
+    ///
+    /// ## 何が起きていたか
     ///
     /// 昨日の修正は「**候補の数がファイルの行数と等しい**とき」だけを直接確かめる近道である。
     /// ところが単調性が崩れる点は、そこだけではない ──
@@ -97,17 +104,20 @@ final class AdversarialContextTests: XCTestCase {
             }
         }
 
-        XCTExpectFailure(
-            "既知の欠陥: 窓が終端に届くと断り書きが縮み、挟み込み探索がその点を飛び越える。"
-            + "近道（`candidateCount == totalLines`）は offset=1 しか覆っていない。"
-        ) {
-            XCTAssertTrue(
-                broken.isEmpty,
-                "丸ごと入る窓が切られた（\(broken.count) 件）:\n" + broken.prefix(5).joined(separator: "\n"))
-        }
+        // **2026-08-18 修正済み。** 印（`XCTExpectFailure`）を外した。
+        //
+        // 直したのは**近道の条件**である。`start == 0 && candidateCount == totalLines`
+        // （＝「`offset=1` でファイル全部」）から、**候補の右端そのもの**へ一般化した。
+        // 単調性が崩れるのは「ファイルの先頭から全部入った点」ではなく
+        // 「**候補の右端**」だからで、断り書きが縮む理由が2つ（`.none` になる／
+        // 「続きは」の一文が消える）あることに条件が追い付いていなかった。
+        // バイトでの足切りも、ファイル全体ではなく**候補の**バイト数で行うようにしてある。
+        XCTAssertTrue(
+            broken.isEmpty,
+            "丸ごと入る窓が切られた（\(broken.count) 件）:\n" + broken.prefix(5).joined(separator: "\n"))
     }
 
-    /// **同じ穴が、読み手から受け取る新しい入口にもある。**
+    /// **同じ穴が、読み手から受け取る新しい入口にもあった。**（**2026-08-18 修正済み**）
     ///
     /// `clip(windowed:path:firstLine:totalLines:totalBytes:...)` は
     /// `FolderReader.readText` が返した窓を受ける道で、**実運用で通るのはこちらである。**
@@ -143,12 +153,12 @@ final class AdversarialContextTests: XCTestCase {
             }
         }
 
-        XCTExpectFailure("既知の欠陥: 上のテストと同じ原因。窓で読んだ結果を受ける入口では近道が一度も効かない。") {
-            XCTAssertTrue(
-                broken.isEmpty,
-                "読み手が返した窓が、丸ごと入るのに切られた（\(broken.count) 件）:\n"
-                + broken.prefix(5).joined(separator: "\n"))
-        }
+        // **2026-08-18 修正済み。** 印を外した。上のテストと同じ1か所の修正で消えた ──
+        // 近道が「候補の右端」を見るようになったので、`start != 0` でも効く。
+        XCTAssertTrue(
+            broken.isEmpty,
+            "読み手が返した窓が、丸ごと入るのに切られた（\(broken.count) 件）:\n"
+            + broken.prefix(5).joined(separator: "\n"))
     }
 
     /// **上の2件の原因を、原因の側から杭で打っておく。**
@@ -232,21 +242,30 @@ final class AdversarialContextTests: XCTestCase {
 
     // MARK: - 窓の受け渡しで内容が消える
 
-    /// **末尾の空行は、読み手から `clip` への受け渡しで消える。**
+    /// **末尾の空行は、読み手から `clip` への受け渡しで消えていた。**（**2026-08-18 修正済み**）
     ///
     /// `FolderReader` は行を `\n` で連結して返すので、`["a", ""]`（2行目が空行）は
     /// `"a\n"` になる。ところが `ContextWindow.lines(of:)` は
-    /// **末尾の改行で行を増やさない**ので、`"a\n"` は 1行として読み直される。
+    /// **末尾の改行で行を増やさない**ので、`"a\n"` は 1行として読み直されていた。
     ///
     /// 結果、読み手が「1〜2行目を返した」と言っているのに、`ReadOutcome` は
     /// **「全2行のうち 1-1行」**と申告し、`nextOffset` に 2 を出す。
     /// モデルが素直に `offset=2` を読むと、今度は
     /// **「指定された範囲に行がありません。offset は 1〜2 で指定してください。」**が返る。
     ///
-    /// **連続する2ターンで、モデルに矛盾した指示を出している。**
+    /// **連続する2ターンで、モデルに矛盾した指示を出していた。**
     /// 往復を1回で打ち切らないための `nextOffset` が、往復を空回りさせる。
+    ///
+    /// ## 直し方（同じ文字が、層をまたぐと意味が変わる）
+    ///
+    /// `lines(of:)` のほうは**正しい** ── ファイル全文では末尾の `\n` は行の**終端**である。
+    /// 間違っていたのは**どちらの数え方を使うか**で、窓の本文では同じ `\n` が
+    /// 読み手が挟んだ**区切り**である。`clip(windowed:)` を `windowLines(of:)` に切り替えた。
+    /// **`lines(of:)` の意味は変えていない**（変えると全文の入口が1行ずつ狂う）。
     func testATrailingEmptyLineIsLostBetweenTheReaderAndTheClipper() {
         // 読み手が「1〜2行目（2行目は空行）」として返した本文。
+        // **実ファイルは `"a\n\n"`**（`0x0A` が2つ）で、読み手はこれを 2行 と数え、
+        // 読めた2行を連結して `"a\n"` として返す。
         let fromReader = "a\n"
 
         let outcome = ContextWindow.clip(
@@ -255,24 +274,35 @@ final class AdversarialContextTests: XCTestCase {
 
         XCTAssertEqual(outcome.firstLine, 1)
 
-        XCTExpectFailure("既知の欠陥: 末尾の空行が `lines(of:)` で消え、読み手の申告と食い違う。") {
-            XCTAssertEqual(
-                outcome.lastLine, 2,
-                "読み手は 1-2行を返したのに、\(outcome.lastLine ?? -1) 行までとして扱われている")
-        }
+        // **2026-08-18 修正済み。** 印（`XCTExpectFailure`）を外した。
+        XCTAssertEqual(
+            outcome.lastLine, 2,
+            "読み手は 1-2行を返したのに、\(outcome.lastLine ?? -1) 行までとして扱われている")
+        XCTAssertEqual(outcome.body, fromReader, "空行ぶんの改行が本文から落ちていないこと")
 
-        // そして案内された続きを読むと、その行は無いと言われる。
-        XCTAssertEqual(outcome.nextOffset, 2, "前提: 続きとして 2 を案内している")
+        // **矛盾した案内そのものが消えたことを、ここで測る。**
+        // 元はここが `XCTAssertEqual(outcome.nextOffset, 2, "前提: 続きとして 2 を案内している")`
+        // だった ── **欠陥を前提にした表明**なので、直すと必ず落ちる。
+        // 2行のファイルの2行目まで読んだのだから、続きは無いのが正しい。
+        XCTAssertNil(outcome.nextOffset, "終端まで読んでいるのに続きを案内している")
+        XCTAssertEqual(outcome.reason, ClipReason.none, "窓がファイル全体を覆っている")
+
+        // **1行も読めなかったときは、いままでどおり「範囲外」と言うこと。**
+        // 窓の本文が空なのは「読めなかった」印であって「空行を1行読めた」ではない
+        // （`windowLines(of:)` の但し書き。ここを取り違えると範囲外が読めた形に化ける）。
         let next = ContextWindow.clip(
             windowed: "", path: "t.md", firstLine: 2, totalLines: 2, totalBytes: 3,
             budget: ContextBudget(tokens: 1_000), counter: .oneTokenPerCharacter)
         XCTAssertEqual(next.reason, .outOfRange)
         XCTAssertTrue(
             next.clipNotice?.contains("offset は 1〜2") ?? false,
-            "『2 から読め』と言った直後に『2 は無い、1〜2 で指定しろ』と言っている")
+            "有効な範囲を教えて往復を続けさせること")
     }
 
-    /// **CRLF で終わるファイルは、行が1つ増える。同じ関数の中に、同じ罠が2つある。**
+    /// **CRLF で終わるファイルは、行が1つ増えていた。同じ関数の中に、同じ罠が2つあった。**
+    ///
+    /// **2026-08-18 修正済み。** 末尾判定を `text.hasSuffix("\n")` から
+    /// `text.unicodeScalars.last == "\n"` へ降ろした（分割のほうと同じ高さに揃えた）。
     ///
     /// `lines(of:)` の但し書きは、**Swift の `Character` が CRLF を1文字として扱う**ことを
     /// 名指しで警告している ── 「`String` を `\n` で split してはいけない」。
@@ -306,11 +336,10 @@ final class AdversarialContextTests: XCTestCase {
         XCTAssertEqual(ContextWindow.lines(of: "a\n").count, 1)
         XCTAssertEqual(ContextWindow.lines(of: "a\nb\n").count, 2)
 
-        XCTExpectFailure("既知の欠陥: `hasSuffix(\"\\n\")` が Character 単位なので、CRLF の末尾を見落とす。") {
-            XCTAssertEqual(ContextWindow.lines(of: "a\r\n").count, 1, "CRLF 1行のファイルが1行と数えられない")
-            XCTAssertEqual(ContextWindow.lines(of: "a\r\nb\r\n").count, 2)
-            XCTAssertEqual(ContextWindow.lines(of: "\r\n").count, 1)
-        }
+        // **2026-08-18 修正済み。** 印（`XCTExpectFailure`）を外した。
+        XCTAssertEqual(ContextWindow.lines(of: "a\r\n").count, 1, "CRLF 1行のファイルが1行と数えられない")
+        XCTAssertEqual(ContextWindow.lines(of: "a\r\nb\r\n").count, 2)
+        XCTAssertEqual(ContextWindow.lines(of: "\r\n").count, 1)
 
         // 原因を名指ししておく（直す場所が1行で済むように）。
         XCTAssertFalse("a\r\n".hasSuffix("\n"), "Character 単位では CRLF は `\\n` で終わっていない")
@@ -322,11 +351,16 @@ final class AdversarialContextTests: XCTestCase {
             source, path: "crlf.txt", window: ReadWindow(offset: 4, limit: 1),
             budget: ContextBudget(tokens: 5_000), counter: .oneTokenPerCharacter)
         XCTAssertEqual(phantom.body, "", "本文は空")
-        XCTExpectFailure("既知の欠陥: 存在しない4行目が『読めた』形で返る。") {
-            XCTAssertEqual(
-                phantom.reason, .outOfRange,
-                "実在しない行なのに \(phantom.reason.rawValue) として『4-4行を入れた』と言っている")
-        }
+        // **2026-08-18 修正済み。** 印（`XCTExpectFailure`）を外した。
+        XCTAssertEqual(
+            phantom.reason, .outOfRange,
+            "実在しない行なのに \(phantom.reason.rawValue) として『4-4行を入れた』と言っている")
+
+        // **読み手（バイトで `0x0A` を数える）と総数が一致すること。**
+        // 食い違いは境界にしか無いので、境界を渡る表明を1つ置いておく
+        // （対になる側は `AdversarialFileAccessTests` の
+        // `testTheReaderAndTheClipperDisagreeAboutTheLineCountOfACRLFFile`）。
+        XCTAssertEqual(ContextWindow.lines(of: source).count, 3, "読み手は 3行 と数える")
     }
 
     /// **走らせるとプロセスごと落ちるので、再現手順だけ置いてある。**

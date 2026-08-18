@@ -440,8 +440,15 @@ final class FileAccessTests: XCTestCase {
         XCTAssertEqual(byName["inside"]?.kind, .symbolicLink)
 
         XCTAssertEqual(listing.entries.first?.kind, .directory, "ディレクトリが先")
-        XCTAssertFalse(listing.isTruncated)
-        XCTAssertEqual(listing.totalCount, listing.entries.count)
+
+        // **隠しファイル（`.hidden`）は一覧に出さないが、総数からは消さない。**
+        // ここは 2026-08-18 に期待値を変えた ── 以前は「全部見せた」ことになっていた。
+        let everything = try list("", includingHidden: true)
+        XCTAssertGreaterThan(everything.entries.count, listing.entries.count, "前提: 隠しが1件以上ある")
+        XCTAssertEqual(listing.totalCount, everything.entries.count, "伏せた分が総数から消えている")
+        XCTAssertTrue(listing.isTruncated, "伏せたのに『切っていない』と言っている")
+        XCTAssertEqual(
+            listing.omittedHiddenCount, everything.entries.count - listing.entries.count)
     }
 
     /// 既定では隠しファイルを出さない（費用と、`.env` 類を目の前に置かない判断）。
@@ -451,16 +458,40 @@ final class FileAccessTests: XCTestCase {
     }
 
     /// 切ったら**切る前の総数**を添える（16.4節）。
+    ///
+    /// ## ⚠️ 「見えている件数」を物差しにしないこと【2026-08-18 に直した】
+    ///
+    /// 以前このテストは `cut.totalCount` を **`full.entries.count`**（＝既定の一覧に
+    /// 出てきた件数）と比べていた。**両方から隠しファイルが消えているので、
+    /// 隠しファイルによる切り捨ては構造的に見えない。** 20件伏せても緑のままである。
+    ///
+    /// **緑であることは、測れていることを意味しない。**
+    /// 物差しには、`totalCount` とは別の道で数えた値
+    /// （`includingHidden: true` で**実際に返ってきた件数**）を使う。
+    /// 同じ値から作った2つを比べても、その値が間違っていることは永遠に分からない。
     func testListingTruncatesAndKeepsTheTotalCount() throws {
-        let full = try list("")
+        let visible = try list("")
+        // **別の道で数えた「フォルダの中の件数」。** これが物差しである。
+        let everything = try list("", includingHidden: true)
+        XCTAssertGreaterThan(
+            everything.entries.count, visible.entries.count, "前提: 隠しファイルが1件以上ある")
+        XCTAssertFalse(everything.isTruncated, "前提: 上限では切れていない")
 
+        // 隠しで伏せた分も「切った」である（16.3節「切ったことを必ず戻り値に書く」）。
+        XCTAssertEqual(visible.totalCount, everything.entries.count, "総数が見えている件数に縮んでいる")
+        XCTAssertTrue(visible.isTruncated)
+        XCTAssertEqual(
+            visible.omittedHiddenCount, everything.entries.count - visible.entries.count,
+            "伏せた件数の内訳が合っていない")
+
+        // 件数上限で切っても、総数は同じ物差しのまま。
         let cut = try list("", limit: 2)
 
         XCTAssertEqual(cut.entries.count, 2)
-        XCTAssertEqual(cut.totalCount, full.entries.count)
+        XCTAssertEqual(cut.totalCount, everything.entries.count)
         XCTAssertTrue(cut.isTruncated)
         // 順序が決まっていないと、切った結果が呼ぶたびに変わる。
-        XCTAssertEqual(cut.entries.map(\.name), Array(full.entries.map(\.name).prefix(2)))
+        XCTAssertEqual(cut.entries.map(\.name), Array(visible.entries.map(\.name).prefix(2)))
     }
 
     func testListingAFileFails() {
@@ -615,6 +646,7 @@ final class FileAccessTests: XCTestCase {
             .fileTooLarge(path: "big.log", totalBytes: 99),
             .notUTF8("a.txt"),
             .pathChangedDuringAccess("a.txt"),
+            .symbolicLinkCycle("loopA"),
             .ioFailed(path: "a.txt", detail: "d"),
         ]
 

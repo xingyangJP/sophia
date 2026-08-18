@@ -14,6 +14,15 @@ import Foundation
 /// > **この `fileprivate` を internal に開けないこと。**
 /// > 開けた瞬間、モデルが書いた文字列から直接この型を作れるようになり、
 /// > 16.5節の4手順を丸ごと迂回できる。
+///
+/// ## ⚠️ この型が保証しているのは「作られた時点で内側だった」ことだけである
+///
+/// **有効期限を持っていない。** 発行したアクセススコープが閉じても値は生き続け、
+/// `FolderReader` はそれを疑わずに読む。**作られた後に途中の成分をリンクへ差し替えると、
+/// この値のまま根の外が読める**（`SecurityScopedFolder.withAccess` の ⚠️ に実測がある）。
+///
+/// 「検証を通った証拠」ではあるが、**「いまも通る証拠」ではない。**
+/// 長く持ち回るほど嘘に近づくので、**必要になったら取り直すこと。**
 struct ContainedPath: Sendable, Equatable {
 
     /// **実際に I/O に使う URL。**
@@ -239,8 +248,14 @@ enum FolderContainment {
         case EACCES, EPERM:
             .accessDenied(path)
         case ELOOP:
-            // リンクの環。**追い切れないものは通さない。**
-            .pathChangedDuringAccess(path)
+            // リンクの環（または段数が多すぎる）。**追い切れないものは通さない。**
+            //
+            // **ここは永続的な失敗である。** `realpath` はパス全体を辿るので、
+            // ELOOP は「辿り方が閉じている」という構造の話であり、時間が経っても直らない。
+            // 一時的な差し替え（TOCTOU）で ELOOP になるのは
+            // `FolderReader` の `open(O_NOFOLLOW)` のほうで、あちらは
+            // `.pathChangedDuringAccess` のまま ── **文言が正反対になるので混ぜないこと。**
+            .symbolicLinkCycle(path)
         case ENAMETOOLONG, EINVAL:
             .invalidPath(path)
         default:
@@ -328,10 +343,20 @@ enum FolderContainment {
     /// - 相対成分の側は正準化済みなので、**リンクは1つも残っていない**（手順2の成果を失わない）。
     /// - 根の側は利用者が選んだ URL そのものなので、**拡張の範囲から出ない**。
     ///
-    /// > **【残る穴 / TOCTOU】検証と実際に開く瞬間の間に、成分が差し替えられる余地がある。**
+    /// > **【残る穴 / TOCTOU】検証のあと、成分が差し替えられる余地がある。**
     /// > 完全に塞ぐには `openat(2)` で成分ごとに `O_NOFOLLOW` を積む必要があり、
     /// > 本章の範囲（単一利用者・**読み取りのみ**・ローカル）に対して割に合わない。
     /// > 最後の成分だけは `FolderReader` が `O_NOFOLLOW` で開いて塞いである。
+    /// >
+    /// > **窓の広さを書き違えないこと【実測 2026-08-18】。**
+    /// > 「検証と実際に開く瞬間の間」と書いてあったが、**実際には上限が無い。**
+    /// > 戻り値の `ContainedPath` は有効期限を持たない値なので、
+    /// > 呼び手が持ち続ければ、アクセススコープを抜けた何分後でも同じ穴が開いている
+    /// > （実演: `AdversarialFileAccessTests`
+    /// > `testAContainedPathOutlivesTheScopeAndTheRootCheckThatIssuedIt`。
+    /// > 途中の成分を根の外へのリンクに差し替えると、根の外の中身が読める）。
+    /// > **狭い窓だと思って設計を足さないこと。**
+    /// >
     /// > **FR-20（書き込み・コマンド実行）を足すときは、ここを必ず見直すこと。**
     /// > 読み取りなら最悪でも「別のファイルを読む」だが、書き込みは実害になる。
     static func resolve(

@@ -65,6 +65,14 @@ final class ContextWindowTests: XCTestCase {
     }
 
     /// 末尾の改行で行が1つ増えないこと。**増えると総行数の申告が常に1多くなる。**
+    ///
+    /// ## CRLF は「途中」ではなく「末尾」で踏むこと
+    ///
+    /// **2026-08-18 追加。** ここは `"a\r\nb"`（CRLF が**途中**にある形）しか踏んでいなかった。
+    /// ところが穴はちょうど**末尾**にあり、`"a\r\n"` は 2行 と数えられていた ──
+    /// `hasSuffix("\n")` が `Character` 単位で、Swift の `Character` は
+    /// **CRLF を1文字として扱う**ので、末尾の空要素が落ちなかった。
+    /// 途中の CRLF だけを踏んでいるかぎり、この行はいつまでも緑のままである。
     func testLineSplittingBoundaries() {
         func split(_ text: String) -> [String] {
             ContextWindow.lines(of: text).map(String.init)
@@ -77,6 +85,23 @@ final class ContextWindowTests: XCTestCase {
         XCTAssertEqual(split("\n"), [""])
         // CRLF は行の中身として残す。落とすと「原文の部分列」と言えなくなる。
         XCTAssertEqual(split("a\r\nb"), ["a\r", "b"])
+        // **末尾の CRLF でも行が増えないこと**（`Character` 単位で末尾を見ると増える）。
+        XCTAssertEqual(split("a\r\n"), ["a\r"], "CRLF で終わるファイルが1行多く数えられている")
+        XCTAssertEqual(split("a\r\nb\r\n"), ["a\r", "b\r"])
+        XCTAssertEqual(split("\r\n"), ["\r"])
+        XCTAssertEqual(split("a\r\n\r\n"), ["a\r", "\r"], "CRLF の空行は行である")
+
+        // **窓の本文は数え方が違う。** 読み手は行を `\n` で**連結して**返すので、
+        // そこでの末尾の `\n` は終端ではなく区切りである（`windowLines(of:)` の但し書き）。
+        // 同じ文字列を同じ関数で数えると、末尾の空行が受け渡しで消える。
+        func windowSplit(_ text: String) -> [String] {
+            ContextWindow.windowLines(of: text).map(String.init)
+        }
+        XCTAssertEqual(windowSplit(""), [], "1行も読めなかった窓は 0行")
+        XCTAssertEqual(windowSplit("a"), ["a"])
+        XCTAssertEqual(windowSplit("a\n"), ["a", ""], "窓では末尾の改行は区切り（2行目は空行）")
+        XCTAssertEqual(windowSplit("a\nb"), ["a", "b"])
+        XCTAssertEqual(windowSplit("\n"), ["", ""])
     }
 
     func testSingleLineFileThatIsTooLongForTheBudgetStillReportsOneLine() {
@@ -96,19 +121,41 @@ final class ContextWindowTests: XCTestCase {
     ///
     /// 実測してから上限をその値に置くことで、境界をぴたりと踏んでいる。
     /// 定数を書くと、見出しの文言を1文字変えただけでテストの意図が崩れる。
+    ///
+    /// ## `offset` を掃くこと（2026-08-18）
+    ///
+    /// ここは `offset=1` しか踏んでいなかった。**それは切り詰めの近道が覆っていた唯一の場合**で、
+    /// 「窓が終端に届くと丸ごと入るのに切られる」という欠陥は、ちょうどこの隙間から漏れていた
+    /// （終端に届くと断り書きから「続きは offset=N から」が消えて全体が**縮み**、
+    /// 挟み込み探索がその1点を飛び越える）。
+    /// **`offset=1` は、この層でいちばん通る道ではない** ── モデルが続きを読むときは必ず `offset>1` である。
     func testExactlyAtTheBudgetIsNotClipped() {
         let source = (1...20).map { "line \($0)" }.joined(separator: "\n")
-        let whole = ContextWindow.clip(
-            source, path: "b.txt", budget: ContextBudget(tokens: 100_000), counter: .characters)
-        XCTAssertFalse(whole.isClipped, "前提: 上限が十分なら切られない")
 
-        let exact = ContextWindow.clip(
-            source, path: "b.txt",
-            budget: ContextBudget(tokens: whole.contextTokens), counter: .characters)
+        for offset in [1, 2, 3, 7, 20] {
+            let window = ReadWindow(offset: offset)
+            let whole = ContextWindow.clip(
+                source, path: "b.txt", window: window,
+                budget: ContextBudget(tokens: 100_000), counter: .characters)
 
-        XCTAssertFalse(exact.isClipped, "上限ちょうどは収まる")
-        XCTAssertEqual(exact.contextTokens, whole.contextTokens)
-        XCTAssertEqual(exact.body, whole.body)
+            let exact = ContextWindow.clip(
+                source, path: "b.txt", window: window,
+                budget: ContextBudget(tokens: whole.contextTokens), counter: .characters)
+
+            // **「切られていない」を `isClipped` で測れるのは offset=1 のときだけである。**
+            // 窓が狭ければ `.lineWindow` で「一部です」と言うのが正しい ─ 測りたいのは
+            // 「上限ちょうどでも、**その窓の中身は1行も落ちない**」ことのほうである。
+            XCTAssertEqual(
+                exact.includedLineCount, whole.includedLineCount,
+                "上限ちょうどで窓が切られた（offset=\(offset) / \(exact.reason.rawValue)）")
+            XCTAssertEqual(exact.body, whole.body, "offset=\(offset)")
+            XCTAssertEqual(exact.reason, whole.reason, "offset=\(offset)")
+            XCTAssertEqual(exact.contextTokens, whole.contextTokens, "offset=\(offset)")
+            if offset == 1 {
+                XCTAssertFalse(whole.isClipped, "前提: 上限が十分なら切られない")
+                XCTAssertFalse(exact.isClipped, "上限ちょうどは収まる")
+            }
+        }
     }
 
     /// 上限を1つ下げたら切れる。**上限が効いていることの対偶側。**
@@ -130,18 +177,40 @@ final class ContextWindowTests: XCTestCase {
     }
 
     /// 上限を1ずつ動かしても、入る行数が飛んだり戻ったりしないこと。
+    ///
+    /// ## 「減らない」だけでは足りない（2026-08-18）
+    ///
+    /// 単調性だけを見ていると、**丸ごと入るのに切っている**状態を素通りする ──
+    /// 少なく入れ続けても「減ってはいない」からである。
+    /// 実際、`offset=7`（窓は 34行）で上限を 380 に置くと **31行**しか入っていなかった。
+    /// 34行ぜんぶで 380 に収まるのに、である。
+    /// **入るなら入れる**ことを、実測した「丸ごとの大きさ」と突き合わせて測る。
     func testIncludedLinesGrowMonotonicallyWithTheBudget() {
         let source = (1...40).map { "line \($0)" }.joined(separator: "\n")
-        var previous = 0
-        for budget in stride(from: 40, through: 500, by: 1) {
-            let outcome = ContextWindow.clip(
-                source, path: "m.txt", budget: ContextBudget(tokens: budget), counter: .characters)
-            XCTAssertGreaterThanOrEqual(
-                outcome.includedLineCount, previous,
-                "上限を増やしたのに入る行が減った（budget=\(budget)）")
-            previous = outcome.includedLineCount
+
+        for offset in [1, 2, 3, 7, 11] {
+            let window = ReadWindow(offset: offset)
+            let whole = ContextWindow.clip(
+                source, path: "m.txt", window: window,
+                budget: ContextBudget(tokens: 100_000), counter: .characters)
+
+            var previous = 0
+            for budget in stride(from: 40, through: 500, by: 1) {
+                let outcome = ContextWindow.clip(
+                    source, path: "m.txt", window: window,
+                    budget: ContextBudget(tokens: budget), counter: .characters)
+                XCTAssertGreaterThanOrEqual(
+                    outcome.includedLineCount, previous,
+                    "上限を増やしたのに入る行が減った（budget=\(budget) / offset=\(offset)）")
+                if budget >= whole.contextTokens {
+                    XCTAssertEqual(
+                        outcome.includedLineCount, whole.includedLineCount,
+                        "丸ごと入る上限なのに切っている（budget=\(budget) / offset=\(offset)）")
+                }
+                previous = outcome.includedLineCount
+            }
+            XCTAssertEqual(previous, 40 - offset + 1, "十分な上限では窓の全部が入る（offset=\(offset)）")
         }
-        XCTAssertEqual(previous, 40, "十分な上限では全行入る")
     }
 
     // MARK: - 境界5: 巨大ファイル
@@ -319,16 +388,38 @@ final class ContextWindowTests: XCTestCase {
     }
 
     /// 本文を作らない・省略記号を混ぜない。**要約は第3段であって、本章では入れない。**
+    ///
+    /// ## 計器を `String.contains` から**バイト列**へ替えてある（2026-08-18）
+    ///
+    /// 測りたいのは「**原文のバイトをそのまま切り出したか**」であって、
+    /// 「`Character` として部分列か」ではない。この2つは CRLF でずれる ──
+    /// Swift の `Character` は **CRLF を1文字として扱う**ので、
+    /// 原文 `"a\r\nb"` の中に `"\r"` 単体は存在しない。1行目だけを取った本文 `"a\r"` は
+    /// **バイト列としては原文の先頭2バイトそのもの**なのに、`source.contains(body)` は
+    /// **false を返す** ── つまり**実装が正しいままテストが落ちる。**
+    ///
+    /// 元の本文（LF だけ）に CRLF を1つ足せなかったのはそのためであり、
+    /// **計器がずれているせいで、踏むべき入力を足せない状態になっていた。**
+    /// 計器を替えたので CRLF の本文をここへ足せる。
+    /// （同じ話の詳細は `AdversarialContextTests` の
+    /// `testBodyIsAContiguousRunOfSourceBytesEvenWhereGraphemesDisagree`）
     func testBodyIsAlwaysAContiguousPieceOfTheSource() {
-        let source = (1...60).map { "行 \($0): 内容の本体がここにある" }.joined(separator: "\n")
+        let sources = [
+            (1...60).map { "行 \($0): 内容の本体がここにある" }.joined(separator: "\n"),
+            // **CRLF の本文。** `String.contains` で測っていたころは足せなかった入力である。
+            (1...60).map { "行 \($0): 内容の本体がここにある" }.joined(separator: "\r\n") + "\r\n",
+        ]
 
-        for budget in stride(from: 20, through: 900, by: 11) {
-            let outcome = ContextWindow.clip(
-                source, path: "notes.md", budget: ContextBudget(tokens: budget))
-            guard !outcome.body.isEmpty else { continue }
-            XCTAssertTrue(
-                source.contains(outcome.body),
-                "本文が原文の一部になっていない（budget=\(budget)）")
+        for source in sources {
+            for budget in stride(from: 20, through: 900, by: 11) {
+                let outcome = ContextWindow.clip(
+                    source, path: "notes.md", budget: ContextBudget(tokens: budget))
+                guard !outcome.body.isEmpty else { continue }
+                XCTAssertTrue(
+                    Self.bytesContain(outcome.body, in: source),
+                    "本文が原文のバイト列の連続部分になっていない（budget=\(budget)）: "
+                    + outcome.body.debugDescription)
+            }
         }
     }
 
@@ -653,6 +744,23 @@ final class ContextWindowTests: XCTestCase {
     private static func sampleRead(path: String, body: String) -> ReadOutcome {
         ContextWindow.clip(
             body, path: path, budget: ContextBudget(tokens: 100_000), counter: .characters)
+    }
+
+    /// **バイト列としての連続部分列か。**
+    ///
+    /// `String.contains` は `Character` 単位なので、この用途には使えない ──
+    /// CRLF をまたぐ本文で**実装が正しいまま false になる**
+    /// （`testBodyIsAlwaysAContiguousPieceOfTheSource` の説明）。
+    private static func bytesContain(_ needle: String, in haystack: String) -> Bool {
+        let needleBytes = Array(needle.utf8)
+        let haystackBytes = Array(haystack.utf8)
+        guard !needleBytes.isEmpty else { return true }
+        guard needleBytes.count <= haystackBytes.count else { return false }
+        for start in 0...(haystackBytes.count - needleBytes.count)
+        where Array(haystackBytes[start..<(start + needleBytes.count)]) == needleBytes {
+            return true
+        }
+        return false
     }
 }
 

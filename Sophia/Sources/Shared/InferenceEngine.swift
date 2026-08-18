@@ -96,6 +96,27 @@ import Foundation
 ///
 /// ツールを扱わない実装（`StubEngine` / `MockEngine`）は `options.tools` を
 /// **無視してよい。** 無視は「渡さない」と同じ意味になるので、この約束を破らない。
+///
+/// ## 9. ツールの往復は**エンジンの中で閉じる**（FR-19 / DESIGN.md 第16章）
+///
+/// **2026-08-18 追加。** モデルがツールを呼んだら、実行して結果を会話へ足し、
+/// 生成を再開するところまでが `chat(_:options:)` **1回の中**で起きる。
+/// 呼び出し側（UI）は `.toolCall` / `.toolResult` を**見なくても正しく動く** ──
+/// 本文は今までどおり `.content` として流れ、終端は今までどおり `.done` である。
+///
+/// | 誰が | 何をするか |
+/// |---|---|
+/// | 呼び出し側 | `options.tools` を入れる（＝門を開ける）。実行役を注入する |
+/// | エンジン | 呼ばれたら実行役へ渡し、結果を会話へ足して**もう一度生成する** |
+/// | 実行役（`ToolExecuting`） | 1回ぶん実行して返す。**往復の回数もここが数える** |
+///
+/// ### `SophiaMessage` に tool 役を足さないこと（決定済み）
+///
+/// 生の往復は**エンジンの中だけに存在し、外へは出ない。**
+/// 履歴に残るのは栞1行である（16.3節 第2段 / `ContextTranscript`）。
+/// `MessageRole` を増やすと `messages.role` の CHECK 制約
+/// （`SophiaMigrations.swift`）と `StoreSchemaTests` に波及する ──
+/// **得るものが無いのに移行を1つ増やすことになる。**
 protocol InferenceEngine: Sendable {
 
     /// どの実装か。UI の表示に使う（`stub` のときはダミー動作である旨を出す）。
@@ -135,4 +156,126 @@ protocol InferenceEngine: Sendable {
         _ messages: [SophiaMessage],
         options: ChatOptions
     ) -> AsyncThrowingStream<Chunk, any Error>
+}
+
+// =============================================================================
+//  ツールを実行する役（FR-19 / DESIGN.md 第16章 / NFR-09）
+// -----------------------------------------------------------------------------
+//  ## なぜ `ChatOptions` ではなくここなのか
+//
+//  `ChatOptions` は `Equatable` / `Codable` である。**クロージャは持てない。**
+//  持たせれば両方失われ、`EngineToolWiringTests.testChatOptionsSurvivesEncodingWithTools`
+//  がその場で落ちる（落ちてよい試験である ── 型の性質を守るために置いてある）。
+//
+//  ## なぜ推論層が `Sources/Files/` を知ってはいけないのか
+//
+//  **エンジンは差し替えられる（NFR-09）。** `MLXEngine` が `FolderToolRunner` を
+//  直接呼ぶ形にすると、次のエンジンは**同じ実行役を使えない** ── ツールの実行が
+//  推論の実装に癒着する。ここに protocol を1枚置くと、
+//  「読む権限を持つ層」と「モデルを回す層」がお互いを知らないまま繋がる。
+//
+//  | 層 | 知っているもの |
+//  |---|---|
+//  | `Sources/Inference/` | **`ToolExecuting` と `ModelToolCall` だけ** |
+//  | `Sources/Tools/` | フォルダ・封じ込め・文脈の上限。**推論を知らない** |
+//  | アプリ（組み立てる側） | **両方。** ここだけが `FolderToolRunner` を差し込む |
+//
+//  実際の差し込みは `MLXEngine.init(toolExecutor:)` か
+//  `MLXEngine.setToolExecutor(_:)`（会話ごとに付け替える）である。
+// =============================================================================
+
+/// **モデルが呼んだツールを1回ぶん実行して、モデルへ返せる形にする役**（16.8節）。
+///
+/// ## 実装が守ること
+///
+/// | 約束 | なぜ |
+/// |---|---|
+/// | **throw しない。失敗も戻り値** | 16.8節「往復を1回で打ち切らない」。読めなかった旨をモデルへ返す |
+/// | **往復の回数はここが数える** | 数える場所を呼び出し側に置くと、中断・再試行・別ターンで必ず数え漏れる |
+/// | **戻り値でアプリの状態を変えない** | 16.6節 約束2。読めるフォルダはモデルの出力では増えない |
+/// | 主スレッドで I/O をしない | NFR-02。`actor` にすれば `await` するだけで降りる |
+///
+/// ## エンジンが守ること（この protocol の裏側の約束）
+///
+/// **`options.tools` が空の会話では、この役に一度も触らない。**
+/// 実行役が刺さっているかどうかで注入の状態が変わってはいけない（16.6節 約束3）──
+/// 引き金は利用者の操作（＝`tools` を入れたこと）だけである。
+protocol ToolExecuting: Sendable {
+
+    /// **新しい利用者の発言から往復を始める合図。** 回数の数えはここで戻す。
+    ///
+    /// 上限は「1つの問いに答えるまで」に効かせたいものであって、
+    /// 「会話を通じて一度しか読めない」ではない（`FolderToolRunner.resetCallCount`）。
+    /// **エンジンが生成の入口で1回だけ呼ぶ。** 呼び出し側に任せない ──
+    /// 任せた瞬間、呼び忘れた会話だけが2回目から読めなくなる。
+    func beginRoundTrip() async
+
+    /// 1回ぶん実行する。**throw しない。**
+    ///
+    /// 引数の `ModelToolCall` は**モデルが書いた文字列そのまま**である。
+    /// 名前が3つのどれでもないことも、パスが `../../etc/passwd` のこともある。
+    /// **検証はこの役の内側で行うこと**（16.5節の封じ込め）。
+    func execute(_ call: ModelToolCall) async -> ToolExecutionOutcome
+}
+
+/// ツール1回の結果を、**推論層が扱える形**にしたもの。
+///
+/// `Sources/Tools/ToolResult` とは別の型である ── あちらは `ReadOutcome` や
+/// `FolderAccessError` を抱えており、**推論層に持ち込むと `Sources/Files/` が
+/// 芋づるで付いてくる**（NFR-09 が静かに壊れる）。ここに詰め替えるのは実行役の仕事。
+///
+/// ## 文字列は「囲い済み・1行済み」で来ること
+///
+/// `responseText` は `<tool_response>` の中へ**そのまま**入る。
+/// 囲い（16.6節 約束5）も長さの上限（16.3節）も**実行側で済んでいる**前提であり、
+/// 推論層は1文字も足さない ── 足す口を作ると、囲いを忘れる経路がそこにできる。
+struct ToolExecutionOutcome: Sendable, Equatable {
+
+    /// モデルが呼んだ名前（**直さないこと**）。
+    var toolName: String
+
+    /// 呼び出しの識別子。`<tool_call>` と `<tool_response>` を対応づけるために返す。
+    /// モデルが出さないことがあるので Optional（`ModelToolCall.callID` と同じ）。
+    var callID: String?
+
+    /// **そのまま `<tool_response>` に入る文字列**（＝`ToolResult.contextText`）。
+    var responseText: String
+
+    /// 画面と履歴に残る1行（＝`ToolResult.bookmarkLine`）。
+    var summaryLine: String
+
+    /// 読めなかった／呼び出しが成立しなかった。**往復は続く。**
+    var isFailure: Bool
+
+    /// **これ以上ツールを渡してはいけない。**
+    ///
+    /// 往復の上限に達したときに `true` になる（`ToolRejection.callLimitReached`）。
+    /// エンジンはこれを見て**次の1回でツールの定義ごと外す** ──
+    /// 外せばテンプレートの門が閉じ、モデルは呼びようがなくなる（16.2節 / FR-21）。
+    ///
+    /// **上限そのものはここでは決めない。** 数えているのは実行役だけであり、
+    /// 推論層が別に数えると真実の出所が2つになる。
+    var stopsRoundTrips: Bool
+
+    init(
+        toolName: String,
+        callID: String? = nil,
+        responseText: String,
+        summaryLine: String,
+        isFailure: Bool,
+        stopsRoundTrips: Bool = false
+    ) {
+        self.toolName = toolName
+        self.callID = callID
+        self.responseText = responseText
+        self.summaryLine = summaryLine
+        self.isFailure = isFailure
+        self.stopsRoundTrips = stopsRoundTrips
+    }
+
+    /// 画面へ流す形（`Chunk.toolResult`）。**同じ値から作る**ので文が食い違わない。
+    func activity(round: Int) -> ToolActivity {
+        ToolActivity(
+            toolName: toolName, summary: summaryLine, isFailure: isFailure, round: round)
+    }
 }

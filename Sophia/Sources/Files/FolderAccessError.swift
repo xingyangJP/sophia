@@ -106,7 +106,30 @@ enum FolderAccessError: Error, Sendable, Equatable {
     case notUTF8(String)
 
     /// **検証の後、開くまでの間にパスが差し替わった疑い**（`O_NOFOLLOW` が ELOOP を返した）。
+    ///
+    /// **一時的な失敗である。** もう一度呼べば結果が変わりうるので、文言も再試行を勧める。
+    /// **永続的な失敗をここに混ぜないこと** ── `.symbolicLinkCycle` を分けてあるのはそのためである。
     case pathChangedDuringAccess(String)
+
+    /// **シンボリックリンクが環になっていて、辿り切れない**（`realpath` が ELOOP を返した）。
+    ///
+    /// ## なぜ `.pathChangedDuringAccess` と分けるのか
+    ///
+    /// `ELOOP` が返る理由は2つある ──
+    /// **(a) 検証と読み取りの間に差し替えられた（一時的）**、
+    /// **(b) リンクが輪になっている / 段数が多すぎる（永続的）。**
+    /// 両方を1つの `case` にすると、文言はどちらかに寄る。
+    /// 実際に寄っていたのは (a) のほうで、**環に対して「もう一度試すことはできます」と返していた。**
+    ///
+    /// **環は何度辿っても環である。** 素直なモデルは同じ呼び出しを繰り返し、
+    /// 往復ぶんのプリフィルを払い続ける（利用者向けの文言も同じで、人も同じことをする）。
+    /// 危険ではない ── **無駄が出る形**であり、16.8節の「往復を1回で打ち切らない」の裏で
+    /// 「打ち切れない往復」を作っていた。
+    ///
+    /// **どちらの errno かで分けているのではなく、どの層が返したかで分けている。**
+    /// `realpath`（検証の段階・パス全体を辿る）で ELOOP なら環、
+    /// `open(O_NOFOLLOW)`（最後の成分だけを見る）で ELOOP なら差し替えである。
+    case symbolicLinkCycle(String)
 
     case ioFailed(path: String, detail: String)
 
@@ -219,6 +242,13 @@ enum FolderAccessError: Error, Sendable, Equatable {
                  "もう一度お試しください。",
                  "path changed during access (ELOOP): \(path)")
 
+        case .symbolicLinkCycle(let path):
+            // **「もう一度」と言わないこと。** 何度辿っても環は環である。
+            make("シンボリックリンクが循環しているため、たどれませんでした（\(path)）。",
+                 "リンクが自分自身を指しています。"
+                 + "実体のファイルを直接指定するか、リンクの張り方を見直してください。",
+                 "symlink cycle (ELOOP): \(path)")
+
         case .ioFailed(let path, let detail):
             make("ファイルを読めませんでした（\(path)）。",
                  "ファイルが使用中でないかを確認して、もう一度お試しください。",
@@ -297,6 +327,14 @@ enum FolderAccessError: Error, Sendable, Equatable {
 
         case .pathChangedDuringAccess(let path):
             "失敗: \(path) を開く直前に実体が変わりました。もう一度試すことはできます。"
+
+        case .symbolicLinkCycle(let path):
+            // **再試行を勧めないこと。** 永続的な失敗に「もう一度」と言うと、
+            // 素直なモデルは同じ呼び出しを繰り返し、往復ぶんのプリフィルを払い続ける。
+            // **次に何を試せるか**は書く（16.8節「往復を1回で打ち切らない」）。
+            "失敗: \(path) はシンボリックリンクが循環しているため、たどれませんでした。"
+            + "同じ指定で試し直しても結果は変わりません。"
+            + "一覧を取り直して、リンクではない実体のパスを指定してください。"
 
         case .ioFailed(let path, _):
             "失敗: \(path) を読めませんでした。内容は不明として扱ってください。"

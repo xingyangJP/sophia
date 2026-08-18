@@ -27,6 +27,17 @@ import XCTest
 /// 破れたのは封じ込めではなく、**その周りの申告**である ──
 /// 「全部見せた」と言いながら隠していること、名前が見出しを偽造できること、
 /// 上限がモデルの引数で外れること。**中身は守られていて、説明が守られていない。**
+///
+/// # 2026-08-18 に直したもの（`Sources/Files/` 側）
+///
+/// | 直したもの | いまどうなっているか |
+/// |---|---|
+/// | 隠しファイルが総数からも消えていた | **総数には数える。** 省いた件数は `omittedHiddenCount` |
+/// | `list(limit: 0)` で上限が外れた | **0 と負は既定に戻す。** 大きい値でも天井は上がらない |
+/// | リンクの環に再試行を勧めていた | `.symbolicLinkCycle` を分けた。**「結果は変わりません」と言う** |
+/// | `withAccess` の嘘のコメント | 実測に合わせて書き直した。**穴そのものは塞いでいない**（下の TOCTOU の項） |
+///
+/// **名前が事実を述べる規約にしたがって、直した3件はテスト名も変えてある。**
 final class AdversarialFileAccessTests: XCTestCase {
 
     /// ```
@@ -278,36 +289,44 @@ final class AdversarialFileAccessTests: XCTestCase {
 
     // MARK: - 破れたもの（申告のほう）
 
-    /// **隠しファイルは、一覧から消えるだけでなく総数からも消える。切ったとは言わない。**
+    /// **隠しファイルは一覧から省くが、総数からは消さない**【2026-08-18 に直した】。
     ///
     /// 16.4節は「件数上限。**超えたら切って総数を添える**」と決めていて、
     /// `DirectoryListing.totalCount` の型コメントは
     /// 「切ったことを黙っていると、モデルは**このフォルダには N 件しかないと断定する**」と書いている。
     ///
-    /// ところが隠しファイルによる切り捨ては、`totalCount` に**一度も現れない。**
-    /// 22件あるフォルダが「全2件・切っていない」として渡る。
-    /// **上限で切ったときだけ申告して、方針で切ったときは黙っている。**
+    /// 直す前、隠しファイルによる切り捨ては `totalCount` に**一度も現れなかった。**
+    /// 31件あるフォルダが「全11件・切っていない」としてモデルへ渡っていた ──
+    /// **上限で切ったときだけ申告して、方針で伏せたときは黙る**形である。
     /// モデルから見て、この2つは区別が付かない ── どちらも「見えていないものがある」である。
     ///
-    /// これは封じ込めの穴ではない（余計に見せているのではなく、少なく見せている）。
-    /// 破れているのは 16.3節の**「切ったことを必ず戻り値に書く」**のほうである。
-    func testHiddenEntriesVanishFromTheTotalCountWithoutAnyNotice() throws {
+    /// 封じ込めの穴ではなかった（余計に見せているのではなく、少なく見せていた）。
+    /// 破れていたのは 16.3節の**「切ったことを必ず戻り値に書く」**のほうである。
+    ///
+    /// ## 3つの選択肢から選んだもの
+    ///
+    /// **「総数には数え、一覧からは省き、省いた件数を別に持つ」を選んだ。**
+    /// 隠しファイルを一覧に出す案は取らなかった ──
+    /// 出さないのは**費用**（`.DS_Store` に毎ターン払わない）と
+    /// **うっかりの確率**（`.env` をモデルの目の前に置かない）を下げる判断であって、
+    /// 防御ではない（すぐ下の `testHiddenFilesAreOutOfSightButNotOutOfReach` のとおり読めば読める）。
+    /// **方針は変えず、方針の結果を黙るのをやめた。**
+    func testHiddenEntriesStayInTheTotalCountEvenThoughTheyAreOmitted() throws {
         let visible = try list("")
         let everything = try list("", includingHidden: true)
 
         // 件数を直に書かない（仕掛けを1つ足すたびに直す羽目になる）。**差だけを見る。**
+        // **物差しは `entries.count` のほう** ── `totalCount` の正しさを `totalCount` で測らない。
         XCTAssertEqual(
-            everything.totalCount, visible.totalCount + 20, "前提: 隠しファイルを20件置いてある")
+            everything.entries.count, visible.entries.count + 20, "前提: 隠しファイルを20件置いてある")
         XCTAssertFalse(everything.isTruncated, "前提: 上限では切れていない")
 
-        XCTExpectFailure(
-            "既知の欠陥: 隠しファイルの除外が `totalCount` にも `isTruncated` にも現れない。"
-            + "モデルには『このフォルダは見えている件数がすべて』と映る。"
-        ) {
-            XCTAssertTrue(
-                visible.isTruncated || visible.totalCount == everything.totalCount,
-                "20件を伏せたのに『全\(visible.totalCount)件・切っていない』として渡している")
-        }
+        XCTAssertTrue(
+            visible.isTruncated,
+            "20件を伏せたのに『全\(visible.totalCount)件・切っていない』として渡している")
+        XCTAssertEqual(
+            visible.totalCount, everything.entries.count, "総数が『見えている件数』に縮んでいる")
+        XCTAssertEqual(visible.omittedHiddenCount, 20, "何件伏せたのかを言えること")
     }
 
     /// **一覧に出さないファイルも、名前を当てれば読める。**
@@ -329,40 +348,56 @@ final class AdversarialFileAccessTests: XCTestCase {
         XCTAssertEqual(try read(".secret1").text, "隠し1")
     }
 
-    /// **`limit` の意味が、一覧と読み取りで正反対である。**
+    /// **`limit` の意味を、一覧と読み取りで揃えた**【2026-08-18 に直した】。
     ///
-    /// | 呼び出し | `limit: 0` の意味 |
+    /// | 呼び出し | `limit: 0` / 負 の意味 |
     /// |---|---|
-    /// | `FolderReader.list` | **上限なし**（全件返す。`isTruncated` も false） |
-    /// | `FolderReader.readText` | 既定の 200行 |
+    /// | `FolderReader.list` | **既定の 200件**（直す前は「上限なし」＝全件） |
+    /// | `FolderReader.readText` | 既定の 200行（元からこちら） |
     ///
     /// 16.4節が渡す `list_directory` / `read_file` は、モデルから見れば**同じ名前の引数**である。
-    /// 片方は 0 で上限が外れ、もう片方は 0 で既定に戻る。
-    ///
-    /// 一覧側が痛い ── **アプリが決めた上限を、モデルの引数1つで外せる。**
+    /// 片方が 0 で上限を外し、もう片方が 0 で既定に戻るなら、
+    /// `FolderReadLimits.entryLimit` は「**呼び手が 0 と書くまでの上限**」でしかない。
     /// 16.6節 約束3（戻り値でアプリの制限を緩めない）は「戻り値」の話だが、
-    /// **引数で緩められるなら同じことである。** 数万件のフォルダで `limit: 0` を渡されると、
-    /// 200件の上限は無かったことになる（しかも `isTruncated` は false なので、誰も気づかない）。
+    /// **引数で緩められるなら同じことである。**
     ///
-    /// ツール層はまだ無い。**モデルの引数をそのまま渡す前に、ここを決めること。**
-    func testTheSameArgumentMeansOppositeThingsInListAndRead() throws {
-        let all = try list("", includingHidden: true)
-        XCTAssertGreaterThan(all.totalCount, 3, "前提: 上限を試せるだけの件数がある")
-
-        // 一覧: 0 と 負 で上限が外れる。
-        for limit in [0, -1] {
-            let listing = try list("", limit: limit, includingHidden: true)
-            XCTAssertEqual(
-                listing.entries.count, all.totalCount,
-                "list(limit: \(limit)) がアプリ側の上限を外している")
-            XCTAssertFalse(listing.isTruncated, "しかも切ったとは言わない")
+    /// **モデルからは踏めなかった**（ツール層は `limit` を公開していない）。
+    /// 塞いだのは入口の契約のほうである ── **公開しない判断は、いつか誰かが変える。**
+    ///
+    /// ## 上限より多い件数を実際に置いて測ること
+    ///
+    /// **既定の一覧（数十件）で測ると、直す前も後も緑になる。**
+    /// 200件の天井は 31件のフォルダでは踏めないからである。
+    /// 天井を測るテストには**天井より多い件数**が要る。
+    func testNonPositiveLimitsFallBackToTheDefaultInsteadOfRemovingIt() throws {
+        // **これが無いと、このテストは何も測っていない。**
+        let crowd = root.appendingPathComponent("crowd", isDirectory: true)
+        try FileManager.default.createDirectory(at: crowd, withIntermediateDirectories: true)
+        let crowdCount = FolderReadLimits.entryLimit + 1
+        for index in 1...crowdCount {
+            try write("x", to: crowd.appendingPathComponent(String(format: "f%04d.txt", index)))
         }
 
-        // 上限ちょうど / 1つ下 の境界は正しい。
-        XCTAssertFalse(try list("", limit: all.totalCount, includingHidden: true).isTruncated)
-        XCTAssertTrue(try list("", limit: all.totalCount - 1, includingHidden: true).isTruncated)
+        // 一覧: 0 と 負 は既定に戻る。**上限は外れない。**
+        for limit in [0, -1] {
+            let listing = try list("crowd", limit: limit)
+            XCTAssertEqual(
+                listing.entries.count, FolderReadLimits.entryLimit,
+                "list(limit: \(limit)) がアプリ側の上限を外している")
+            XCTAssertEqual(listing.totalCount, crowdCount, "総数は切る前の数のままであること")
+            XCTAssertTrue(listing.isTruncated, "切ったなら切ったと言うこと")
+        }
 
-        // 読み取り: 0 と 負 は既定（200行）に戻る。**外れない。**
+        // 上限より大きい数を渡しても、上へは動かない。
+        let greedy = try list("crowd", limit: crowdCount)
+        XCTAssertEqual(
+            greedy.entries.count, FolderReadLimits.entryLimit, "引数で上限を上げられている")
+        XCTAssertTrue(greedy.isTruncated)
+
+        // 上限より小さい数はそのまま効く（**締め付けが過剰でないこと**）。
+        XCTAssertEqual(try list("crowd", limit: 3).entries.count, 3)
+
+        // 読み取り: 0 と 負 は既定（200行）に戻る。**元から外れない。**
         for limit in [0, -1] {
             let window = try read("notes.md", limit: limit)
             XCTAssertEqual(window.totalLines, 5)
@@ -391,16 +426,19 @@ final class AdversarialFileAccessTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(entry).relativePath, Self.forgedName)
     }
 
-    /// **同じ CRLF ファイルについて、読む層と切る層が違う行数を申告する。**
+    /// **同じ CRLF ファイルについて、読む層と切る層が違う行数を申告していた。**
     ///
     /// `FolderReader` はバイト（`0x0A` の個数）で数えるので **3行**。
     /// `ContextWindow.lines(of:)` は末尾判定に `hasSuffix("\n")` を使っており、
-    /// **Swift の `Character` は CRLF を1文字として扱う**ので末尾の空要素が落ちず **4行**になる
+    /// **Swift の `Character` は CRLF を1文字として扱う**ので末尾の空要素が落ちず **4行**になっていた
     /// （原因と影響は `AdversarialContextTests.testLinesInventsAPhantomLineWhenTheFileEndsWithCRLF`）。
     ///
-    /// **どちらの層のテストも、自分の層の中では正しい。** 食い違いは境界にしか無く、
-    /// 境界を渡るテストが1つも無いので、いままで誰も見ていない。
-    /// ツール層はこれから書かれる ── **渡す前に、どちらの数を正とするか決めること。**
+    /// **どちらの層のテストも、自分の層の中では正しかった。** 食い違いは境界にしか無く、
+    /// 境界を渡るテストが1つも無かったので、誰も見ていなかった。
+    ///
+    /// **2026-08-18 修正済み。** 読み手（バイト）の数を正とし、
+    /// `ContextWindow.lines(of:)` の末尾判定を Unicode スカラーまで降ろした。
+    /// **このテストは境界を渡る唯一の表明なので、直っても消さずに残す。**
     func testTheReaderAndTheClipperDisagreeAboutTheLineCountOfACRLFFile() throws {
         let raw = try String(contentsOf: root.appendingPathComponent("crlf.txt"), encoding: .utf8)
         let fromReader = try read("crlf.txt")
@@ -409,38 +447,55 @@ final class AdversarialFileAccessTests: XCTestCase {
         XCTAssertTrue(fromReader.isComplete, "読み手から見れば全部読めている")
         XCTAssertEqual(fromReader.text, "行1\n行2\n行3", "読み手は `\\r` を落として返す")
 
-        XCTExpectFailure("既知の欠陥: `lines(of:)` の末尾判定が Character 単位で、CRLF を見落とす。") {
-            XCTAssertEqual(
-                ContextWindow.lines(of: raw).count, fromReader.totalLines,
-                "同じファイルを 読み手=\(fromReader.totalLines)行 / 切る層=\(ContextWindow.lines(of: raw).count)行 と数えている")
-        }
+        // **2026-08-18 修正済み。** 印（`XCTExpectFailure`）を外した。
+        XCTAssertEqual(
+            ContextWindow.lines(of: raw).count, fromReader.totalLines,
+            "同じファイルを 読み手=\(fromReader.totalLines)行 / 切る層=\(ContextWindow.lines(of: raw).count)行 と数えている")
     }
 
-    /// **リンクの環は「実体が変わった」として報告され、モデルに再試行を促す。**
+    /// **リンクの環は、永続的な失敗として報告される**【2026-08-18 に直した】。
     ///
     /// `realpath` が `ELOOP` を返すのは2つの場合がある ──
     /// **(a) 検証と読み取りの間に差し替えられた（一時的）**、
     /// **(b) リンクが輪になっている（永続的）。**
-    /// 実装はどちらも `.pathChangedDuringAccess` に落とし、モデルへこう返す:
+    /// 直す前はどちらも `.pathChangedDuringAccess` に落ちていて、モデルへこう返っていた:
     ///
     /// > 失敗: loopA を開く直前に実体が変わりました。**もう一度試すことはできます。**
     ///
-    /// 環は何度試しても環である。**永続的な状態を一時的として報告している。**
+    /// 環は何度試しても環である。**永続的な状態を一時的として報告していた。**
     /// 素直なモデルは同じ呼び出しを繰り返し、往復ぶんのプリフィルを払い続ける
-    /// （利用者向けの文言も「もう一度お試しください」なので、人も同じことをする）。
+    /// （利用者向けの文言も「もう一度お試しください」だったので、人も同じことをする）。
+    /// 危険ではなかった（読めていないという結論は正しい）。**無駄が出る形だった。**
     ///
-    /// 危険ではない（読めていないという結論は正しい）。**無駄が出る形である。**
-    func testASymlinkCycleIsReportedAsATransientRaceAndInvitesEndlessRetries() throws {
+    /// いまは `.symbolicLinkCycle` に分けてある。
+    /// **分けたのは errno ではなく「どの層が返したか」である** ──
+    /// `realpath`（パス全体を辿る）の ELOOP は環、
+    /// `open(O_NOFOLLOW)`（最後の成分だけを見る）の ELOOP は差し替えである。
+    func testASymlinkCycleIsReportedAsAPermanentFailureThatNeedsNoRetry() throws {
         let error = expectFailure { try self.resolve("loopA") }
-        XCTAssertEqual(error, FolderAccessError.pathChangedDuringAccess("loopA"))
+        XCTAssertEqual(error, FolderAccessError.symbolicLinkCycle("loopA"))
 
-        // 何度呼んでも同じ ── つまり「もう一度」に意味が無い。
+        // 何度呼んでも同じ ── **だから「もう一度」と言ってはいけない。**
         XCTAssertEqual(expectFailure { try self.resolve("loopA") },
-                       FolderAccessError.pathChangedDuringAccess("loopA"))
+                       FolderAccessError.symbolicLinkCycle("loopA"))
 
+        let message = try XCTUnwrap(error).modelMessage
+        XCTAssertFalse(
+            message.contains("もう一度試すことはできます"), "永続的な失敗に再試行を勧めている: \(message)")
         XCTAssertTrue(
-            try XCTUnwrap(error).modelMessage.contains("もう一度試すことはできます"),
-            "永続的な失敗に再試行を勧めている")
+            message.contains("結果は変わりません"), "同じ指定では無駄だと言うこと: \(message)")
+        // **次の手は残すこと**（16.8節「往復を1回で打ち切らない」）。
+        XCTAssertTrue(message.contains("一覧"), "次に何を試せるかが書いてあること: \(message)")
+
+        let hint = try XCTUnwrap(error).sophiaError.hint
+        XCTAssertFalse(hint?.contains("もう一度") ?? true, "利用者にも無駄な再試行を勧めないこと: \(hint ?? "")")
+
+        // **一時的な差し替えのほうは、再試行を勧めたままであること。**
+        // 分けた意味は「両方黙らせる」ではない ── 直る失敗まで諦めさせたら往復が減りすぎる。
+        XCTAssertTrue(
+            FolderAccessError.pathChangedDuringAccess("x").modelMessage
+                .contains("もう一度試すことはできます"),
+            "一時的な失敗と永続的な失敗を、逆向きに揃えてしまっている")
     }
 
     /// **比較は「大文字小文字に厳密」ではあるが、「バイト列に厳密」ではない。**
@@ -502,9 +557,16 @@ final class AdversarialFileAccessTests: XCTestCase {
     ///
     /// - 「検証と実際に開く瞬間の間」と書かれているが、実際には**間隔に上限が無い。**
     ///   `ContainedPath` を持ち続ければ、何分後でも同じ穴が開いたままである。
-    /// - `withAccess` のコメントは「持ち出しても `resolve` は失敗するだけ」と書いているが、
+    /// - `withAccess` のコメントは「持ち出しても `resolve` は失敗するだけ」と書いていたが、
     ///   **この環境では失敗しない**（下で実際に読めている）。サンドボックス下で
     ///   スコープ外の読み取りが落ちるかは、**単体テストでは確かめられない**（実機の話）。
+    ///
+    /// > **2026-08-18、コメントの側だけを実測に合わせて直した**
+    /// > （`SecurityScopedFolder.withAccess` / `FolderContainment.resolve` /
+    /// > `ContainedPath` の3か所）。**穴は塞いでいない** ── 塞ぐには成分ごとの
+    /// > `openat(2)` か `F_GETPATH` での確かめ直しが要り、16.5節が範囲外としている。
+    /// > **このテストはいまも通る。** 通らなくなったら、それは誰かが塞いだということなので、
+    /// > 下の但し書きどおりテストを反転させること。
     ///
     /// 読み取り専用のいまは「別のファイルを読む」で済む。**FR-20 で書き込みを足すときは、
     /// この4行がそのまま「別のファイルを壊す」になる。**

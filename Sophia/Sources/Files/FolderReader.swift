@@ -13,6 +13,12 @@ import Foundation
 enum FolderReadLimits {
 
     /// 一覧の既定の件数上限（16.4節「件数上限。超えたら切って総数を添える」）。
+    ///
+    /// **これは「既定」であると同時に「天井」でもある。**
+    /// `FolderReader.list(_:limit:includingHidden:)` は、呼び手が何を渡しても
+    /// この値を超える件数を返さない ── 0 や負で外れることも、大きい数で上げることもできない。
+    /// **上げたいならここを動かすこと。** 上限は呼び出しごとの判断ではなくアプリの判断である
+    /// （16.6節 約束1・約束3。**引数で緩められるなら、戻り値で緩められるのと同じことになる**）。
     static let entryLimit = 200
 
     /// 読み取りの既定の行数上限（16.4節の窓）。
@@ -62,15 +68,38 @@ struct DirectoryListing: Sendable, Equatable {
     /// 根からの相対パス。根そのものなら空文字。
     var path: String
 
-    /// 返した分。**上限で切られていることがある。**
+    /// 返した分。**件数上限と、隠しファイルの方針で減っていることがある。**
     var entries: [DirectoryEntry]
 
     /// **切る前の総数**（16.4節「超えたら切って総数を添える」）。
     ///
     /// 切ったことを黙っていると、モデルは「このフォルダには N 件しかない」と**断定する。**
     /// 切り捨てそのものより、切り捨てを隠すほうが害が大きい。
+    ///
+    /// > **2026-08-18 に意味を直した。** 以前は「一覧に出した候補の総数」だったので、
+    /// > 隠しファイルは**一覧からも総数からも消え**、`isTruncated` も false になっていた。
+    /// > 30件あるフォルダが「全10件・切っていない」としてモデルへ渡っていた ──
+    /// > `ReadOutcome` の型コメントが言う「**切ったのに切ったと言わない実装**」そのものである。
+    /// >
+    /// > **いまはフォルダの中にあるものを全部数える。** 隠しファイルも、件数上限で落ちた分も、
+    /// > すべてここに入る。「見せなかったもの」は理由が何であれ総数と表示数の差に現れる。
     var totalCount: Int
 
+    /// **隠しファイルであることを理由に `entries` から省いた件数。**
+    ///
+    /// `includingHidden: true` なら常に 0（省いていないので）。
+    ///
+    /// `totalCount` との差だけでも「見せていないものがある」ことは伝わるが、
+    /// **件数上限で切ったのか、方針で伏せたのかは伝わらない。**
+    /// モデルにとっては同じ「見えていないものがある」でも、
+    /// **利用者にとっては違う**（前者は続きを見れば済み、後者は方針を変えないと見えない）。
+    /// その区別をここで持つ。
+    var omittedHiddenCount: Int = 0
+
+    /// **見せていないものがあるか。**
+    ///
+    /// 件数上限で落ちた分と、隠しファイルとして伏せた分の**両方**がここに出る
+    /// （`totalCount` が両方を数えているため、差を見るだけで足りる）。
     var isTruncated: Bool { entries.count < totalCount }
 }
 
@@ -131,10 +160,24 @@ enum FolderReader {
 
     /// ディレクトリの直下を列挙する。**再帰しない。**
     ///
+    /// - Parameter limit: 何件まで返すか。**0 と負は「上限なし」ではなく既定に戻す。**
+    ///   `readText` の `limit` と同じ規則にしてある ── 16.4節が渡す `list_directory` と
+    ///   `read_file` は、モデルから見れば**同じ名前の引数**である。
+    ///   片方が 0 で上限を外すなら、`FolderReadLimits.entryLimit` は
+    ///   **引数1つで無かったことにできる数**でしかない。
+    ///   大きい値を渡しても `entryLimit` を超えない（型コメント参照）。
+    ///
     /// - Parameter includingHidden: 既定では隠しファイルを出さない。
     ///   `.DS_Store` のような無意味な行に毎回トークンを払わないためであり、
     ///   同時に `.env` や `.ssh` を**モデルの目の前に置かない**ことでもある
     ///   （16.6節の被害を小さく保つ側の判断。**利用者が望むなら true にできる**）。
+    ///
+    ///   > **これは防御ではない。** 名前を当てられれば中身は返る
+    ///   > （`AdversarialFileAccessTests.testHiddenFilesAreOutOfSightButNotOutOfReach`）。
+    ///   > 費用と、うっかりの確率を下げているだけである。
+    ///   > **だから「伏せた」ことは黙らない** ── 伏せた件数は `totalCount` に残し、
+    ///   > `omittedHiddenCount` で内訳を出す。
+    ///   > 守れないものを隠して、隠したことまで隠すと、**残るのは嘘だけになる。**
     static func list(
         _ path: ContainedPath,
         limit: Int = FolderReadLimits.entryLimit,
@@ -151,23 +194,41 @@ enum FolderReader {
 
         let keys: [URLResourceKey] = [
             .isDirectoryKey, .isSymbolicLinkKey, .isRegularFileKey,
-            .fileSizeKey, .contentModificationDateKey,
+            .fileSizeKey, .contentModificationDateKey, .isHiddenKey,
         ]
-        var options: FileManager.DirectoryEnumerationOptions = []
-        if !includingHidden { options.insert(.skipsHiddenFiles) }
 
+        // **`.skipsHiddenFiles` を使わない。**
+        //
+        // あれは列挙の段階で落とすので、**落ちたものを数えられない。**
+        // 数えられないものは申告できず、申告できない切り捨ては
+        // 16.3節の「切ったことを必ず戻り値に書く」を満たしようがない。
+        // **全部受け取ってから、自分の手で伏せる。** 伏せた数はこの関数が持って返す。
         let urls: [URL]
         do {
             urls = try manager.contentsOfDirectory(
                 at: path.url,
                 includingPropertiesForKeys: keys,
-                options: options
+                options: []
             )
         } catch {
             throw mapCocoaError(error, path: path.relativePath)
         }
 
-        var entries = urls.map { url in entry(for: url, under: path, keys: Set(keys)) }
+        let keySet = Set(keys)
+        let listed = urls.map { url -> (entry: DirectoryEntry, isHidden: Bool) in
+            let values = try? url.resourceValues(forKeys: keySet)
+            return (
+                entry: entry(for: url, values: values, under: path),
+                isHidden: isHidden(url, values)
+            )
+        }
+
+        // **総数はここで確定する。** 伏せる前・切る前の、フォルダの中にあるもの全部。
+        let total = listed.count
+        let visible = listed.filter { includingHidden || !$0.isHidden }
+        let omittedHidden = total - visible.count
+
+        var entries = visible.map { $0.entry }
 
         // **順序を決めておくこと。** 上限で切る以上、順序が不定だと
         // 「同じフォルダを2回一覧して違う結果が返る」ことになり、
@@ -182,17 +243,38 @@ enum FolderReader {
             return left.name < right.name
         }
 
-        let total = entries.count
-        let kept = limit > 0 ? Array(entries.prefix(limit)) : entries
-        return DirectoryListing(path: path.relativePath, entries: kept, totalCount: total)
+        // **0 と負で上限が外れないこと。** 外れる実装だと、
+        // `entryLimit` は「呼び手が 0 と書くまでの上限」でしかない。
+        // 大きい値でも上げられない ── 上限を決めるのはアプリであって呼び手ではない。
+        let effectiveLimit = limit > 0
+            ? min(limit, FolderReadLimits.entryLimit)
+            : FolderReadLimits.entryLimit
+
+        let kept = Array(entries.prefix(effectiveLimit))
+        return DirectoryListing(
+            path: path.relativePath,
+            entries: kept,
+            totalCount: total,
+            omittedHiddenCount: omittedHidden
+        )
+    }
+
+    /// **`.skipsHiddenFiles` と同じ判定を、自分の手で行う。**
+    ///
+    /// `isHidden` は名前が `.` で始まるものと、隠し属性（`UF_HIDDEN`）の付いたものの両方に立つ。
+    /// **属性の取得に失敗したときは名前で判定する** ── 環になったリンクなどで
+    /// `resourceValues` が丸ごと失敗しうるが、そこで「隠しではない」に倒すと、
+    /// **いままで伏せていたものが黙って一覧に出てくる。** 判定できないなら伏せる側へ倒す。
+    private static func isHidden(_ url: URL, _ values: URLResourceValues?) -> Bool {
+        if values?.isHidden == true { return true }
+        return url.lastPathComponent.hasPrefix(".")
     }
 
     private static func entry(
         for url: URL,
-        under path: ContainedPath,
-        keys: Set<URLResourceKey>
+        values: URLResourceValues?,
+        under path: ContainedPath
     ) -> DirectoryEntry {
-        let values = try? url.resourceValues(forKeys: keys)
         let name = url.lastPathComponent
 
         let kind: DirectoryEntry.Kind
@@ -370,6 +452,11 @@ enum FolderReader {
         case EACCES, EPERM:
             .accessDenied(path)
         case ELOOP:
+            // **ここの ELOOP は「最後の成分がリンクだった」である**（`O_NOFOLLOW`）。
+            // 検証を通った時点でリンクではなかったのだから、差し替えられたということ。
+            // **一時的**なので再試行に意味がある。
+            // 環（永続的）は `FolderContainment` の `realpath` が先に
+            // `.symbolicLinkCycle` で落とすので、ここには来ない。
             .pathChangedDuringAccess(path)
         case EISDIR:
             .notAFile(path)

@@ -17,6 +17,7 @@ import Foundation
 /// case .content(let text):   // 本文へ
 /// case .prefill(let p):      // 進捗表示
 /// case .toolCall(let call):  // FR-19 ツール呼び出し（第16章）
+/// case .toolResult(let a):   // FR-19 その実行が終わった（16.7節）
 /// case .done(let stats):     // FR-14 計測値の確定
 /// default: break             // ← 必ず置く。増えたケースを黙って捨てる
 /// }
@@ -66,6 +67,32 @@ enum Chunk: Sendable, Equatable {
     /// ツール定義を渡していない会話（`idle`。既定）では**原理的に来ない**。
     /// 16.8節どおり「モデルがツールを呼ばずに答えた」も**異常ではない。**
     case toolCall(ModelToolCall)
+
+    /// **その呼び出しの実行が終わった**（FR-19 / DESIGN.md 第16.7節）。
+    ///
+    /// ## なぜ要るのか ── 無言の時間を作らないため
+    ///
+    /// 往復の最中、画面には**何も流れない。** 実測の TTFR は最大 40.91秒あり、
+    /// そこへ「読む → もう一度プリフィル → もう一度生成」が積み増さる。
+    /// **何も出ないまま数十秒**は、それ自体が今日いちばん問題になっている症状である
+    /// （固まって見えるのと、固まっているのを、利用者は区別できない）。
+    ///
+    /// 区間の**始まり**は `.toolCall` が既に伝えている。ここは**終わり**を伝える。
+    /// この2つで挟むと「いま読んでいる」を出せる ── 出すかどうかは UI の判断だが、
+    /// **材料が無いと判断すらできない。**
+    ///
+    /// | いつ | 何が流れるか |
+    /// |---|---|
+    /// | モデルが呼んだ | `.toolCall(ModelToolCall)` |
+    /// | 読み終えた | **`.toolResult(ToolActivity)`（ここ）** |
+    /// | 次の生成のプリフィル | `.prefill(PrefillProgress)`（既存のまま鳴る） |
+    ///
+    /// ## 中身（ファイルの本文）は運ばない
+    ///
+    /// 運ぶのは**1行の要約だけ**である。本文は文脈へ入れるためのものであって、
+    /// 画面へ出すためのものではない ── 載せると、UI とログの両方に
+    /// 利用者のファイルの中身が流れる経路が生まれる（NFR-01）。
+    case toolResult(ToolActivity)
 
     /// 終端。FR-14 の計測値を確定させる。
     ///
@@ -137,6 +164,50 @@ struct ModelToolCall: Sendable, Equatable, Codable {
 
     /// ツール層へ渡す形（`ToolCallRequest(name:jsonArguments:)` がこれを受ける）。
     var argumentsData: Data { Data(argumentsJSON.utf8) }
+}
+
+/// **ツールを1回実行した、という報せ**（`Chunk.toolResult` の中身。16.7節）。
+///
+/// ## 1行しか持たない。それが要点である
+///
+/// `summary` は `ToolResult.bookmarkLine` ── **履歴に残る栞と同じ文**である
+/// （`読んだ: notes.md（全412行のうち 1-80行）`）。同じ値から作るので、
+/// **画面に出た文と、次のターンの文脈に残る文が食い違わない。**
+/// 別々に組み立てると必ずどこかでずれる（`ReadOutcome.contextText` と同じ規律）。
+///
+/// 中身（読んだ本文）はここに**入らない。** 型として持たせていないので、
+/// 「うっかり画面へ出す」経路が作れない。
+///
+/// ## 文字列は既に潰してある
+///
+/// `summary` も `toolName` も**モデルとディスクから来た文字列を含む。**
+/// 実行層が `ToolText.singleLine(_:limit:)` を通しており、改行・制御文字は無い
+/// （`ToolResult` の型コメント）。**受け取った側で改めて信用しないこと** ──
+/// 1行であることは保証されるが、中身が真実である保証はどこにも無い。
+struct ToolActivity: Sendable, Equatable, Codable {
+
+    /// モデルが呼んだ名前。**直していない**（`ModelToolCall.name` と同じ規律）。
+    var toolName: String
+
+    /// 画面に出せる1行（＝履歴に残る栞と同じ文）。
+    var summary: String
+
+    /// 読めなかった／呼び出しが成立しなかった。**往復は続いている**
+    /// （16.8節「往復を1回で打ち切らない」）ので、これは終了ではない。
+    var isFailure: Bool
+
+    /// 何回目の往復か（1始まり）。
+    ///
+    /// 「1回で答えた」と「4回読んで答えた」は**利用者にとって別の出来事**である。
+    /// 回数が見えないと、遅さの原因が読み取りにあることも分からない。
+    var round: Int
+
+    init(toolName: String, summary: String, isFailure: Bool, round: Int) {
+        self.toolName = toolName
+        self.summary = summary
+        self.isFailure = isFailure
+        self.round = round
+    }
 }
 
 /// プリフィル（入力処理）の進捗。
