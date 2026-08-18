@@ -784,7 +784,7 @@ XCTAssertLessThanOrEqual failed: ("97") is greater than ("80")
 
 ---
 
-## 2026-08-18 モデルの初回取得が壊れている（Xet 未対応）
+## 2026-08-18 モデルの初回取得が壊れている ⚠ **原因の断定は撤回（同日 追記を読むこと）**
 
 ### 症状
 
@@ -861,3 +861,60 @@ HuggingFace のキャッシュ構造（`blobs/<etag>` ＋ `snapshots/<rev>/<name
 
 **まず A を試すこと。** そして**どの案でも、失敗を検知して利用者に伝えることは必須である** ─
 今回いちばん問題なのは落ちないことではなく、**落ちないまま黙っていること**である。
+
+### ⚠ 追記（同日）— **「Xet が無効だから落ちない」は誤り。撤回する**
+
+**ソースを読んだ結果、この因果は成立しない。**
+
+`swift-huggingface/Sources/HuggingFace/Hub/HubClient+Files.swift:1443-1453`:
+
+```swift
+func snapshotTransport(for entry: Git.TreeEntry) -> FileDownloadTransport {
+    #if HUGGINGFACE_ENABLE_XET
+    let useXet = FileDownloadTransport.automatic.shouldUseXet(...)
+    return useXet ? .automatic : .lfs
+    #else
+    return .lfs          // ← Xet 無効なら全ファイルがこちら
+    #endif
+}
+```
+
+**Xet が無効なら、全ファイルが `.lfs`（curl と同じ素の HTTPS `resolve` 経路）へ回る。**
+例外を投げるのは `transport == .xet` のときだけ（`:350-356` / `:466-472`）で、
+無効ビルドではその値にならない。
+
+**つまりアプリは最初から curl と同じ経路で取りに行っていたはずである。**
+そして **Xet を有効にすると、16MiB以上のファイルが*逆に* Xet 経路へ移る**
+（`xetMinimumFileSizeBytes = 16MiB`）── 動いている経路から離れることになる。
+
+**Xet の有効化は、この症状に対する対策として根拠が立たない。**
+
+### では、なぜ止まったのか ─ **分かっていない**
+
+観測は変わらない: 小さい7ファイルは落ち、`model.safetensors` だけが
+**TCP接続0本・`.incomplete` すら無し・エラー無し**で止まった。
+
+**`.incomplete` が無いことは、リクエストを出す前に止まっていたことを示唆する**
+（`HubCache.incompleteBlobPath` があるので、途中まで落ちていれば残るはず）。
+ロックだけをアプリが掴んでいた（FD 18u）ことと合わせると、
+**ロック取得の直後、実際の取得を始める前**という線が濃い。**ただし未確認である。**
+
+潰した仮説（どちらも該当せず）:
+- **キャッシュ高速路の誤判定** ─ `DownloaderMacro` が `revision = "main"` 固定で、
+  `cachedSnapshotPath` は `isCommitHash(revision)` を要求するため入らない
+- **大きいファイルを飛ばすガード** ─ 無い。`downloadSnapshotWorkItemsConcurrently` は全件を回す
+
+### この訂正で変わらないこと
+
+**症状も、影響も、対処の方向も変わらない。**
+
+- **新しい利用者は初回起動で止まる**（実際に再現した）
+- **FR-07 は成立しておらず、NFR-10 も失敗を検知していない**
+- **原因が特定できないという事実そのものが、自前取得（案C）を選ぶ理由を強くする** ─
+  ライブラリの中で何が起きているか分からないまま依存し続けるより、
+  **HTTPステータス・期待バイト数との突合・etag照合・進捗・再開を自分で握る**ほうが確実である
+
+> **教訓（このセッション7回目）。**
+> 症状（小は通る／大だけ止まる）と、見つけた事実（Xet は opt-in で無効）が
+> **綺麗に噛み合って見えたので、ソースを読まずに因果として書いた。**
+> **噛み合って見えることは、因果の証拠ではない。**
