@@ -245,7 +245,85 @@ final class ToolExecutionTests: XCTestCase {
 
         XCTAssertFalse(result.isFailure, result.contextText)
         XCTAssertLessThanOrEqual(result.contextTokens, budget.tokens)
-        XCTAssertTrue(result.contextText.contains("全300件のうち"), result.contextText)
+
+        // **2026-08-18: 期待値を「全300件のうち」から「300件のうち」へ変えた。**
+        // 「全」は**全部見えているときだけ**の語にした（`listingLabel`）。
+        // 隠しファイルがあるフォルダで「全N件」と書くと、直後の「隠し M件」と噛み合わず、
+        // モデルは取りに行けない N+1件目を探しに行く。ここは隠しが 0件なので数だけの違いだが、
+        // **語の規則は一覧のすべてに同じものを当てている。**
+        XCTAssertTrue(result.contextText.contains("300件のうち"), result.contextText)
+        XCTAssertFalse(
+            result.contextText.contains("全300件"), "『全』は全部見えているときだけの語である")
+
+        // **切ったなら、次に何ができるかまで書くこと。**
+        // `list_directory` にページ送りの引数は無い（16.4節は `path` だけ）ので、
+        // 「続きが取れる」ではなく**実際に効く手**を書く。
+        XCTAssertTrue(result.contextText.contains("search_files"), result.contextText)
+    }
+
+    /// **行き止まりを毎回伝えないこと**（2026-08-18）。
+    ///
+    /// `.DS_Store` はどの macOS フォルダにもある。隠しファイルが `totalCount` に
+    /// 入るようになった（正しい修正）結果、**普通のフォルダの一覧が常に
+    /// 「全11件のうち 10件」**になっていた。モデルはそれを「続きがある」と読むが、
+    /// **`list_directory` にページ送りの引数は無い。取りに行けない。**
+    ///
+    /// | 直したこと | 直していないこと |
+    /// |---|---|
+    /// | 「上限で切った」と「方針で伏せた」を別の文にした | **どちらも黙っていない** |
+    ///
+    /// 黙る実装は静かに嘘をつく（16.3節 / `ReadOutcome` の型コメント）。
+    /// **伏せた件数は必ず言う。ただし次の手は書かない** ── どう呼んでも返らないからである。
+    func testAnOrdinaryFolderWithAHiddenFileIsNotReportedAsTruncated() throws {
+        let result = list("")   // 根には `.env`（隠し）が1件ある
+        let text = result.contextText
+
+        XCTAssertFalse(result.isFailure, text)
+        XCTAssertFalse(text.contains(".env"), "伏せたものの名前は出さない")
+
+        // **伏せたことは言う。** 件数も言う。
+        XCTAssertTrue(text.contains("隠し 1件は非表示"), text)
+        XCTAssertTrue(text.contains("取得できません"), text)
+
+        // **「続きがある」とは言わない。**
+        XCTAssertFalse(
+            text.contains("件のうち"), "件数上限で切ってもいないのに『N件のうち M件』と言っている: \(text)")
+        XCTAssertFalse(
+            text.contains("search_files で絞ってください"),
+            "取りに行けないものに対して次の手を示唆している: \(text)")
+
+        // **「全」も使わない** ── 直後に「隠し 1件」と続くので、
+        // 「全10件」は「では11件目は？」を誘う。
+        XCTAssertFalse(text.contains("の一覧（全"), text)
+    }
+
+    /// 隠しファイルしか無いフォルダは「空」ではない。**空だと言うのは嘘である。**
+    func testAFolderThatOnlyContainsHiddenEntriesIsNotCalledEmpty() throws {
+        let onlyHidden = root.appendingPathComponent("only-hidden", isDirectory: true)
+        try FileManager.default.createDirectory(at: onlyHidden, withIntermediateDirectories: true)
+        try write("x", to: onlyHidden.appendingPathComponent(".DS_Store"))
+        try write("x", to: onlyHidden.appendingPathComponent(".hidden2"))
+
+        let text = list("only-hidden").contextText
+
+        XCTAssertFalse(text.contains("このフォルダは空です"), text)
+        XCTAssertTrue(text.contains("隠し 2件は非表示"), text)
+        XCTAssertTrue(text.contains("0件"), text)
+        XCTAssertFalse(text.contains("件のうち"), text)
+    }
+
+    /// **検索も同じ区別をすること。**
+    ///
+    /// 以前は `DirectoryListing.isTruncated` をそのまま見ていた。あれは
+    /// **隠しファイル1件でも真になる**ので、`.DS_Store` のあるフォルダを検索すると
+    /// **毎回「探索を打ち切った」と言っていた。**
+    /// 本当に打ち切ったときの警告と区別が付かなくなる ── 警告が意味を失う。
+    func testSearchDoesNotClaimItStoppedEarlyJustBecauseHiddenFilesExist() {
+        let text = search("notes").contextText
+
+        XCTAssertTrue(text.contains("notes.md"), text)
+        XCTAssertFalse(text.contains("打ち切った"), "打ち切っていないのに打ち切ったと言っている: \(text)")
+        XCTAssertTrue(text.contains("隠し 1件は探索の対象外"), text)
     }
 
     /// 窓で切っても**総数は本物**であること（16.3節「全体の行数・バイト数を添える」）。
@@ -738,18 +816,15 @@ final class ToolExecutionTests: XCTestCase {
     /// **実測した3つと、名前も必須引数も一致していること**（`ToolCallProbeTests`）。
     /// ここがずれると、「モデルは呼べる」という実測の根拠が実装に届かない。
     func testTheCatalogMatchesWhatWasActuallyMeasured() throws {
-        let schemas = FolderTool.jsonSchemas
-        XCTAssertEqual(schemas.count, 3, "**4つ目を足さないこと**（16.4節）")
+        let definitions = FolderTool.definitions
+        XCTAssertEqual(definitions.count, 3, "**4つ目を足さないこと**（16.4節）")
 
         var names: [String] = []
         var required: [String: [String]] = [:]
-        for schema in schemas {
-            let function = try XCTUnwrap(schema["function"] as? [String: any Sendable])
-            let name = try XCTUnwrap(function["name"] as? String)
-            let parameters = try XCTUnwrap(function["parameters"] as? [String: any Sendable])
-            names.append(name)
-            required[name] = try XCTUnwrap(parameters["required"] as? [String])
-            XCTAssertNotNil(function["description"] as? String)
+        for definition in definitions {
+            names.append(definition.name)
+            required[definition.name] = definition.requiredParameterNames
+            XCTAssertFalse(definition.description.isEmpty)
         }
 
         XCTAssertEqual(names, ["list_directory", "read_file", "search_files"])
@@ -757,6 +832,48 @@ final class ToolExecutionTests: XCTestCase {
         XCTAssertEqual(required["read_file"], ["path"])
         XCTAssertEqual(required["search_files"], ["path", "query"])
         XCTAssertEqual(names, FolderTool.allCases.map(\.rawValue))
+    }
+
+    /// **説明文を1文字も変えないための錠。**
+    ///
+    /// 文言は実測で決まっている ── `ja-read` は**語順を変えただけで 3/3 → 0/3 に崩れ**、
+    /// `Read the contents of a text file` に戻して 32/32 になった（16.9節 項目4）。
+    /// **ここが落ちたなら、`make toolprobe` と `make toolbreakdown` の測り直しが要る。**
+    /// 通し直さずに期待値だけを書き換えないこと ── 書き換えた瞬間、
+    /// 実測の裏付けを失った文言が黙って出荷される。
+    func testTheDescriptionsAreExactlyWhatWasMeasured() throws {
+        var descriptions: [String: String] = [:]
+        var argumentDescriptions: [String: String] = [:]
+        for definition in FolderTool.definitions {
+            descriptions[definition.name] = definition.description
+            for parameter in definition.parameters {
+                argumentDescriptions["\(definition.name).\(parameter.name)"] = parameter.description
+            }
+        }
+
+        XCTAssertEqual(
+            descriptions,
+            [
+                "list_directory": "List the direct children of a folder",
+                "read_file":
+                    "Read the contents of a text file. Long files are clipped; "
+                    + "continue with offset",
+                "search_files": "Find files and folders whose name contains the given word",
+            ])
+
+        XCTAssertEqual(
+            argumentDescriptions,
+            [
+                "list_directory.path":
+                    "Path relative to the bound folder. Empty string for the folder "
+                    + "itself. Absolute paths and ~ are rejected",
+                "read_file.path":
+                    "Path relative to the bound folder. Absolute paths and ~ are rejected",
+                "read_file.offset": "Line to start from (1-based)",
+                "read_file.limit": "How many lines to read (max 200)",
+                "search_files.path": "Where to start. Empty string for the whole bound folder",
+                "search_files.query": "Word contained in the file name",
+            ])
     }
 
     // MARK: - 補助

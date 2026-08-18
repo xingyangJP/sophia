@@ -45,7 +45,13 @@ actor FolderToolRunner {
     /// > 「一覧 → 読む → もう1つ読む → 検索」で 4〜5回という見立てで 6 に置いただけである。
     /// > 足りなければモデルは途中で答えることになり、多すぎれば時間と文脈を食う。
     /// > **実使用で何回目に足りなくなるかを見てから動かすこと。**
-    let callLimit: Int
+    ///
+    /// **`nonisolated` にしてあるのは、これが不変の設定値だからである。**
+    /// 上限は UI（利用者に「あと何回」を見せる）と予算の配分表（`SophiaDefaults.InputBudget`）の
+    /// 両方が読みたがるが、**どちらも actor の外にいる。**
+    /// `await` を要求すると、読む側が数字を写す動機になる ──
+    /// **写された数字はここを変えても追随しない。**
+    nonisolated let callLimit: Int
 
     private(set) var callCount = 0
 

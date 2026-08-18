@@ -74,72 +74,94 @@ enum FolderTool: String, Sendable, Equatable, CaseIterable {
 
     // MARK: - モデルへ渡す形
 
-    /// `MLXLMCommon.ToolSpec`（= `[String: any Sendable]`）と**同じ形**の JSON Schema。
+    /// **出所はここ1本だけである**（2026-08-18 に統合）。
     ///
-    /// **この層は MLX を import しない。** import した瞬間、
-    /// ツールの定義と実行がモデルの有無に依存し始め、テストが実推論を要求するようになる
-    /// （`TokenCounter` が MLX を避けているのと同じ理由）。
-    /// 受け渡しは構造だけで足りる ── `UserInput(chat:tools:)` へはこの配列をそのまま渡せる。
-    static var jsonSchemas: [[String: any Sendable]] {
+    /// ---
+    ///
+    /// # 生の JSON 辞書はもう持たない
+    ///
+    /// **以前ここには `jsonSchemas: [[String: any Sendable]]` があり、出所が2つに割れていた。**
+    ///
+    /// | かつての出所 | 誰が読んでいたか |
+    /// |---|---|
+    /// | `jsonSchemas`（英語。実測で決めた文言） | **テストだけ** |
+    /// | `ChatOptions.tools`（`[ToolDefinition]`） | **実行時はこちら。誰も populate していなかった** |
+    ///
+    /// **この割れが同じ日に2回、嘘の測定値を生んでいる**（16.9節 項目4 の但し書き）──
+    /// `ToolCallProbeTests` の「12/12」も `EngineToolWiringTests` の「716トークン」も、
+    /// **テストが自前に持っていた定義**に対する値で、実装の値ではなかった（実費は 1,182）。
+    /// **定義を写した瞬間、計測は計測自身を測る道具になる。**
+    ///
+    /// だから**アプリが実際に送る型そのもの**（`ToolDefinition`）で宣言する。
+    /// JSON Schema へ落とすのは `MLXEngine.toolSpec(for:)` の仕事であり、
+    /// **この層は MLX を import しない**（import した瞬間、ツールの定義と実行が
+    /// モデルの有無に依存し始め、テストが実推論を要求するようになる ──
+    /// `TokenCounter` が MLX を避けているのと同じ理由）。
+    ///
+    /// # 説明文は1文字も変えないこと（**実測で決まっている**）
+    ///
+    /// `ja-read` は**語順を変えただけで 3/3 → 0/3 に崩れた**
+    /// （`Read a text file by line range` と手段を先頭に置いたため）。
+    /// `Read the contents of a text file` に戻して **32/32**。
+    /// **変えたら `make toolprobe` と `make toolbreakdown` の測り直しになる。**
+    ///
+    /// # 引数の並びが `required` の並びになる
+    ///
+    /// `ToolDefinition.requiredParameterNames` は**この配列の順**を保つ
+    /// （辞書ではないのはそのため）。`search_files` が `path` → `query` の順に
+    /// 並んでいるのは、実測した `required: ["path", "query"]` と一致させるためである。
+    /// **並べ替えないこと。**
+    static var definitions: [ToolDefinition] {
         [
-            schema(
+            ToolDefinition(
                 name: FolderTool.listDirectory.rawValue,
                 description: "List the direct children of a folder",
-                properties: [
-                    Argument.path: property(
-                        "string",
+                parameters: [
+                    required(
+                        Argument.path, .string,
                         "Path relative to the bound folder. Empty string for the folder "
                             + "itself. Absolute paths and ~ are rejected")
-                ],
-                required: [Argument.path]
+                ]
             ),
-            schema(
+            ToolDefinition(
                 name: FolderTool.readFile.rawValue,
                 description:
                     "Read the contents of a text file. Long files are clipped; "
                     + "continue with offset",
-                properties: [
-                    Argument.path: property(
-                        "string",
+                parameters: [
+                    required(
+                        Argument.path, .string,
                         "Path relative to the bound folder. Absolute paths and ~ are rejected"),
-                    Argument.offset: property("integer", "Line to start from (1-based)"),
-                    Argument.limit: property(
-                        "integer", "How many lines to read (max \(FolderReadLimits.lineLimit))"),
-                ],
-                required: [Argument.path]
+                    optional(Argument.offset, .integer, "Line to start from (1-based)"),
+                    optional(
+                        Argument.limit, .integer,
+                        "How many lines to read (max \(FolderReadLimits.lineLimit))"),
+                ]
             ),
-            schema(
+            ToolDefinition(
                 name: FolderTool.searchFiles.rawValue,
                 description: "Find files and folders whose name contains the given word",
-                properties: [
-                    Argument.path: property(
-                        "string", "Where to start. Empty string for the whole bound folder"),
-                    Argument.query: property("string", "Word contained in the file name"),
-                ],
-                required: [Argument.path, Argument.query]
+                parameters: [
+                    required(
+                        Argument.path, .string,
+                        "Where to start. Empty string for the whole bound folder"),
+                    required(Argument.query, .string, "Word contained in the file name"),
+                ]
             ),
         ]
     }
 
-    private static func schema(
-        name: String,
-        description: String,
-        properties: [String: any Sendable],
-        required: [String]
-    ) -> [String: any Sendable] {
-        let function: [String: any Sendable] = [
-            "name": name,
-            "description": description,
-            "parameters": [
-                "type": "object",
-                "properties": properties,
-                "required": required,
-            ] as [String: any Sendable],
-        ]
-        return ["type": "function", "function": function]
+    private static func required(
+        _ name: String, _ type: ToolDefinition.Parameter.ValueType, _ description: String
+    ) -> ToolDefinition.Parameter {
+        ToolDefinition.Parameter(
+            name: name, type: type, description: description, isRequired: true)
     }
 
-    private static func property(_ type: String, _ description: String) -> [String: any Sendable] {
-        ["type": type, "description": description]
+    private static func optional(
+        _ name: String, _ type: ToolDefinition.Parameter.ValueType, _ description: String
+    ) -> ToolDefinition.Parameter {
+        ToolDefinition.Parameter(
+            name: name, type: type, description: description, isRequired: false)
     }
 }

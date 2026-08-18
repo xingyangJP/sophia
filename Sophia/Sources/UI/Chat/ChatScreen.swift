@@ -42,6 +42,11 @@ struct ChatScreen: View {
 
     private var detail: some View {
         VStack(spacing: 0) {
+            // 結び付いたフォルダ（FR-19 / 16.7節「会話の上部にチップ1つ」）。
+            // **スクロール領域の外に置く。** 入力欄と同じ理由で、
+            // `armed` かどうかは会話を遡っても常に見えていなければならない。
+            FolderBar(model: model)
+
             if model.turns.isEmpty {
                 EmptyConversationView(model: model)
             } else {

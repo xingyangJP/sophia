@@ -41,7 +41,11 @@ final class ToolCostBreakdownTests: XCTestCase {
         }
 
         // 実際に注入される JSON そのもの（`tool | tojson` に相当）。
-        let specs = FolderTool.jsonSchemas
+        //
+        // **出所は `FolderTool.definitions` の1本だけである**（2026-08-18 に統合）。
+        // ここで辞書を組み直さないこと ── 組み直した瞬間、この計測は
+        // **計測自身を測る道具**になる（16.9節 項目4 の但し書き。「716トークン」の再発）。
+        let specs = FolderTool.definitions.map(MLXEngine.toolSpec(for:))
         var perTool: [(String, Int, Int, Int)] = []   // 名前 / 全体 / 説明文だけ / 構造
         for spec in specs {
             let json = String(
@@ -134,7 +138,7 @@ final class ToolCostBreakdownTests: XCTestCase {
 
     /// **測るためだけの英語版。出荷する定義ではない。**
     ///
-    /// 意味は `FolderTool.jsonSchemas` と同じにしてある ──
+    /// 意味は `FolderTool.definitions` と同じにしてある ──
     /// 短くして得をしたのか、英語にして得をしたのかが混ざらないように。
     private static var englishSchemas: [[String: any Sendable]] {
         func property(_ type: String, _ description: String) -> [String: any Sendable] {

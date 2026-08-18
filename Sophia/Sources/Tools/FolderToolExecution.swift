@@ -163,24 +163,95 @@ enum FolderToolExecution {
             contained, limit: limits.entryLimit, includingHidden: limits.includesHidden)
 
         let where_ = display(of: contained)
-        let total = listing.totalCount
         let rendered = listing.entries.map { entry(for: $0, showingFullPath: false, withDate: true) }
 
+        // **「方針で伏せた」と「上限で切った」を分ける**（2026-08-18）。
+        //
+        // 隠しファイルが `totalCount` に入るようになったのは正しい修正だが、
+        // **`.DS_Store` はどの macOS フォルダにもある。**
+        // 総数と表示数の差だけで言うと、**普通のフォルダが毎回「全11件のうち 10件」**になる。
+        // モデルはそれを「続きがある」と読み、`list_directory` にページ送りの引数は無い
+        // （16.4節は `path` だけ）ので**取りに行けない。行き止まりを毎ターン伝えることになる。**
+        //
+        // `FolderReader` は既に区別する材料を持っている（`DirectoryListing` の型コメント）:
+        //
+        // | 値 | 意味 | 続きは |
+        // |---|---|---|
+        // | `omittedHiddenCount` | 隠しファイルとして方針で伏せた | **取れない**（方針を変えるまで） |
+        // | `listable - shown` | 件数上限とトークン上限で載せきれなかった | この一覧では取れないが、**絞れば取れる** |
+        //
+        // **「切ったことを黙る」に倒していない。** 伏せた件数も切った件数も必ず言う ──
+        // 黙る実装は静かに嘘をつく（16.3節 / `ReadOutcome` の型コメント）。
+        // 分けたのは**言うか黙るか**ではなく、**次の手を示唆してよいかどうか**である。
+        let hidden = listing.omittedHiddenCount
+        // 方針の側で伏せた分を除いた「本来なら載せられた件数」。
+        // **これがモデルにとっての母数である** ── 伏せた分は母数に混ぜると
+        // 「あと1件どこかにある」という取りに行けない期待を作る。
+        let listable = max(listing.totalCount - hidden, 0)
+
         let outcome = fitted(
-            lines: rendered.isEmpty ? ["（このフォルダは空です）"] : rendered,
+            // **空の理由を取り違えないこと。** 隠しファイルしか無いフォルダは「空」ではない。
+            lines: rendered.isEmpty
+                ? [hidden > 0 ? "（表示できるものはありません）" : "（このフォルダは空です）"]
+                : rendered,
             budget: budget,
             counter: counter,
             label: { shown in
-                // **切ったことを必ず見出しに書く**（16.3節「切ったことを必ず戻り値に書く」）。
-                // 切られ方は2つある ── `FolderReader` の件数上限と、ここのトークン上限。
-                // どちらで切れても、利用者もモデルも**総数と表示数の差**として同じ形で見る。
-                if total == 0 { return "\(where_) の一覧（0件）" }
-                return shown == total
-                    ? "\(where_) の一覧（全\(total)件）"
-                    : "\(where_) の一覧（全\(total)件のうち \(shown)件）"
+                listingLabel(
+                    where_,
+                    // 中身が無いときに渡ってくる `shown` は差し込んだ1行ぶんであって、
+                    // **件数ではない。** 件数として使うと「0件のうち 1件」になる。
+                    shown: rendered.isEmpty ? 0 : shown,
+                    listable: listable,
+                    hidden: hidden)
             })
 
         return .content(outcome, tool: call.name, isListing: true)
+    }
+
+    /// 一覧の見出し。**行き止まり（取りに行けない差）と、次の手がある差を、同じ文で言わない。**
+    ///
+    /// ## ページ送りは示唆していない。**引数が無いからである**
+    ///
+    /// 件数上限で切れた側は「続きが取れる」性質のものだが、
+    /// **`list_directory` は `path` しか受け取らない**（16.4節）。
+    /// ここで「続きは…から読めます」と書くと、モデルはそのとおり呼び、呼べずに戻る ──
+    /// **連続する2ターンで矛盾した指示を出す**ことになる
+    /// （`ContextWindow.windowLines(of:)` の但し書きが記録している失敗と同じ形）。
+    ///
+    /// **だから示唆するのは、実際に効く次の手だけにしてある** ──
+    /// 下位のフォルダを個別に一覧する、`search_files` で名前を絞る。どちらも今日呼べる。
+    ///
+    /// ## 伏せた側には次の手を書かない
+    ///
+    /// 隠しファイルは `FolderToolExecution.Limits.includesHidden` が false である限り、
+    /// **どう呼んでも返らない。** 次の手を書けば、それは必ず無駄な往復になる。
+    /// 「取得できません」で終えるのが、この場合の正直な文である。
+    private static func listingLabel(
+        _ where_: String, shown: Int, listable: Int, hidden: Int
+    ) -> String {
+
+        var text: String
+        if listable == 0 {
+            text = "\(where_) の一覧（0件）"
+        } else if shown < listable {
+            text = "\(where_) の一覧（\(listable)件のうち \(shown)件）"
+        } else if hidden > 0 {
+            // **「全」と書かないこと。** 直後に「隠し N件」と続くので、
+            // 「全10件」は「では11件目は？」を誘う。全部見えているときだけ「全」を使う。
+            text = "\(where_) の一覧（\(listable)件）"
+        } else {
+            text = "\(where_) の一覧（全\(listable)件）"
+        }
+
+        if shown < listable {
+            text += "／残り \(listable - shown)件はこの一覧では取れません。"
+                + "下位フォルダを指定するか search_files で絞ってください"
+        }
+        if hidden > 0 {
+            text += "／隠し \(hidden)件は非表示（取得できません）"
+        }
+        return text
     }
 
     // MARK: - read_file（16.4節 / 16.3節の橋）
@@ -256,6 +327,8 @@ enum FolderToolExecution {
         var visitedDirectories = 0
         var skipped = 0
         var truncated = false
+        /// 隠しファイルとして**探索の対象にすらならなかった**件数（一覧と同じ区別）。
+        var hiddenSkipped = 0
 
         search: while !frontier.isEmpty {
             guard matches.count < limits.searchMatchLimit,
@@ -279,7 +352,16 @@ enum FolderToolExecution {
                 skipped += 1
                 continue
             }
-            if listing.isTruncated { truncated = true }
+            // **`isTruncated` をそのまま使わないこと。**
+            // あれは「見せていないものがあるか」で、**隠しファイル1件でも真になる**
+            // （`DirectoryListing` の型コメント）。`.DS_Store` はどこにでもあるので、
+            // 使うと**どんな検索でも毎回「打ち切った」と言う**ことになり、
+            // 本当に打ち切ったときの警告が意味を失う。
+            // ここで見たいのは**件数上限で落ちたか**だけである。
+            hiddenSkipped += listing.omittedHiddenCount
+            if listing.entries.count + listing.omittedHiddenCount < listing.totalCount {
+                truncated = true
+            }
 
             for item in listing.entries {
                 // 大文字小文字・全角半角・濁点の揺れを吸収する。
@@ -322,8 +404,13 @@ enum FolderToolExecution {
                     text += shown == found ? "\(found)件" : "\(found)件のうち \(shown)件"
                 }
                 // **打ち切ったことを黙らない。** 黙ると「このフォルダには無い」と断定される。
+                // ただし**打ち切りと、方針で対象外にしたものは別の文で言う**（`listingLabel` と同じ理由）
+                // ── 前者は範囲を絞れば届き、後者はどう呼んでも届かない。
                 if truncated { text += "（探索を打ち切ったので、これで全部とは限りません）" }
                 if skipped > 0 { text += "（読めなかったフォルダ \(skipped)件を飛ばしました）" }
+                if hiddenSkipped > 0 {
+                    text += "（隠し \(hiddenSkipped)件は探索の対象外。取得できません）"
+                }
                 return text
             })
 

@@ -74,6 +74,26 @@ final class ChatTurn: Identifiable {
     /// 失敗の理由（FR-11）。**中断（`.cancelled`）はここに入れない。** 異常ではないため。
     var error: SophiaError?
 
+    // MARK: - フォルダ参照（FR-19 / DESIGN.md 第16.7節）
+
+    /// このターンで起きたファイル参照の往復。**呼ばれた順**に積む。
+    ///
+    /// 16.7節「何を読んだか（パスと範囲）を、そのターンに添える」の実体。
+    /// **空でないこと自体が情報である** ── 「1回で答えた」と「4回読んで答えた」は
+    /// 利用者にとって別の出来事で、遅さの原因が読み取りにあることは
+    /// 回数が見えないと分からない。
+    var toolRuns: [ToolRun] = []
+
+    /// **このターンでツール定義に払ったトークン数**（16.7節 / FR-21）。
+    ///
+    /// 送信の時点で確定する（`armed` なら `SophiaDefaults.toolDefinitionTokens`、
+    /// `idle` なら 0）。**`ChatOptions.tools` を組んだのと同じ値から入れること** ──
+    /// 別々に決めると、画面に出る額と実際に払った額が食い違う。
+    var toolDefinitionTokens: Int = 0
+
+    /// ファイル参照が1回でも起きたか。
+    var didUseTools: Bool { !toolRuns.isEmpty }
+
     /// 受け取った断片の数と、実際に描画へ反映した回数。
     /// VISION の測定原則に従い、**間引きが効いているかを推測せず数える**ための値。
     var chunkCount = 0
@@ -99,4 +119,65 @@ final class ChatTurn: Identifiable {
             return wasInterrupted ? "\(base)（中断）" : base
         }
     }
+}
+
+/// ファイル参照1回ぶんの表示（`Chunk.toolCall` → `Chunk.toolResult`）。
+///
+/// ---
+///
+/// # 無言の区間を潰すためにある（`Chunk.toolResult` の型コメント）
+///
+/// 往復の最中、画面には**何も流れない。** 実測の TTFR は最大 40.91秒あり、
+/// そこへ「読む → もう一度プリフィル → もう一度生成」が積み増さる。
+/// **固まって見えるのと固まっているのを、利用者は区別できない。**
+///
+/// | いつ | 何が届くか | ここでの状態 |
+/// |---|---|---|
+/// | モデルが呼んだ | `.toolCall` | `summary == nil`（＝実行中） |
+/// | 読み終えた | `.toolResult` | `summary` が入る（＝栞と同じ1行） |
+///
+/// # 中身（ファイルの本文）は持たない
+///
+/// 持つのは**要求の1行**と**結果の1行**だけである。
+/// 型として持たせていないので、**うっかり画面へ出す経路が作れない**（NFR-01）。
+///
+/// # 文字列はすべて他所から来ている
+///
+/// `request` はモデルが書いた文字列、`summary` はディスクの中身が混ざった文字列である。
+/// **どちらも `ToolText.singleLine(_:limit:)` を通してから入れること**
+/// （改行で偽の行を作られると、画面の上でも囲いの偽装ができる）。
+/// 通す責任は作る側（`ChatViewModel`／実行層）にある ── この型は保証しない。
+@MainActor @Observable
+final class ToolRun: Identifiable {
+
+    let id = UUID()
+
+    /// モデルが呼んだ名前。**直していない**（`ModelToolCall.name` と同じ規律）。
+    let toolName: String
+
+    /// モデルが書いた要求の1行（名前＋引数）。**実行中に出す文。**
+    let request: String
+
+    /// 始まった時刻。経過秒数を出すために持つ。
+    let startedAt = Date()
+
+    /// 結果の1行（＝履歴に残る栞と同じ文）。**nil の間は実行中**である。
+    var summary: String?
+
+    /// 読めなかった／呼び出しが成立しなかった。**往復は続いている**ので終了ではない。
+    var isFailure = false
+
+    /// 何回目の往復か（1始まり）。`.toolResult` が来るまで nil。
+    var round: Int?
+
+    init(toolName: String, request: String) {
+        self.toolName = toolName
+        self.request = request
+    }
+
+    /// 実行中か。
+    var isRunning: Bool { summary == nil }
+
+    /// 画面に出す1行。実行中は要求、終わったら結果。
+    var line: String { summary ?? request }
 }

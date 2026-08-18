@@ -51,6 +51,16 @@ struct TurnView: View {
                 ThinkingDisclosure(turn: turn)
             }
 
+            // 2.5 ファイル参照（FR-19 / 16.7節）。**思考と本文のあいだに置く。**
+            //
+            // 順序に意味がある ── モデルは「考える → 読む → 答える」の順に進み、
+            // 読んでいる最中は本文がまだ1文字も無い。時系列どおりに並べておくと、
+            // **いま画面のどこが動いているかが位置で分かる。**
+            // 本文の下に置くと、往復のあいだ画面の下端で何かが光ることになる。
+            if turn.didUseTools {
+                ToolActivityView(turn: turn)
+            }
+
             // 3. 本文
             if !turn.text.isEmpty {
                 MarkdownText(text: turn.text, showsCaret: turn.phase == .responding)
@@ -166,6 +176,17 @@ struct StatsLine: View {
                     // `.done` が届かないまま終わった。BENCH に載せてはいけない値である。
                     Text("（概算）")
                 }
+                // 16.7節「そのターンでツール定義に払ったトークン数」を**統計行に並べる。**
+                //
+                // > 見えないと FR-21 は形骸化する（16.2節）
+                //
+                // `armed` でなければ 0 なので、この項目自体が出ない ──
+                // **出ていないこと自体が「注入 0」の表示である。**
+                if turn.toolDefinitionTokens > 0 {
+                    Text(toolCostText)
+                        .foregroundStyle(SophiaColor.accent)
+                        .help(toolCostHelp)
+                }
                 #if DEBUG
                 // 間引きが効いているかを推測せず数える。断片 ≫ 描画 になっていれば効いている。
                 if turn.chunkCount > 0 {
@@ -177,5 +198,33 @@ struct StatsLine: View {
             .foregroundStyle(SophiaColor.ink4)
             .textSelection(.enabled)
         }
+    }
+
+    /// 例: `｜ツール定義 322 ・ ファイル参照 2回`
+    ///
+    /// 回数を額と並べるのは、**両方を見ないと合計が分からない**からである。
+    /// 往復が1回起きるたびに、会話は先頭から組み直されてもう一度プリフィルされる
+    /// （`ChatViewModel.engineMessages()` は毎ターン先頭から作る）。
+    /// **つまりツール定義もその回数ぶん読み直されている。**
+    ///
+    /// > **【未確認】合計を掛け算で書いていないのはそのためである。**
+    /// > 上限に達した周でエンジンが定義を外す経路があり（`stopsRoundTrips`）、
+    /// > 「何周ぶん払ったか」を UI 側は正確に知らない。**知らない数を断定しない。**
+    /// > 正確に出すなら、エンジンが周ごとの入力トークン数を報せる必要がある。
+    private var toolCostText: String {
+        var text = "｜ツール定義 \(turn.toolDefinitionTokens)"
+        if turn.didUseTools { text += " ・ ファイル参照 \(turn.toolRuns.count)回" }
+        return text
+    }
+
+    private var toolCostHelp: String {
+        "この会話にフォルダが結び付いているため、送信のたびにツールの説明ぶん"
+        + " \(turn.toolDefinitionTokens) トークンを先頭に付けています"
+        + "（入力の目安 \(SophiaDefaults.inputTokenBudget) に対して）。"
+        + (turn.didUseTools
+            ? "ファイル参照が \(turn.toolRuns.count) 回起きているので、"
+                + "そのたびに入力の作り直しとプリフィルが走っています。"
+            : "このターンではファイルは1度も読まれていません。")
+        + "結び付けを外すと 0 になります"
     }
 }

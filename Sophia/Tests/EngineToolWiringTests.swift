@@ -178,58 +178,54 @@ final class EngineToolWiringTests: XCTestCase {
         XCTAssertNotEqual(original, ChatOptions(), "tools が等値比較に効いていない")
     }
 
-    /// **同じ形の JSON を作る場所が2つある。割れないことを縛る。**
+    /// **出荷する定義が、実測で通った JSON の形になることを縛る。**
     ///
-    /// `FolderTool.jsonSchemas`（`Sources/Tools/`）も `[String: any Sendable]` の
-    /// スキーマを直接組んでおり、「`UserInput(chat:tools:)` へそのまま渡せる」と書いてある。
-    /// 一方こちらは `ChatOptions.tools`（`[ToolDefinition]`）を経由する
-    /// ── `ChatOptions` から `Equatable` / `Codable` を落とさないためである。
+    /// > **2026-08-18 に書き直した。記録を残す。**
+    /// > 以前ここは `FolderTool.jsonSchemas`（生の辞書）と
+    /// > `ToolDefinition` 経由の再構成が一致することを見ていた。
+    /// > **同じ定義を2つの形で持っていたからで、その割れ自体が今日2回、嘘の値を生んだ**
+    /// > （このファイルの `folderTools` が生んだ「716トークン」／実費は 1,182）。
+    /// > **`jsonSchemas` を消して出所を1本にしたので、比べる相手はもう無い。**
+    /// > 代わりに、**出荷する定義がテンプレートへ渡る形そのもの**をここで固定する。
     ///
-    /// **どちらかに寄せるべきだが、それは分業をまたぐ判断なので勝手に決めない。**
-    /// 代わりにここで「**`ToolDefinition` はツール層の宣言を欠落なく表せる**」を確かめる。
-    /// これが通る限り、どちらへ寄せても情報は失われない。
+    /// 固定するのは形だけで、**文言は固定しない** ── 文言の錠は
+    /// `ToolExecutionTests.testTheDescriptionsAreExactlyWhatWasMeasured` にある。
+    /// 分けてあるのは、落ちたときに「形が変わった」のか
+    /// 「文言が変わった（＝測り直しが要る）」のかを取り違えないためである。
     ///
     /// **落ちるとしたら意味がある** ── 例えばツール層が `array` 型の引数を足すと、
-    /// `ToolDefinition.Parameter.ValueType` が表せずここで止まる（16.4節が入れ子を避けている理由）。
-    func testToolDefinitionCarriesTheToolLayerCatalogWithoutLoss() throws {
-        for schema in FolderTool.jsonSchemas {
-            let definition = try Self.definition(from: schema)
-            let rebuilt = MLXEngine.toolSpec(for: definition)
+    /// `ToolDefinition.Parameter.ValueType` が表せず宣言の側で止まる（16.4節が入れ子を避けている理由）。
+    func testTheShippedCatalogRendersTheSchemaShapeThatWasMeasured() throws {
+        let specs = FolderTool.definitions.map(MLXEngine.toolSpec(for:))
+        XCTAssertEqual(specs.count, 3, "**4つ目を足さないこと**（16.4節）")
 
+        for (definition, spec) in zip(FolderTool.definitions, specs) {
+            XCTAssertEqual(spec["type"] as? String, "function")
+
+            let function = try XCTUnwrap(spec["function"] as? [String: any Sendable])
+            XCTAssertEqual(function["name"] as? String, definition.name)
+            XCTAssertEqual(function["description"] as? String, definition.description)
+
+            let parameters = try XCTUnwrap(function["parameters"] as? [String: any Sendable])
+            XCTAssertEqual(parameters["type"] as? String, "object")
+            // **`required` は宣言の並び順**（`ToolDefinition` が辞書ではなく配列で
+            // 引数を持っている理由がこれ。並びが揺れると比較も実測の再現もできない）。
             XCTAssertEqual(
-                try Self.json(rebuilt), try Self.json(schema),
-                "ツール層の宣言を ToolDefinition 経由で復元できていない: \(definition.name)")
+                parameters["required"] as? [String], definition.requiredParameterNames)
+
+            let properties = try XCTUnwrap(parameters["properties"] as? [String: any Sendable])
+            XCTAssertEqual(
+                Set(properties.keys), Set(definition.parameters.map(\.name)),
+                "宣言した引数がスキーマに出ていない: \(definition.name)")
+            for parameter in definition.parameters {
+                let property = try XCTUnwrap(properties[parameter.name] as? [String: any Sendable])
+                XCTAssertEqual(property["type"] as? String, parameter.type.rawValue)
+                XCTAssertEqual(property["description"] as? String, parameter.description)
+            }
+
+            // `UserInput(chat:tools:)` は `tool | tojson` を通す。**JSON にできること**が要る。
+            XCTAssertNoThrow(try Self.json(spec), "JSON にできない定義: \(definition.name)")
         }
-    }
-
-    /// ツール層のスキーマを `ToolDefinition` に読み戻す（**このテストの中だけの道具**）。
-    ///
-    /// 引数の並びは「`required` の順 → 残りを名前順」に固定する。
-    /// 辞書の `properties` に順序は無いので、**再構成のたびに `required` の並びが
-    /// 変わると比較が壊れる。** 決め打ちの順序が要る。
-    private static func definition(from schema: [String: any Sendable]) throws -> ToolDefinition {
-        let function = try XCTUnwrap(schema["function"] as? [String: any Sendable])
-        let parameters = try XCTUnwrap(function["parameters"] as? [String: any Sendable])
-        let properties = try XCTUnwrap(parameters["properties"] as? [String: any Sendable])
-        let required = (parameters["required"] as? [String]) ?? []
-
-        let ordered = required + properties.keys.filter { !required.contains($0) }.sorted()
-        let list = try ordered.map { key -> ToolDefinition.Parameter in
-            let property = try XCTUnwrap(properties[key] as? [String: any Sendable])
-            let rawType = try XCTUnwrap(property["type"] as? String)
-            let type = try XCTUnwrap(
-                ToolDefinition.Parameter.ValueType(rawValue: rawType),
-                "ToolDefinition.Parameter.ValueType が `\(rawType)` を表せない。16.4節の型を増やすか、宣言を見直すこと")
-            return ToolDefinition.Parameter(
-                name: key, type: type,
-                description: (property["description"] as? String) ?? "",
-                isRequired: required.contains(key))
-        }
-
-        return ToolDefinition(
-            name: try XCTUnwrap(function["name"] as? String),
-            description: try XCTUnwrap(function["description"] as? String),
-            parameters: list)
     }
 
     /// 辞書を比較可能な1本の文字列にする（キー順を固定するのが目的）。
@@ -488,9 +484,13 @@ final class EngineToolWiringTests: XCTestCase {
         let idleTokens = idle.text.tokens.asArray(Int.self)
 
         // ③ `armed`（16.4節の3つ）
+        //
+        // **`Self.folderTools`（このファイルの見本）を渡さないこと。**
+        // 2026-08-18、ここが見本を測って**「716トークン」という嘘の実費**を出した
+        // （実費は 1,182）。出所は `FolderTool.definitions` の1本だけである。
         let armed = try await container.prepare(
             input: UserInput(
-                chat: chat(), tools: MLXEngine.toolSpecs(for: Self.folderTools),
+                chat: chat(), tools: MLXEngine.toolSpecs(for: FolderTool.definitions),
                 additionalContext: context))
         let armedTokens = armed.text.tokens.asArray(Int.self)
 
@@ -517,6 +517,17 @@ final class EngineToolWiringTests: XCTestCase {
         XCTAssertTrue(
             armedText.contains("<tools>"), "armed なのに <tools> が描画されていない（渡せていない）")
         XCTAssertGreaterThan(delta, 0, "armed で入力が増えていない。tools が届いていない疑い")
+
+        // **画面に出している数字が、実測と一致していること**（16.7節 / VISION の測定原則）。
+        //
+        // `SophiaDefaults.toolDefinitionTokens` は UI が「毎ターンいくら払っているか」を
+        // 出すために持っている定数である（`FolderBar` / `StatsLine` / 入力欄の予算行）。
+        // **定数と実測がずれたら、利用者に見せている痛みのほうが嘘になる。**
+        // ここが落ちたら、直すのは定数のほうであって、この表明ではない。
+        XCTAssertEqual(
+            delta, SophiaDefaults.toolDefinitionTokens,
+            "**画面に出している「ツール定義 \(SophiaDefaults.toolDefinitionTokens) トークン」が実測と違う。**"
+            + " 実測は \(delta)。`SophiaDefaults.toolDefinitionTokens` を実測値へ直すこと")
     }
 
     // MARK: - 補助

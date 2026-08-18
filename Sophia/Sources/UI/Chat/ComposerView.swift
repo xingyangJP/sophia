@@ -143,11 +143,24 @@ struct ComposerView: View {
             Image(systemName: "gauge.with.dots.needle.67percent")
                 .font(.system(size: 10))
             Text("入力が約 \(model.estimatedInputTokens) トークン（目安 \(SophiaDefaults.inputTokenBudget)）。"
+                 + toolShare
                  + "入力処理だけで10秒以上かかる見込みです")
         }
         .font(SophiaFont.footnote)
         .foregroundStyle(SophiaColor.accent)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, SophiaMetrics.space1)
+    }
+
+    /// **超過の内訳のうち、利用者が1文字も打っていない分**（FR-21 / 16.7節）。
+    ///
+    /// 予算を超えたときに「入力を短くしてください」とだけ言うのは不誠実である ──
+    /// `armed` の会話では **322 トークン、予算の32% が既に埋まっている。**
+    /// 短くする以外に「フォルダを外す」という手があることを、
+    /// **その手が一番効く瞬間に**言う。
+    private var toolShare: String {
+        let tokens = model.folder.toolDefinitionTokens
+        guard tokens > 0 else { return "" }
+        return "うち \(tokens) はフォルダのツール定義です（外すと減ります）。"
     }
 }

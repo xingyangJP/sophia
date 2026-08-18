@@ -79,7 +79,7 @@ final class ToolCallProbeTests: XCTestCase {
     /// >
     /// > **定義を写した瞬間、このプローブは「プローブ自身」を測る道具になる。**
     private static func toolSpecs() -> [ToolSpec] {
-        FolderTool.jsonSchemas.map { $0 as ToolSpec }
+        FolderTool.definitions.map(MLXEngine.toolSpec(for:))
     }
 
     /// スキーマ上の必須キー。**引数の妥当性はここで判定する**（JSON の妥当性ではない）。

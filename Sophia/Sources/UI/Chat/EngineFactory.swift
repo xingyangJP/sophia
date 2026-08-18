@@ -42,4 +42,37 @@ enum EngineFactory {
 
         return MLXEngine()
     }
+
+    /// **ツールの実行役を差し込む**（FR-19 / DESIGN.md 第16章 / NFR-09）。
+    ///
+    /// ---
+    ///
+    /// # なぜ差し込みがここに居るのか
+    ///
+    /// `InferenceEngine` に `setToolExecutor` は**無い。意図的に無い。**
+    ///
+    /// | 層 | 知ってよいもの |
+    /// |---|---|
+    /// | `Sources/Inference/` | `ToolExecuting` と `ModelToolCall` だけ |
+    /// | `Sources/Tools/` | フォルダ・封じ込め・文脈の上限。推論を知らない |
+    /// | **組み立てる側（ここ）** | **両方。ここだけが `FolderToolRunner` を差し込む** |
+    ///
+    /// 実行役を持てるかどうかは**実装ごとの性質**である ── `StubEngine` も
+    /// `MockEngine` もツールを扱わず、`options.tools` を無視してよい約束になっている
+    /// （`InferenceEngine` の約束事8）。protocol に載せると
+    /// **扱えない実装に空実装を書かせる**ことになり、「実装がある」が
+    /// 「動く」に見える面を1つ増やす。
+    ///
+    /// だから**組み立てる側が、受け取れるエンジンにだけ渡す。**
+    /// `ChatViewModel` から `as? MLXEngine` を書かせないための関数でもある ──
+    /// UI が推論の実装名を書き始めたら、NFR-09 は静かに終わる。
+    ///
+    /// > **受け取れないエンジンでは何も起きない。** それで正しい ──
+    /// > 渡す先が無いだけで、`options.tools` の門（FR-21）とは無関係である。
+    static func installToolExecutor(
+        _ executor: (any ToolExecuting)?, into engine: any InferenceEngine
+    ) async {
+        guard let mlx = engine as? MLXEngine else { return }
+        await mlx.setToolExecutor(executor)
+    }
 }

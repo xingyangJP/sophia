@@ -78,6 +78,13 @@ final class ChatViewModel {
 
     let engine: any InferenceEngine
 
+    /// **この会話にフォルダが結び付いているか**（FR-19 / FR-21 / 16.2節）。
+    ///
+    /// `idle` / `armed` の唯一の出所である。`ChatOptions.tools` を埋めるのは
+    /// `send()` の1行だけで、その中身は必ずここから取る ──
+    /// **定義をこのファイルへ書き写さないこと。**
+    let folder: ConversationFolder
+
     var engineIsStub: Bool { engine.identifier == .stub }
 
     /// 思考モードのトグルを出してよいか。
@@ -86,11 +93,21 @@ final class ChatViewModel {
 
     /// 送信予定の入力が予算（DESIGN.md 第2.2章）を超えているか。
     /// **超過は隠さず見せる**（VISION の測定原則）。
+    ///
+    /// **ツール定義ぶんを足してある**（16.2節「費用は測ること」/ 16.7節）。
+    /// 足さないと、`armed` の会話では**画面に出る数字が実送信より 322 少ない嘘**になる。
+    /// `engineMessages()` に系統を寄せているのと同じ理由で、
+    /// **予算警告と実送信は同じ材料から作らないと必ずずれる。**
+    ///
+    /// > 内訳の性質が違う点は隠さない ── 会話ぶんは概算（文字数）、
+    /// > ツール定義ぶんは**実トークナイザの実測値**である
+    /// > （`SophiaDefaults.toolDefinitionTokens`。テンプレートの固定文を含むため
+    /// >  アプリ側からは数えられない）。
     var estimatedInputTokens: Int {
         var messages = engineMessages()
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty { messages.append(.user(trimmed)) }
-        return messages.estimatedTokenCount
+        return messages.estimatedTokenCount + folder.toolDefinitionTokens
     }
 
     var inputBudgetExceeded: Bool { estimatedInputTokens > SophiaDefaults.inputTokenBudget }
@@ -124,6 +141,10 @@ final class ChatViewModel {
         var recordID: String?
         /// 最後に DB へ書いた時刻。1秒に1回へ間引くために持つ（Store.swift の但し書き）。
         var lastPersistedAt: ContinuousClock.Instant?
+        /// このターンで、フォルダが読めるかを既に確かめたか（16.8節）。
+        /// **1ターンに1回まで。** モデルが同じ誤りを6回繰り返しても、
+        /// ディスクを6回叩き直す理由は無い。
+        var didVerifyFolder = false
 
         init(turn: ChatTurn, inputTokens: Int, thinkingEnabled: Bool) {
             self.turn = turn
@@ -163,8 +184,9 @@ final class ChatViewModel {
 
     // MARK: - 生成
 
-    init(engine: any InferenceEngine) {
+    init(engine: any InferenceEngine, folder: ConversationFolder = ConversationFolder()) {
         self.engine = engine
+        self.folder = folder
     }
 
     /// 起動時にモデルを用意する。
@@ -175,6 +197,12 @@ final class ChatViewModel {
     /// その間の送信が保存されない窓ができる。
     func prepare() async {
         guard model == nil, !isLoadingModel else { return }
+
+        // **フォルダの復元を最初に済ませる**（FR-19 / 16.5節 機能3）。
+        // 数ミリ秒しか掛からず、モデルの読み込み（数秒〜数分）の後ろに置くと
+        // その間だけチップが出ない ── 起動直後に「結び付いていない」と誤解させる。
+        await folder.restoreOnLaunch()
+        await syncToolExecutor()
 
         if store == nil {
             do {
@@ -235,18 +263,35 @@ final class ChatViewModel {
         input = ""
 
         let history = engineMessages() + [.user(text)]
-        let options = ChatOptions(thinking: thinkingEnabled)
+
+        // =====================================================================
+        //  **FR-21 の実体はこの1行である**（DESIGN.md 第16.2節）
+        // ---------------------------------------------------------------------
+        //  `ChatOptions.tools` を埋めてよいのはここだけ。
+        //  `idle`（フォルダが結び付いていない）なら `toolDefinitions` は空配列で、
+        //  テンプレートの `{%- if tools %}` が開かず**1文字も注入されない。**
+        //
+        //  **ここに条件を足さないこと。** 「利用者の文にファイルの話が出てきたら」
+        //  のような分類器を挟んだ瞬間、判定のために毎ターン計算を払うことになり、
+        //  VISION 第1因子（そもそも無駄を送らない）に真正面から反する（16.2節）。
+        //  引き金は利用者の操作（結び付ける・外す）だけである。
+        // =====================================================================
+        let options = ChatOptions(thinking: thinkingEnabled, tools: folder.toolDefinitions)
 
         turns.append(ChatTurn(author: .user, text: text))
 
         let assistant = ChatTurn(author: .assistant, phase: .waiting)
         // FR-17。**生成開始と同時に思考領域を開く。** 無言の待機を作らない。
         assistant.thinkingExpanded = thinkingEnabled
+        // 16.7節「そのターンでツール定義に払ったトークン数」。
+        // **`options.tools` を組んだのと同じ状態から入れる** ── 別々に決めるとずれる。
+        assistant.toolDefinitionTokens =
+            options.tools.isEmpty ? 0 : folder.toolDefinitionTokens
         turns.append(assistant)
 
         let stream = Stream(
             turn: assistant,
-            inputTokens: history.estimatedTokenCount,
+            inputTokens: history.estimatedTokenCount + assistant.toolDefinitionTokens,
             thinkingEnabled: thinkingEnabled
         )
         self.stream = stream
@@ -288,6 +333,11 @@ final class ChatViewModel {
         // 蓄積先（stream）は VM 側にあるので、キャンセルしても既出力は消えない。
         generationTask = Task { [weak self] in
             guard let self else { return }
+            // **送る直前に、実行役をいまの結び付きへ揃える。**
+            // 門（`options.tools`）は上で閉じているので、揃え忘れても
+            // 「古い実行役が残っているだけ」で無害だが、**無害に頼らない**
+            // （`MLXEngine.activeToolExecutor` が同じことを二重に守っている）。
+            await self.syncToolExecutor()
             do {
                 for try await chunk in self.engine.chat(history, options: options) {
                     self.apply(chunk)
@@ -297,6 +347,42 @@ final class ChatViewModel {
                 self.finish(error: SophiaError.wrap(error, fallback: .generationFailed))
             }
         }
+    }
+
+    // MARK: - フォルダ参照（FR-19 / DESIGN.md 第16章）
+
+    /// フォルダを結び付ける。**`idle` → `armed` の引き金は、この操作だけである**（16.6節 約束3）。
+    func chooseFolder() async {
+        folder.choose()
+        await syncToolExecutor()
+    }
+
+    /// 結び付けを外す。**`armed` → `idle`。** 次のターンから注入は 0 に戻る。
+    func forgetFolder() async {
+        folder.forget()
+        await syncToolExecutor()
+    }
+
+    /// **実行役を、いま結び付いているフォルダへ揃える。**
+    ///
+    /// ## 実行役は権限そのものである
+    ///
+    /// `FolderToolRunner` は「この会話が読んでよいフォルダ」を `let` で握っており、
+    /// **差し替える口を持たない**（16.6節 約束1）。だから結び付けが変わったら
+    /// **作り直す**しかない ── 中身を書き換えられる設計にしないための代償であり、
+    /// 作り直しは安い（数える変数が1つあるだけである）。
+    ///
+    /// ## 刺さっているだけでは何も起きない
+    ///
+    /// 実行役の有無で注入の状態は変わらない。門は `ChatOptions.tools` のほうで、
+    /// エンジンは `activeToolExecutor(_:toolsWereSent:)` で両者を掛け算する。
+    /// **だから外し忘れても `idle` の会話でツールが動くことはない。**
+    /// それでも揃えるのは、**片方に頼らない**ためである。
+    private func syncToolExecutor() async {
+        // 型を明示してあるのは好みではない ── `FolderToolRunner?` のまま渡すと
+        // 存在型への暗黙変換に頼ることになる。**境界の型は境界で決めておく。**
+        let executor: (any ToolExecuting)? = folder.folder.map { FolderToolRunner(folder: $0) }
+        await EngineFactory.installToolExecutor(executor, into: engine)
     }
 
     /// 中断（FR-02）。**既に出た文字は消さない。**
@@ -345,6 +431,57 @@ final class ChatViewModel {
             }
             stream.pendingContent += text
             scheduleFlush()
+
+        case .toolCall(let call):
+            // **区間の始まり**（FR-19 / 16.7節）。ここから `.toolResult` までの間、
+            // 生成は止まっていて画面には何も流れない。**その無言を埋めるのがこの1行である。**
+            //
+            // 間引き（`scheduleFlush`）は通さない。往復は上限6回しかなく、
+            // 溜めても得が無いうえに、**遅れて出したら「いま読んでいる」の意味が消える。**
+            //
+            // `call.name` も `call.argumentsJSON` も**モデルが書いた文字列**である。
+            // 改行を残すと画面の上で偽の行を作れるので、必ず1行へ潰す。
+            stream.turn.toolRuns.append(
+                ToolRun(
+                    toolName: ToolText.singleLine(call.name, limit: 60),
+                    request: ToolText.singleLine(
+                        "\(call.name) \(call.argumentsJSON)", limit: ToolText.nameLimit)))
+            streamTick &+= 1
+
+        case .toolResult(let activity):
+            // **区間の終わり。** 直前の実行中の1件に結果を書き戻す。
+            //
+            // `.toolCall` → `.toolResult` は往復1回ぶんで対になって流れてくる
+            // （エンジンが実行してから次を送る）。それでも「対になっているはず」に
+            // 頼らず、**実行中の最後の1件**を探す ── 見つからなければ足す。
+            // 落とすと、読んだ事実が画面から消える（16.6節 約束4 が守れなくなる）。
+            let run: ToolRun
+            if let running = stream.turn.toolRuns.last(where: { $0.isRunning }) {
+                run = running
+            } else {
+                run = ToolRun(toolName: activity.toolName, request: activity.summary)
+                stream.turn.toolRuns.append(run)
+            }
+            // `summary` は実行層が `ToolText.singleLine` を通した1行である
+            // （`ToolActivity` の型コメント）。**ここで組み立て直さないこと** ──
+            // 画面に出る文と、次のターンの文脈に残る栞が食い違う。
+            run.summary = activity.summary
+            run.isFailure = activity.isFailure
+            run.round = activity.round
+            streamTick &+= 1
+
+            // 16.8節。**読めなかったのが「フォルダごと駄目」なのかを確かめる。**
+            // モデルの失敗は引き金にすぎない ── 「そのファイルは無い」で
+            // 結び付けを外したら、利用者は理由の分からない解除を食らう。
+            // 原因を決めるのは**ディスクを読み直した結果**である（`verifyBinding()`）。
+            if activity.isFailure, !stream.didVerifyFolder {
+                stream.didVerifyFolder = true
+                // 生成タスクの子にしない。**中断されても診断は最後まで走る**
+                // （保存の鎖を非構造化にしてあるのと同じ理由）。
+                Task { @MainActor [weak self] in
+                    await self?.folder.verifyBinding()
+                }
+            }
 
         case .done(let stats):
             stream.stats = stats
@@ -434,6 +571,20 @@ final class ChatViewModel {
         closeThinking(stream: stream, collapse: !turn.text.isEmpty)
         turn.wasInterrupted = cancelled
 
+        // **実行中のまま終わった往復を閉じる**（FR-19 / 16.7節）。
+        //
+        // `.toolCall` は来たが `.toolResult` が来ないまま終わることがある ──
+        // 利用者が中断した、生成が失敗した、エンジンが落ちた。
+        // 閉じないと**インジケータが永久に回り続ける。**
+        // それは「読んでいる最中」と見分けがつかず、
+        // **落ちないまま黙っている**という、本日いちばん高くついた失敗の形そのものである。
+        //
+        // `toolName` は `.toolCall` の時点で1行に潰してある（他所から来た文字列である）。
+        for run in turn.toolRuns where run.isRunning {
+            run.isFailure = true
+            run.summary = "\(run.toolName): 読み取りの結果が届かないまま終わりました。"
+        }
+
         if let stats = stream.stats {
             turn.stats = stats
             turn.statsAreEstimated = false
@@ -458,6 +609,14 @@ final class ChatViewModel {
         if let error, !error.isCancellation {
             turn.error = error
             turn.phase = .failed
+            // **フォルダの結び付けに関わる失敗なら、ここでも外す**（16.8節）。
+            //
+            // いまの経路では、ツールの失敗は例外にならずに `.toolResult` として流れる
+            // （実行役は throw しない約束である）。**それでもここに funnel を置く。**
+            // `code` を見て分岐するのはこの1行と `verifyBinding()` だけ、という形にしておくと、
+            // 将来この `code` を投げる経路が増えたときに**握り漏らす場所が生まれない。**
+            // 関係しない `code` では何も起きない（`receive(_:)` が false を返して終わる）。
+            folder.receive(error)
         } else {
             turn.phase = .finished
         }
