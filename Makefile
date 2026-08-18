@@ -282,3 +282,34 @@ test-inference:
 	@swift scripts/test-thinking-splitter.swift
 	@echo ""
 	@swift scripts/test-splitter-vs-official.swift
+
+# --- ツール定義の実費用を測る（DESIGN 16.9節 項目4）------------------------
+# **FR-21 は「注入は必要時だけ」と決めているが、その「必要時」がいくらかを
+# 測っていなかった。** 概算では駄目である ─ 概算は本日 32% 過少だった実績がある。
+#
+# 実トークナイザで3本を prepare して比べる:
+#   ① tools 引数を書かない  ② idle（API 経由で空配列）  ③ armed（定義3つ）
+# **②==① を厳密比較する。** 「渡していないつもり」を潰すのはこの1本だけである。
+#
+# `probe` と同じく `.xctestrun` 経由で環境変数を渡す（TEST_RUNNER_ は効かない）。
+# **モデルを読むので重い。** ホストアプリ側は SOPHIA_ENGINE=stub で黙らせる。
+TOOLTOKENS_LOG ?= logs/tool-token-cost.log
+
+.PHONY: tooltokens
+
+tooltokens:
+	@mkdir -p logs
+	@SRC=$$(find $(XC_DERIVED)/Build/Products -name '*.xctestrun' ! -name '*probe.xctestrun' ! -name 'tooltokens.xctestrun' | head -1); \
+	if [ -z "$$SRC" ]; then echo "先に make probe-build を実行すること"; exit 1; fi; \
+	RUN=$$(dirname "$$SRC")/tooltokens.xctestrun; cp "$$SRC" "$$RUN"; \
+	ENV_PATH=:TestConfigurations:0:TestTargets:0:EnvironmentVariables; \
+	for kv in SOPHIA_TOOLTOKENS=1 SOPHIA_ENGINE=stub; do \
+		k=$${kv%%=*}; v=$${kv#*=}; \
+		/usr/libexec/PlistBuddy -c "Add $$ENV_PATH:$$k string $$v" "$$RUN" >/dev/null 2>&1 \
+			|| /usr/libexec/PlistBuddy -c "Set $$ENV_PATH:$$k $$v" "$$RUN"; \
+	done; \
+	printf '=== %s ===\n' "$$(date '+%F %T')" >> $(TOOLTOKENS_LOG); \
+	xcodebuild test-without-building -xctestrun "$$RUN" -destination '$(XC_DEST)' \
+		-only-testing:SophiaTests/EngineToolWiringTests/testToolDefinitionTokenCost \
+		2>&1 | tee -a $(TOOLTOKENS_LOG) | grep -E '^\[TOOLTOKENS|Executed|error:|\*\* TEST' || true
+	@echo "計測ログ: $(TOOLTOKENS_LOG)"
