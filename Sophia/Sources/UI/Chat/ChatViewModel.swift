@@ -715,9 +715,19 @@ final class ChatViewModel {
     ///
     /// 次の担当者へ: ③書き方の原則・④やりとりの原則を**ここへ足さないこと。**
     /// 足すと 331 トークンへ戻る。役割の切替は A2 の `ProfileRecord.systemPrompt`（FR-05）へ。
+    /// テストから知らせる1行を読むための口。**費用の杭がこれを使う。**
+    var folderNoticeForTesting: String? { folder.boundFolderNotice }
+
     private func engineMessages() -> [SophiaMessage] {
-        let system: [SophiaMessage] =
-            systemPromptEnabled ? [.system(SophiaDefaults.systemPrompt)] : []
+        // **結び付いたフォルダを知らせる1行は、ツール定義と同じ条件で出入りする。**
+        // `idle` では nil なので**1トークンも足さない**（FR-21 と同じ考え方）。
+        // 自己認識を切っていても出す ── あれは「私は誰か」で、こちらは「いま何が見えるか」であり、
+        // **後者を落とすとツールが在るのに使えない**（2026-08-18 実機で確認）。
+        let systemText = [
+            systemPromptEnabled ? SophiaDefaults.systemPrompt : nil,
+            folder.boundFolderNotice,
+        ].compactMap { $0 }.joined(separator: "\n")
+        let system: [SophiaMessage] = systemText.isEmpty ? [] : [.system(systemText)]
         return system + turns.compactMap { turn in
             guard !turn.text.isEmpty else { return nil }
             switch turn.author {

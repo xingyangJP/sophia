@@ -62,6 +62,17 @@ final class ToolCallProbeTests: XCTestCase {
     /// 温度。**実使用と同じ 0.7 を既定にする。**
     /// 0 に固定すれば再現性は上がるが、**実使用とは別の性質を測ることになる。**
     /// 形式の遵守は「揺らいでも守れるか」が問題なので、実使用側に寄せた。
+    /// **思考モードで測るか。** 既定は OFF（プローブはずっとこれで測ってきた）。
+    ///
+    /// > **2026-08-18、実機で呼ばれない事象が出て足した。**
+    /// > アプリは既定で思考ONだが、**プローブはずっとOFFで測っていた。**
+    /// > つまり「12/12 だから使える」は**思考OFFの条件でしか確かめていない。**
+    /// > DESIGN 16.9節 項目3 が未確認として立てていたのはこれである。
+    /// > `SOPHIA_TOOLPROBE_THINK=1` で ON。
+    static var thinkingEnabled: Bool {
+        ProcessInfo.processInfo.environment["SOPHIA_TOOLPROBE_THINK"] == "1"
+    }
+
     private var temperature: Double {
         Double(ProcessInfo.processInfo.environment["SOPHIA_TOOLPROBE_TEMP"] ?? "") ?? 0.7
     }
@@ -227,7 +238,7 @@ final class ToolCallProbeTests: XCTestCase {
             let userInput = UserInput(
                 chat: [.user(prompt)],
                 tools: specs,
-                additionalContext: ["enable_thinking": false]
+                additionalContext: ["enable_thinking": Self.thinkingEnabled]
             )
             let lmInput = try await context.processor.prepare(input: userInput)
 

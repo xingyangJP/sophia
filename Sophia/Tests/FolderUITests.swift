@@ -155,10 +155,40 @@ final class FolderUITests: XCTestCase {
         idle.input = "こんにちは"
         armed.input = "こんにちは"
 
-        XCTAssertEqual(
-            armed.estimatedInputTokens - idle.estimatedInputTokens,
-            SophiaDefaults.toolDefinitionTokens,
-            "**入力欄の見積もりがツール定義ぶんを隠している。** 予算警告が嘘の数字になる")
+        // **`armed` で増えるのは2つある。** ツール定義と、
+        // 「どのフォルダが結び付いているか」をモデルへ知らせる1行である
+        // （後者は 2026-08-18 に足した ── 無いとモデルは根の名前を下位フォルダだと
+        // 解釈して外す。実機で `path="Youtuber"` を渡して失敗するのを確認している）。
+        // **どちらも利用者が打っていないぶんなので、両方が見積もりに乗っていること。**
+        let notice = try XCTUnwrap(armed.folderNoticeForTesting)
+        let expected =
+            SophiaDefaults.toolDefinitionTokens + SophiaMessage.estimateTokens(in: notice)
+        let actual = armed.estimatedInputTokens - idle.estimatedInputTokens
+
+        // **1トークンの幅を許すのは丸めのためである。** 実装は自己認識と知らせる1行を
+        // **連結してから**概算するが、ここは**別々に**概算して足している。
+        // `estimateTokens` は最後に切り上げるので、分ける回数だけ丸めが増える
+        // （区切りの改行1文字も入る）。**守りたいのは「隠していないこと」**であって、
+        // 丸め1つではない。**幅を2以上に広げないこと** ── 広げた瞬間に、
+        // 数十トークンの漏れがこの試験をすり抜ける。
+        XCTAssertLessThanOrEqual(
+            abs(actual - expected), 1,
+            "**入力欄の見積もりが、利用者が打っていないぶんを隠している**"
+                + "（実際 \(actual) / 期待 \(expected)）。予算警告が嘘の数字になる")
+    }
+
+    /// **知らせる1行が高くつきすぎていないこと。**
+    ///
+    /// 最初に書いた版は **108トークン**あった。利用者に残るのが 33トークンしかない配分で、
+    /// **毎ターン払う**ものとしては高すぎる。**上限を杭として打っておく** ──
+    /// 書き足したくなったとき、ここが落ちて費用を思い出させる。
+    func testTheBoundFolderNoticeStaysCheap() async throws {
+        let armed = ChatViewModel(engine: RecordingEngine(), folder: try await armedFolder())
+        let notice = try XCTUnwrap(armed.folderNoticeForTesting)
+
+        XCTAssertLessThanOrEqual(
+            SophiaMessage.estimateTokens(in: notice), 40,
+            "知らせる1行が 40トークンを超えた: \(notice)")
     }
 
     /// 予算に対する割合が言い切れること（チップとツールチップが使う）。

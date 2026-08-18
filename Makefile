@@ -230,6 +230,9 @@ probe:
 # ホストアプリにモデルを読ませないため SOPHIA_ENGINE=stub も入れる。
 TOOLPROBE_N    ?= 3
 TOOLPROBE_TEMP ?= 0.7
+# **思考モードで測るか。** 既定 0（OFF）。アプリの既定は ON なので、
+# **1 で測るほうが実使用に近い**（2026-08-18、実機で呼ばれない事象が出て追加）。
+TOOLPROBE_THINK ?= 0
 TOOLPROBE_LOG  ?= logs/toolcall-probe.log
 
 .PHONY: toolprobe
@@ -242,7 +245,8 @@ toolprobe:
 	ENV_PATH=:TestConfigurations:0:TestTargets:0:EnvironmentVariables; \
 	for kv in SOPHIA_TOOLPROBE=1 SOPHIA_ENGINE=stub \
 	          SOPHIA_TOOLPROBE_N=$(TOOLPROBE_N) \
-	          SOPHIA_TOOLPROBE_TEMP=$(TOOLPROBE_TEMP); do \
+	          SOPHIA_TOOLPROBE_TEMP=$(TOOLPROBE_TEMP) \
+	          SOPHIA_TOOLPROBE_THINK=$(TOOLPROBE_THINK); do \
 		k=$${kv%%=*}; v=$${kv#*=}; \
 		/usr/libexec/PlistBuddy -c "Add $$ENV_PATH:$$k string $$v" "$$RUN" >/dev/null 2>&1 \
 			|| /usr/libexec/PlistBuddy -c "Set $$ENV_PATH:$$k $$v" "$$RUN"; \
