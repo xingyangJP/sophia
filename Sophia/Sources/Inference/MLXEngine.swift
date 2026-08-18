@@ -1239,12 +1239,50 @@ actor MLXEngine: InferenceEngine {
     /// **`route` を固定している既存の試験（`EngineToolWiringTests`）が形ごと変わる。**
     /// 往復のために試験の形を崩すのは順序が逆である。
     ///
-    /// ## 欠落しない根拠
+    /// ## 何が戻り、何が戻らないか（2026-08-18 に測り直した）
     ///
-    /// `argumentsJSON` は `JSONValue` を符号化した文字列であり、
-    /// `JSONValue` は `Codable` なので**同じ型付き値に戻る**
-    /// （`Int` は `Int` のまま。`JSONValue.init(from:)` が Bool → Int → Double の順に試す）。
-    /// **往復して等しくなることは `ToolRoundTripTests` が固定している。**
+    /// ここには「`JSONValue` は `Codable` なので**同じ型付き値に戻る**」と書いてあった。
+    /// **戻らない。** JSON の文へ書いた時点で Swift 側の札（`.int` / `.double`）は
+    /// 「数」1種類に潰れ、読み戻すときに `JSONValue.init(from:)` が
+    /// Bool → Int → Double の順で試すので、**整数として読めるものは `.int` になる。**
+    /// 実測（`AdversarialRoundTripTests.testWholeNumberDoublesDoNotSurviveTheRoundTrip`）:
+    ///
+    /// | 入れた値 | 戻る値 |
+    /// |---|---|
+    /// | `.double(80.0)` | **`.int(80)`** |
+    /// | `.double(-0.0)` | **`.int(0)`**（ゼロの符号は消える） |
+    /// | `.array([.int(1), .double(2.0)])` | 中の `2.0` が `.int(2)` |
+    /// | `.object(["k": .double(3.0)])` | `.object(["k": .int(3)])` |
+    ///
+    /// **戻るもの**（同じく実測）: `Int.max` / `Int.min`（`Double` に落ちて桁を失わない）・
+    /// 小数部のある値・`1e300`・真偽・null・日本語・絵文字・入れ子の構造。
+    /// つまり失われるのは**JSON では表せない区別**だけである。
+    ///
+    /// ## 保証できるのは同一性ではなく**冪等性**である
+    ///
+    /// 一度この境界を通った値は、何度往復しても同じ値・同じ文字列になる
+    /// （`.sortedKeys` で並びも固定）。書き戻しと `Equatable` な比較・ログの突き合わせが
+    /// 要求しているのはこちらの性質であり、`ToolRoundTripTests` が固定しているのも
+    /// **一度通した値どうしの一致**である。
+    ///
+    /// ## 直さずに書き換えた理由（判断。**過大に言わない**）
+    ///
+    /// 1. **JSON に `80` と `80.0` の区別は無い。** 直すには整数値の `Double` を
+    ///    `80.0` と書く**自前の符号化器**が要る（`JSONEncoder` は `80` と書く）。
+    ///    文字列の逃がし方まで自分で書くことになり、**ライブラリと同じ判断が2か所**になる。
+    /// 2. **上流で既に同じ正規化が起きている。** モデルの原文を `[String: JSONValue]` に
+    ///    するのは MLX 側の parser であり、`{"limit": 80.0}` が `.int(80)` になることを
+    ///    検証役が実測している。**この関数の入口に `.double(80.0)` が来ること自体がまれ**で、
+    ///    仮に直しても、消えた区別は既にこの層の手前で消えている。
+    /// 3. **下流は札を見ていない。** `argumentsJSON` を読むのは `ToolArguments` で、
+    ///    あれは JSON の**文**を読み、`integer(_:)` が `10` も `10.0` も受ける
+    ///    （`Tools/ToolCallRequest.swift`）。ここで戻した `ToolCall` の使い道は
+    ///    会話への書き戻し（`chatMessages(for:)`）だけである。
+    ///
+    /// > **【未確認】小数を取るツールはまだ1つも無い**（`ToolDefinition.Parameter.ValueType`
+    /// > には `.number` がある）。足す日に見るのは**この関数ではなく `ToolArguments` の側**である
+    /// > ── 値が通る道はそちらで、`1.0` と `1` の区別が本当に要るなら、
+    /// > 区別が消えているのは MLX の parser の入口のほうである。
     ///
     /// 読めなかったときは**空の引数として戻す。** 呼び出しごと消すと、
     /// モデルには「無視された」としか見えず、同じ手を繰り返す（16.8節）。
@@ -2011,6 +2049,59 @@ enum GenerationRoute: Sendable, Equatable {
     case ignored
 }
 
+/// **`[TOOL]` の行に出してよい形へ潰す。行き先は開発者の端末である。**
+///
+/// ## `ToolText.singleLine(_:limit:)` とは別物である（**わざと別にしてある**）
+///
+/// | | `ToolText.singleLine` | ここ |
+/// |---|---|---|
+/// | 宛先 | モデルの文脈・画面 | **端末（stderr）** |
+/// | 消すもの | Cc / Zl / Zp（行を割る構造） | **Cc / Cf / Zl / Zp / Zs** |
+/// | ゼロ幅・双方向制御（Cf） | **わざと残す**（消すなら本文でも一貫してやる必要がある） | **消す** |
+/// | 置き換え | 空白1つ | `_`（`key=value` を割らない） |
+///
+/// **端末では制御文字が命令として解釈される。** U+001B（ESC）で始まる並びは色を変え、
+/// 画面を消し、カーソルを戻す。BEL（U+0007）は鳴る。U+202E は行の**見た目を反転**できる。
+/// 2026-08-18 まで、ここは `CharacterSet.whitespacesAndNewlines` しか見ておらず、
+/// **ESC も BEL もそのまま stderr に出ていた**（出所はモデルが書いたツール名である）。
+///
+/// > **長さも書記素ではなくスカラーで切る。** `prefix(64)` は書記素クラスタを64個数えるので、
+/// > `"a" + U+0301 × 5,000` が1文字として通り、1万バイトの行が出る
+/// > （`ToolText.singleLine` と同型の欠陥。同じ日に両方直した）。
+///
+/// **`internal` にしてあるのは試験から呼べるようにするため**である。
+/// `writeToolLine` 自身は `private` のまま ── あれは呼べば stderr へ書く（副作用がある）が、
+/// **判断はすべてこの型に寄せてあるので、判断だけを外から確かめられる。**
+enum ToolLogValue {
+
+    /// 1つの値に出してよい長さ（**Unicode スカラー**）。
+    static let limit = 64
+
+    /// 出せない文字の代わりに置くもの。**消さずに置き換える** ──
+    /// 消すと「何文字あったか」が行から分からなくなる。
+    static let replacement: Unicode.Scalar = "_"
+
+    /// 潰す。**戻り値は `limit` スカラー以下で、Cc / Cf / Zl / Zp / Zs を1つも含まない。**
+    static func sanitized(_ value: String) -> String {
+        var out = ""
+        out.reserveCapacity(limit)
+        var written = 0
+        for scalar in value.unicodeScalars {
+            guard written < limit else { break }
+            let category = scalar.properties.generalCategory
+            let unsafe =
+                category == .control  // C0 / C1（ESC・BEL・タブ・改行・DEL）
+                || category == .format  // ゼロ幅・双方向制御（端末の見た目を反転できる）
+                || category == .lineSeparator
+                || category == .paragraphSeparator
+                || category == .spaceSeparator  // 空白は `key=value` の区切りである
+            out.unicodeScalars.append(unsafe ? replacement : scalar)
+            written += 1
+        }
+        return out
+    }
+}
+
 /// ツールまわりの出来事を stderr へ1行で吐く。
 ///
 /// **`[LOAD]` / `[MEM]` / `[STATS]` と同じ経路・同じ `key=value` 形式**に揃えてある。
@@ -2022,18 +2113,11 @@ enum GenerationRoute: Sendable, Equatable {
 /// > 実際に利用者のファイル名や検索語が入る。NFR-01（会話を端末の外に出さない）は
 /// > ログ経由の流出も含む（`SophiaDatabase.configuration` と同じ考え方）。
 /// > **値はモデルが書いた文字列である。** ツール名は捏造されうるので、
-/// > 空白・改行を潰し、長さも切ってから出す ── **さもないと1行の `key=value` が
+/// > `ToolLogValue.sanitized(_:)` を必ず通す ── **さもないと1行の `key=value` が
 /// > 崩れ、最悪ログの行そのものをモデルに書かれる**（`[LOAD]` の値はアプリが作るので
 /// > この心配が無かった。ここが初めての「外から来る値」である）。
 private func writeToolLine(_ event: String, fields: [(key: String, value: String)]) {
-    func sanitize(_ value: String) -> String {
-        let collapsed = value.unicodeScalars.map {
-            CharacterSet.whitespacesAndNewlines.contains($0) ? "_" : String($0)
-        }.joined()
-        return String(collapsed.prefix(64))
-    }
-
-    let line = (["event=\(event)"] + fields.map { "\($0.key)=\(sanitize($0.value))" })
+    let line = (["event=\(event)"] + fields.map { "\($0.key)=\(ToolLogValue.sanitized($0.value))" })
         .joined(separator: " ")
     FileHandle.standardError.write(Data("[TOOL] \(line)\n".utf8))
 }

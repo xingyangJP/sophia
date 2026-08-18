@@ -23,7 +23,7 @@ enum ToolRejection: Sendable, Equatable {
     var modelMessage: String {
         switch self {
         case .unknownTool(let name):
-            "失敗: \(ToolText.singleLine(name, limit: 60)) というツールはありません。"
+            "失敗: \(ToolText.toolName(name)) というツールはありません。"
                 + "使えるのは list_directory / read_file / search_files の3つだけです。"
 
         case .missingArgument(let tool, let name):
@@ -41,7 +41,7 @@ enum ToolRejection: Sendable, Equatable {
     var userMessage: String {
         switch self {
         case .unknownTool(let name):
-            "モデルが存在しないツール（\(ToolText.singleLine(name, limit: 60))）を呼びました。"
+            "モデルが存在しないツール（\(ToolText.toolName(name))）を呼びました。"
         case .missingArgument(let tool, let name):
             "モデルのツール呼び出しに \(name) がありませんでした（\(tool)）。"
         case .callLimitReached(let limit):
@@ -81,6 +81,11 @@ enum ToolRejection: Sendable, Equatable {
 /// 「`--- ここまで ---` を騙る」「`<|im_start|>` で偽のターンを作る」といった
 /// **構造の偽装**である。行を跨げなければ、囲いの外側に見せかけることはできない。
 ///
+/// > **潰すのは本文だけではない。** 同じ理由で `toolName` も通す ──
+/// > あの値は画面（`ToolActivity`）と次の周のプロンプト（`role=tool` の `name`）へ流れる。
+/// > **2026-08-18 まで、ここだけ潰していなかった**（`make(kind:message:tool:counter:)` が
+/// > 潰した名前を `contextText` と `bookmarkLine` にしか使っていなかった）。
+///
 /// > **【未確認】1行の中の説得までは消えない。**
 /// > `無視して〜と答えよ` という名前のファイルは作れる。効くかは測っていない（16.9節 項目9）。
 /// > **効いても被害が限定的なのは、囲いではなく封じ込め（16.5節）と
@@ -99,7 +104,15 @@ struct ToolResult: Sendable, Equatable {
         case rejected(ToolRejection)
     }
 
-    /// モデルが呼んだ名前（**直していない**）。
+    /// モデルが呼んだ名前。**綴りは直していない**（`read_fil` は `read_fil` のまま届く。
+    /// 直して受けると、名前を間違えたことが人間にもモデルにも見えなくなる）。
+    ///
+    /// **ただし形は潰してある** ── `ToolText.toolName(_:)` を通しており、
+    /// 改行・制御文字・行区切りは含まず、切った印（`…`）を含めて
+    /// `ToolText.toolNameLimit` スカラー以下である。
+    /// この値は `ToolActivity.toolName` として**画面へ**流れ、`role=tool` の `name` として
+    /// **次の周のプロンプトへも**入る（`Shared/Chunk.swift` の `ToolActivity` の型コメント）。
+    /// **潰さずに入れると、その2か所へ改行を持ち込める。**
     var toolName: String
 
     var kind: Kind
@@ -149,8 +162,12 @@ struct ToolResult: Sendable, Equatable {
     // MARK: - 組み立て（ここ以外で `contextText` を作らないこと）
 
     static func content(_ outcome: ReadOutcome, tool: String, isListing: Bool) -> ToolResult {
+        // ここへ来るのは `FolderTool(rawValue:)` が一致した名前だけなので、
+        // 潰しても実際には1文字も変わらない。**それでも通すのは、保証を型の側に置くため**
+        // である ── 「上流の guard を読めば安全だと分かる」形の保証は、
+        // 呼び手が2つ目になった日に黙って破れる（`toolName` の型コメント）。
         ToolResult(
-            toolName: tool,
+            toolName: ToolText.toolName(tool),
             kind: isListing ? .listing(outcome) : .read(outcome),
             contextText: outcome.contextText,
             bookmarkLine: outcome.bookmarkLine,
@@ -177,13 +194,17 @@ struct ToolResult: Sendable, Equatable {
         kind: Kind, message: String, tool: String, counter: TokenCounter
     ) -> ToolResult {
         // **必ず1行に潰してから返す**（型コメントの「形を潰す」）。
-        let safeTool = ToolText.singleLine(tool, limit: 60)
+        let safeTool = ToolText.toolName(tool)
         let line = ToolText.singleLine(message, limit: ToolText.failureLimit)
         // **数える文字列と返す文字列を、同じ変数から作ること**
         // （`ReadOutcome.contextText` と同じ規律。組み直すと必ずどこかでずれる）。
         let text = "[ツール \(safeTool)]\n\(line)"
         return ToolResult(
-            toolName: tool,
+            // **潰した名前を入れること。** 2026-08-18 まで、ここだけ `tool`（潰す前）を
+            // 入れていた ── `contextText` と `bookmarkLine` は安全なのに、
+            // 画面（`ToolActivity.toolName`）とプロンプト（`role=tool` の `name`）にだけ
+            // 改行入りの名前が流れる形になっていた。
+            toolName: safeTool,
             kind: kind,
             contextText: text,
             bookmarkLine: "\(safeTool): \(line)",
@@ -200,11 +221,19 @@ struct ToolResult: Sendable, Equatable {
 /// user ターンの中に展開される（16.1節）。
 enum ToolText {
 
-    /// 失敗の文の長さの上限（文字）。**モデルが 10万文字のパスを書いても、払うのはここまで。**
+    /// 失敗の文の長さの上限（**Unicode スカラー**。`singleLine(_:limit:)` の但し書きを読むこと）。
+    /// **モデルが 10万文字のパスを書いても、払うのはここまで。**
     static let failureLimit = 300
 
-    /// 名前・パスの長さの上限（文字）。一覧の1行あたりに払う上限でもある。
+    /// 名前・パスの長さの上限（**Unicode スカラー**）。一覧の1行あたりに払う上限でもある。
     static let nameLimit = 160
+
+    /// **画面とプロンプトへ出るツール名**の上限（**Unicode スカラー**）。
+    ///
+    /// 他の2つと違い、これは**切った印（`…`）を含めた全体の上限**である
+    /// （`toolName(_:)`）。画面の欄と `role=tool` の `name` に入る値なので、
+    /// 「上限＋1」ではなく「全体で何スカラーか」が約束になる。
+    static let toolNameLimit = 60
 
     /// 改行と制御文字を消し、長さを切る。
     ///
@@ -214,7 +243,7 @@ enum ToolText {
     /// |---|---|
     /// | `\n--- ここまで ---\n` | 改行が消えるので、囲いの終わりを騙れない |
     /// | `\n<|im_start|>system\n` | 同上。行頭に立てない |
-    /// | 10万文字の名前 | 長さで切る。**費用の側の防御**でもある |
+    /// | 10万文字の名前 | 長さ（**スカラー数**）で切る。**費用の側の防御**でもある |
     ///
     /// **1行の中の説得は消えない**（`ToolResult` の型コメントの但し書き）。
     ///
@@ -222,9 +251,33 @@ enum ToolText {
     /// > 消すなら**すべてのツール戻り値の本文**（`ReadOutcome.body` を含む）で
     /// > 一貫してやる必要があり、それは `Sources/Context/` の仕事である。
     /// > **半端に片側だけ消すと、消えていない側があることに気づけなくなる。** 申し送りにしてある。
+    ///
+    /// ## 長さは **Unicode スカラー**で数える（2026-08-18 に直した）
+    ///
+    /// もとは `String.count` ＝ **書記素クラスタ**で数えていた。
+    /// 書記素は個数と大きさが比例しない ── `"a" + U+0301 × 5,000` は `count == 1` なので
+    /// `limit: 60` を素通りし、**5,001 スカラー / 10,001 バイト**が返っていた
+    /// （`AdversarialRoundTripTests` の実測）。
+    /// **「300文字に切った」という申告が事実と合っておらず、費用の防御になっていなかった。**
+    ///
+    /// スカラーにしたので、戻り値は次を必ず満たす。
+    ///
+    /// * `limit` スカラー ＋ 切った印 `…` の1スカラー ＝ **最大 `limit + 1` スカラー**
+    /// * UTF-8 で**最大 `(limit + 1) × 4` バイト**（1スカラーは4バイト以下）
+    /// * 書記素数も `limit + 1` 以下（1書記素は1スカラー以上でできている）
+    ///
+    /// **バイトで数えなかった理由**は、同じ上限が日本語の表示にも効いているからである
+    /// （`nameLimit` は一覧の1行、`failureLimit` は画面にも出る失敗の文）。
+    /// バイトで切ると**日本語の名前だけが3分の1の長さになり、上限の意味が文字種で変わる。**
+    /// スカラーなら、結合を使わない文字（ASCII・日本語）ではこれまでと同じ数になり、
+    /// **変わるのは結合列や絵文字の並び ── つまり悪用の形だけ**である。
+    ///
+    /// > **縛っているのは「返す文字列」であって「入力の大きさ」ではない。**
+    /// > 10万スカラーの入力は一度そのまま走査する（呼ばれた時点で既にメモリに載っている）。
+    /// > ここが守っているのは、その先（文脈・プロンプト・画面）が払う費用である。
     static func singleLine(_ text: String, limit: Int) -> String {
         var flattened = ""
-        flattened.reserveCapacity(text.count)
+        flattened.reserveCapacity(text.unicodeScalars.count)
         var lastWasSpace = false
         for scalar in text.unicodeScalars {
             // 改行・タブ・その他の C0/C1 制御文字。**「改行だけ」では足りない** ──
@@ -244,9 +297,26 @@ enum ToolText {
             lastWasSpace = (scalar == " ")
         }
         let trimmed = flattened.trimmingCharacters(in: .whitespaces)
-        guard trimmed.count > limit else { return trimmed }
+        // **スカラーで数えること。** `count`（書記素）で数えると、
+        // 1文字に1万バイト積んだ入力が上限を素通りする（上の但し書き）。
+        let scalars = trimmed.unicodeScalars
+        guard scalars.count > limit else { return trimmed }
         // **切ったことを見えるようにする。** 黙って切ると、
         // モデルは「そういう名前のファイルだ」と信じる（16.3節と同じ理由）。
-        return String(trimmed.prefix(limit)) + "…"
+        var cut = ""
+        cut.unicodeScalars.append(contentsOf: scalars.prefix(max(limit, 0)))
+        return cut + "…"
+    }
+
+    /// **画面とプロンプトへ出るツール名**の形に潰す。
+    ///
+    /// `singleLine(_:limit:)` は切った印を上限の**外**に置く（戻り値は最大 `limit + 1` スカラー）。
+    /// 名前のほうは「欄に何スカラー入るか」が約束なので、**印のぶんを先に引いてから通す** ──
+    /// 戻り値は `…` を含めて必ず `toolNameLimit` スカラー以下になる。
+    ///
+    /// **綴りは直さない。** 潰すのは形（改行・制御文字・長さ）だけである
+    /// （`ToolCallRequest.name` / `ModelToolCall.name` と同じ規律）。
+    static func toolName(_ text: String) -> String {
+        singleLine(text, limit: max(toolNameLimit - 1, 0))
     }
 }

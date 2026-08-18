@@ -178,15 +178,33 @@ struct ModelToolCall: Sendable, Equatable, Codable {
 /// 中身（読んだ本文）はここに**入らない。** 型として持たせていないので、
 /// 「うっかり画面へ出す」経路が作れない。
 ///
-/// ## 文字列は既に潰してある
+/// ## 文字列は潰してある ── **ただし潰しているのは実行層であって、この型ではない**
 ///
 /// `summary` も `toolName` も**モデルとディスクから来た文字列を含む。**
-/// 実行層が `ToolText.singleLine(_:limit:)` を通しており、改行・制御文字は無い
-/// （`ToolResult` の型コメント）。**受け取った側で改めて信用しないこと** ──
-/// 1行であることは保証されるが、中身が真実である保証はどこにも無い。
+/// `Sources/Tools/` の実行役（`ToolResult`）は**両方**を `ToolText` に通しており、
+/// 改行・制御文字・行区切りは含まない。`toolName` は切った印（`…`）を含めて
+/// `ToolText.toolNameLimit` スカラー以下、`summary` は栞と同じ1行である。
+///
+/// > **2026-08-18 まで、この段落は事実ではなかった。** `ToolResult.make(...)` が
+/// > 潰した名前を `contextText` と `bookmarkLine` にしか使っておらず、
+/// > **`toolName` にだけ潰す前の文字列が入っていた** ──
+/// > 同じ値が画面へ流れ、`role=tool` の `name` として次の周のプロンプトへも入る。
+/// > 当時それが届かなかったのは `ToolCallProcessor.allowedToolNames` が
+/// > **別の層で**弾いていたからであり、この層の約束が守られていたからではない
+/// > （`AdversarialRoundTripTests` が実演していた。実装を直してある）。
+///
+/// **型は何も強制していない。** この値は `ToolExecutionOutcome.activity(round:)` が作り、
+/// その中身は**実行役が返したもの**でしかない ── `Sources/Tools/` 以外の実行役を差せば、
+/// 潰されていない文字列も長さの無い1行も入りうる
+/// （`AdversarialRoundTripTests.testTheEngineAddsNoBoundOfItsOwnToWhatTheExecutorReturns`
+/// が 20万文字の `summary` を杭にしている）。
+/// **受け取った側で改めて信用しないこと** ──
+/// 1行であることは（実行役が約束を守る限り）保証されるが、
+/// 中身が真実である保証はどこにも無い。
 struct ToolActivity: Sendable, Equatable, Codable {
 
-    /// モデルが呼んだ名前。**直していない**（`ModelToolCall.name` と同じ規律）。
+    /// モデルが呼んだ名前。**綴りは直していない**（`ModelToolCall.name` と同じ規律）。
+    /// 形（改行・制御文字・長さ）だけは実行層が潰してある（上の型コメント）。
     var toolName: String
 
     /// 画面に出せる1行（＝履歴に残る栞と同じ文）。

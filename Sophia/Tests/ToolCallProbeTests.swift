@@ -103,6 +103,27 @@ final class ToolCallProbeTests: XCTestCase {
         }
     }
 
+    /// **実機と同じ会話を組む。**
+    ///
+    /// > **2026-08-18、実機で初めて動かして分かった。記録を残す。**
+    /// > **プローブは system メッセージを1つも送っていなかった** ── `[.user(prompt)]` だけ。
+    /// > 実機は自己認識（FR-23）と「どのフォルダが結び付いているか」を必ず送る。
+    /// > **つまり測っていたのは、出荷される会話の形ではなかった。**
+    /// > 本日3件目の「器が対象を測っていない」である
+    /// > （1件目はプローブが仮の定義を測っていた件、2件目は費用計測の同種）。
+    ///
+    /// `SOPHIA_TOOLPROBE_SYSTEM=0` で外せる（外した状態が従来の測り方）。
+    static func chat(for prompt: String) -> [Chat.Message] {
+        guard ProcessInfo.processInfo.environment["SOPHIA_TOOLPROBE_SYSTEM"] != "0" else {
+            return [.user(prompt)]
+        }
+        // 知らせる1行は `ConversationFolder.boundFolderNotice` と同じ形にする。
+        // **文言を写しているので、あちらを変えたらここも変わる** ── 実機と揃っていることが要点で、
+        // 揃っていなければ測る意味が無い（`ProbeSystemMessageTests` が食い違いを落とす）。
+        let notice = #"参照先のフォルダ「Documents」。このフォルダ自身は path="" で指します。"#
+        return [.system(SophiaDefaults.systemPrompt + "\n" + notice), .user(prompt)]
+    }
+
     /// 条件。**⑤の「呼ばないほうが正解」を必ず混ぜること** ── 誤爆のほうが害が大きい。
     private struct Condition {
         let id: String
@@ -236,14 +257,33 @@ final class ToolCallProbeTests: XCTestCase {
             // 思考は切る。**測っているのは形式の遵守であって推論の質ではない。**
             // 思考ONだと1往復が数十秒になり、条件×試行回数で現実的な時間に収まらない。
             let userInput = UserInput(
-                chat: [.user(prompt)],
+                chat: Self.chat(for: prompt),
                 tools: specs,
                 additionalContext: ["enable_thinking": Self.thinkingEnabled]
             )
             let lmInput = try await context.processor.prepare(input: userInput)
 
+            // **上限はアプリと同じ規則で決めること。**
+            //
+            // > **2026-08-18、ここが嘘の結果を出した。記録を残す。**
+            // > 以前は `maxTokens: 256` 固定だった。**思考OFFなら足りるが、ONでは足りない** ──
+            // > 実機のログでは思考だけで **429〜901トークン**使っている。
+            // > 256 で打ち切られると**思考の途中で生成が終わり、
+            // > ツール呼び出しに到達しない。**
+            // >
+            // > その状態で「思考ONだと 1/12。呼べない」という結果を出した。
+            // > **測っていたのは「思考」ではなく「思考＋256の上限」だった。**
+            // > 実機は同じ条件で呼べており、矛盾から気づいた。
+            // > **本日4件目の「器が対象を測っていない」である。**
+            //
+            // `ChatOptions.applyingThinkingBudget()` と**同じ規則**を使う
+            // （あちらを変えたらここも変わるよう、定数を参照して書き写さない）。
+            let cap =
+                Self.thinkingEnabled
+                ? SophiaDefaults.thinkingMinMaxTokens
+                : 256
             let parameters = GenerateParameters(
-                maxTokens: 256, temperature: temp, seed: seed)
+                maxTokens: cap, temperature: temp, seed: seed)
 
             let stream = try MLXLMCommon.generate(
                 input: lmInput, parameters: parameters, context: context)

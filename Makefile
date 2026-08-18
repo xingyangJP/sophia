@@ -233,6 +233,9 @@ TOOLPROBE_TEMP ?= 0.7
 # **思考モードで測るか。** 既定 0（OFF）。アプリの既定は ON なので、
 # **1 で測るほうが実使用に近い**（2026-08-18、実機で呼ばれない事象が出て追加）。
 TOOLPROBE_THINK ?= 0
+# **system メッセージを送るか。** 既定 1（＝実機と同じ）。
+# 0 にすると従来の測り方（system 無し）に戻る。2026-08-18 追加。
+TOOLPROBE_SYSTEM ?= 1
 TOOLPROBE_LOG  ?= logs/toolcall-probe.log
 
 .PHONY: toolprobe
@@ -246,7 +249,8 @@ toolprobe:
 	for kv in SOPHIA_TOOLPROBE=1 SOPHIA_ENGINE=stub \
 	          SOPHIA_TOOLPROBE_N=$(TOOLPROBE_N) \
 	          SOPHIA_TOOLPROBE_TEMP=$(TOOLPROBE_TEMP) \
-	          SOPHIA_TOOLPROBE_THINK=$(TOOLPROBE_THINK); do \
+	          SOPHIA_TOOLPROBE_THINK=$(TOOLPROBE_THINK) \
+	          SOPHIA_TOOLPROBE_SYSTEM=$(TOOLPROBE_SYSTEM); do \
 		k=$${kv%%=*}; v=$${kv#*=}; \
 		/usr/libexec/PlistBuddy -c "Add $$ENV_PATH:$$k string $$v" "$$RUN" >/dev/null 2>&1 \
 			|| /usr/libexec/PlistBuddy -c "Set $$ENV_PATH:$$k $$v" "$$RUN"; \
@@ -344,3 +348,107 @@ toolbreakdown:
 		-only-testing:SophiaTests/ToolCostBreakdownTests \
 		2>&1 | tee -a $(TOOLBREAKDOWN_LOG) | grep -E '^\[BREAKDOWN|Executed|error:|\*\* TEST' || true
 	@echo "計測ログ: $(TOOLBREAKDOWN_LOG)"
+
+# --- LoRA が16GB機で回るか、「いくら要るか」を測る（FR-24〜29 / DESIGN 第14章）--
+# **第14章の設計はこの計測1つに懸かっている。**
+#
+# パーソナライズを「毎ターン注入」から「重みに書く」へ変えられるかどうか。
+# 注入の費用は **N トークン × 会話が続く限り永久**、LoRA の費用は **0**。
+# そして注入する余地はもう無い ── `SophiaDefaults.InputBudget` の配分で
+# **利用者に残っているのは 33 トークンである**（1,000 − 105 − 322 − 360 − 180）。
+#
+# **測るのは「動いた／動かない」ではなく「いくら要るか」である。**
+# メモリ・1イテレーションの単価・アダプタの実寸を、条件を振りながら取る。
+# **既定のハイパーパラメータ（iterations: 1000）では回さない** ──
+# 少ない回数で単価を測り、外挿する（外挿は `[LORA-EST]` 行に隔離してある）。
+#
+# `probe` / `toolprobe` と同じく `.xctestrun` 経由で環境変数を渡す
+# （`TEST_RUNNER_` はこの構成では効かない。2026-08-17 実測）。
+#
+# **`SOPHIA_ENGINE=stub` を必ず入れる。** 入れないとホストアプリが
+# モデルをもう1つ読み込み、**測定値がちょうど2倍になる**（2026-08-18 に実際に踏んだ）。
+# 効いているかは `[LORA-PRE] suspect_double_load=` で確認できる（1 なら疑うこと）。
+#
+# ## 打つ順序
+#
+#   make probe-build              # 1回だけ。計測のたびにビルドしない（条件が揃わなくなる）
+#   （別窓で） make probe-watch    # 系全体の数字。**これ無しで結論を出さない**
+#   make lora
+#
+# **`peak_mb` は MLX の帳簿であって、物理RAMに載っているかではない**（2026-08-17 実測）。
+# 16GB に収まるかの判定は `probe-watch` 側の `vm_stat` と突き合わせて初めて言える。
+#
+# ## 何を掃くか ── **既定は層数だけを振る**
+#
+# **層数がメモリの主因**である ─ 逆伝播が何層ぶん遡るかで、生かしておく活性値の量が決まる。
+# `rank` はほぼ寸法の話で、メモリにはあまり効かない（効くのは**アダプタの実寸と容量**）。
+# だから既定は `LORA_LAYERS=2,4,8,16 / LORA_RANK=8`（16 と 8 はライブラリの既定値）。
+# 回る層数が分かってから、2周目でこう振る:
+#
+#   make lora LORA_LAYERS=<回った層数> LORA_RANK=4,8,16,32   # アダプタ実寸の設計
+#   make lora LORA_LAYERS=<回った層数> LORA_BATCH=1,2,4      # バッチを増やす余地
+#   make lora LORA_LAYERS=<回った層数> LORA_TOKENS=256,512   # 系列長の余地
+#   make lora LORA_KEYS=self_attn.q_proj,self_attn.v_proj    # 射影を絞る（mlx-lm の既定）
+#
+# 条件は直積を作り、**必ず安い順に回す。** 高い条件で系ごと落ちても、
+# 安い条件の結果は既にログに出ている（1行ずつ生の write(2) で吐いている）。
+# 何が回らなかったかは冒頭の `[LORA-PLAN]` と `[LORA-CFG]` の差で分かる。
+#
+# ## 先に配管だけ通したいとき（**4.4GB を読む前に**）
+#
+#   make lora LORA_MODEL=mlx-community/Qwen3-0.6B-4bit LORA_LAYERS=2 LORA_ITERS=3
+#
+# 数分で終わり、`[LORA-APPLY] adapted_modules=` が 0 でないこと・
+# `[LORA-CFG] ok=1` が出ることまで確かめられる。**そこが通ってから本番の8Bを回す。**
+# （そのモデルがローカルに無ければテストは測らずにスキップする。取得は計測に混ぜない）
+LORA_LAYERS ?= 2,4,8,16
+LORA_RANK   ?= 8
+LORA_BATCH  ?= 1
+LORA_TOKENS ?= 256
+LORA_ITERS  ?= 8
+LORA_KEYS   ?=
+LORA_KEEP   ?= 0
+LORA_MODEL  ?=
+LORA_LABEL  ?=
+LORA_LOG    ?= logs/lora-feasibility.log
+
+.PHONY: lora
+
+lora:
+	@mkdir -p logs
+	@if [ -n "$$(pgrep -x Sophia)" ]; then \
+		echo "Sophia が起動している。**先に落とすこと**: pkill -x Sophia"; \
+		echo "（4.4GB を持つプロセスが2つ居ると、測るのは学習の費用ではなくメモリ争奪になる）"; \
+		exit 1; \
+	fi
+	@SRC=$$(find $(XC_DERIVED)/Build/Products -name '*.xctestrun' ! -name '*probe.xctestrun' ! -name 'tooltokens.xctestrun' ! -name 'breakdown.xctestrun' | head -1); \
+	if [ -z "$$SRC" ]; then echo "先に make probe-build を実行すること"; exit 1; fi; \
+	RUN=$$(dirname "$$SRC")/loraprobe.xctestrun; cp "$$SRC" "$$RUN"; \
+	ENV_PATH=:TestConfigurations:0:TestTargets:0:EnvironmentVariables; \
+	for kv in SOPHIA_LORA=1 SOPHIA_ENGINE=stub \
+	          SOPHIA_LORA_LAYERS=$(LORA_LAYERS) \
+	          SOPHIA_LORA_RANK=$(LORA_RANK) \
+	          SOPHIA_LORA_BATCH=$(LORA_BATCH) \
+	          SOPHIA_LORA_TOKENS=$(LORA_TOKENS) \
+	          SOPHIA_LORA_ITERS=$(LORA_ITERS) \
+	          SOPHIA_LORA_KEYS=$(LORA_KEYS) \
+	          SOPHIA_LORA_KEEP=$(LORA_KEEP) \
+	          SOPHIA_LORA_MODEL=$(LORA_MODEL) \
+	          SOPHIA_LORA_LABEL=$(LORA_LABEL); do \
+		k=$${kv%%=*}; v=$${kv#*=}; \
+		/usr/libexec/PlistBuddy -c "Add $$ENV_PATH:$$k string $$v" "$$RUN" >/dev/null 2>&1 \
+			|| /usr/libexec/PlistBuddy -c "Set $$ENV_PATH:$$k $$v" "$$RUN"; \
+	done; \
+	printf '=== %s layers=%s rank=%s batch=%s tokens=%s iters=%s keys=%s label=%s ===\n' \
+		"$$(date '+%F %T')" "$(LORA_LAYERS)" "$(LORA_RANK)" "$(LORA_BATCH)" \
+		"$(LORA_TOKENS)" "$(LORA_ITERS)" "$(LORA_KEYS)" "$(LORA_LABEL)" >> $(LORA_LOG); \
+	sysctl -n vm.swapusage >> $(LORA_LOG); \
+	vm_stat | grep -E 'Pages free|occupied by compressor' >> $(LORA_LOG); \
+	xcodebuild test-without-building -xctestrun "$$RUN" -destination '$(XC_DEST)' \
+		-only-testing:SophiaTests/LoRAFeasibilityTests \
+		2>&1 | tee -a $(LORA_LOG) | grep -E '^\[LORA|Executed|error:|\*\* TEST' || true; \
+	sysctl -n vm.swapusage >> $(LORA_LOG); \
+	vm_stat | grep -E 'Pages free|occupied by compressor' >> $(LORA_LOG); \
+	rm -f "$$RUN"
+	@echo "計測ログ: $(LORA_LOG)"
+	@echo "読む順: [LORA-PLAN] → [LORA-APPLY]（adapted_modules が 0 でないこと）→ [LORA-CFG] → [LORA-EST]"
