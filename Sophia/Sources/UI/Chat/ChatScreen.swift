@@ -43,7 +43,7 @@ struct ChatScreen: View {
     private var detail: some View {
         VStack(spacing: 0) {
             if model.turns.isEmpty {
-                EmptyConversationView(engineIsStub: model.engineIsStub, loading: model.loading)
+                EmptyConversationView(model: model)
             } else {
                 ConversationView(model: model)
             }

@@ -138,6 +138,100 @@ actor MLXEngine: InferenceEngine {
         ProcessInfo.processInfo.environment["SOPHIA_MEM_CLEAR_CACHE"] == "1"
     }()
 
+    // MARK: - 取得の見張り（FR-07 / NFR-10 / FR-11）
+    //
+    //  ## なぜ要るのか ── 2026-08-18 に実際に起きたこと
+    //
+    //  キャッシュを消したあと、「モデルを取得しています（0%）」から**永久に進まなくなった。**
+    //
+    //  | 観測 | 値 |
+    //  |---|---|
+    //  | 進捗 | 0% のまま |
+    //  | エラー表示 | 無し |
+    //  | ログ出力 | 無し |
+    //  | TCP接続 | 0本 |
+    //  | 書き込み | 1バイトも無し（`.incomplete` すら無い） |
+    //  | CPU | 11〜14%（アイドルではない） |
+    //
+    //  原因（`swift-huggingface` の Xet トランスポートが無効）は**別の問題**である。
+    //  ここで直すのは **「原因が何であれ、失敗したなら利用者に伝わる」** ほうだけ。
+    //  いちばんの問題は落ちなかったことではなく、**落ちないまま黙っていたこと**だった。
+    //
+    //  例外は上がらない。だから**例外を待つのをやめて、バイトが増えているかを見る。**
+
+    /// 最初の1バイトが届くまでに許す時間。**既定 90 秒。**
+    ///
+    /// ## この数字の根拠（数字だけ置くと、後で誰も動かせなくなる）
+    ///
+    /// 健全なときの実測は **`curl` で 1〜2秒で最初のバイト、以後 20MB/s**。
+    /// つまり「最初の1バイトまで」は本来 **秒のオーダー**である。
+    /// では何故その45〜90倍も待つのか ── **この区間だけは、待つべき正当な理由が複数ある**から。
+    ///
+    /// | 待たされる正当な理由 | かかりうる時間 |
+    /// |---|---|
+    /// | HuggingFace の**ファイル一覧 API**（`HubClient.listFiles`）。**これが返るまで進捗コールバックは1回も鳴らない** | 数百ms〜十数秒 |
+    /// | DNS / TLS / リダイレクト | 数百ms〜数秒 |
+    /// | HF 側のレート制限に伴うリトライ待ち | 十秒級 |
+    /// | サンドボックス初回のネットワーク許可 | 数秒 |
+    ///
+    /// 全部足しても十数秒に収まる。**90秒はその5倍以上の余裕**で、
+    /// 「遅い回線を殺さない」側へ大きく倒してある。
+    /// 逆に90秒経って**1バイトも来ない**なら、それは遅いのではなく**始まっていない。**
+    /// 今回の事故がまさにそれで、待っても永久に1バイトも来なかった。
+    ///
+    /// `SOPHIA_DOWNLOAD_FIRST_BYTE_S` で上書きできる。**`0` を渡すと見張りごと止まる**
+    /// （極端に遅い回線での緊急避難。止めれば当然また黙って固まる）。
+    static let downloadFirstByteGrace: Duration =
+        MLXEngine.durationFromEnvironment("SOPHIA_DOWNLOAD_FIRST_BYTE_S", defaultSeconds: 90)
+
+    /// 取得が始まったあと、**1バイトも増えないまま**許す時間。**既定 60 秒。**
+    ///
+    /// ## この数字の根拠
+    ///
+    /// 見張りが見るのは「増えたか／増えていないか」だけで、**増えたらその場で0に戻す。**
+    /// だから判定に使われるのは「1バイトも増えなかった連続時間」だけである。
+    ///
+    /// - 実測 20MB/s の **1/1000（20KB/s）まで落ちた回線でも、60秒あれば 1.2MB は増える**。
+    ///   増えれば時計は戻るので、**遅いだけの取得は永久に検知されない**（誤検知しない）
+    /// - 進捗コールバックは swift-huggingface のサンプリングタスクが **100ms 間隔**で鳴らす
+    ///   （`HubClient+Files.swift` の `makeSnapshotProgressSamplingTask`）。
+    ///   60秒 ＝ **鳴るはずの600回ぶんが完全に無風**だったということ
+    ///
+    /// **短くするときは上の2点を計算し直すこと。** 20MB/s は「調子が良いとき」の値で、
+    /// 混んだ回線や Wi-Fi の切り替わりで数十秒の空白が空くことはある。
+    /// `SOPHIA_DOWNLOAD_STALL_S` で上書きできる（`0` で見張りを止める）。
+    static let downloadStallTimeout: Duration =
+        MLXEngine.durationFromEnvironment("SOPHIA_DOWNLOAD_STALL_S", defaultSeconds: 60)
+
+    /// 見張りが起きる間隔。**検知の遅れは「閾値 ＋ この間隔」**になる（最悪 65 秒）。
+    ///
+    /// 5秒にしてあるのは、90秒／60秒に対して十分細かく、かつ
+    /// 数分の取得で起きる回数が数十回に収まる ＝ 計測の雑音にならないため。
+    static let downloadWatchdogInterval: Duration = .seconds(5)
+
+    /// `[LOAD]` 行を stderr へ出すか。**`SOPHIA_LOG_LOAD=1` のときだけ。**
+    ///
+    /// 今回いちばん困ったのは「ログ出力 無し」で、**何が起きているか調べる材料が
+    /// 1バイトも無かった**ことである。既定を無効のままにしてあるのは通常利用で
+    /// ログを増やさないためだが、**打ち切りの1行（`event=stalled`）だけは
+    /// この設定と無関係に必ず出す。** 異常時に黙るのが今回の問題そのものだから。
+    static let logsModelLoad: Bool = {
+        ProcessInfo.processInfo.environment["SOPHIA_LOG_LOAD"] == "1"
+    }()
+
+    /// 環境変数から秒数を読む。読めなければ既定値。負数は既定値に落とす。
+    ///
+    /// `let` で受けるので**プロセス起動時の値で固定**される
+    /// （途中で変わると、同じ実行の中で判定条件が変わってしまう）。
+    private static func durationFromEnvironment(
+        _ key: String, defaultSeconds: Int
+    ) -> Duration {
+        guard let raw = ProcessInfo.processInfo.environment[key],
+              let value = Int(raw), value >= 0
+        else { return .seconds(defaultSeconds) }
+        return .seconds(value)
+    }
+
     /// 記録が有効か。プローブ側が「取れないのに待つ」のを避けるために公開している。
     ///
     /// `actor` の static は元から隔離されていないので `nonisolated` は付けない
@@ -228,10 +322,19 @@ actor MLXEngine: InferenceEngine {
         // 二重読み込みの防止。ここは 4.62GB を掴む処理なので、
         // 「たぶん大丈夫」で通してはいけない。
         guard !isLoading else {
+            // 「再試行」を押した先がここへ来ることがある。
+            //
+            // 見張りが打ち切りを通知したあと、`continuation.onTermination` 経由で
+            // この `performLoad` の Task はキャンセルされる。取得側がキャンセルを
+            // 見てくれれば `isLoading` は `defer` で戻るが、**見てくれない実装
+            // （同期ループに入り込んでいる場合）だと戻らない。**
+            // そのときに「お待ちください」とだけ言うのは嘘になるので、
+            // **再起動という出口を必ず添える。**
             continuation.finish(throwing: SophiaError(
                 code: .modelLoadFailed,
                 message: "モデルの読み込みがすでに進行中です。",
-                hint: "読み込みが終わるまでお待ちください。"))
+                hint: "読み込みが終わるまでお待ちください。"
+                    + "進捗が止まったまま戻らない場合は、Sophia を再起動してください。"))
             return
         }
         isLoading = true
@@ -268,11 +371,35 @@ actor MLXEngine: InferenceEngine {
             if !alreadyOnDisk {
                 let size = entry.sizeBytes.map(Self.formatBytes) ?? "数GB"
                 continuation.yield(LoadProgress(
-                    stage: .downloading, fraction: 0,
+                    stage: .downloading,
+                    // 総量を最初から入れておく。**進捗コールバックが1回も鳴らなくても
+                    // 「0 / 4.62 GB」と出せる**ようにするため（今回はここが空だった）。
+                    totalBytes: entry.sizeBytes,
+                    fraction: 0,
                     detail: "モデルを取得しています（初回のみ・約\(size)）"))
             }
 
             try Task.checkCancellation()
+
+            // --- 取得の見張りを立てる（FR-07 / NFR-10）------------------------------
+            //
+            // **ディスクに実体が無いとき＝ネットワークからバイトが来るはずのときだけ**立てる。
+            //
+            // 既に取得済みなら `loadModelContainer` はキャッシュを読んで重みを展開するだけで、
+            // その間 **進捗コールバックは1度も鳴らない。** 4.62GB の展開は16GB機だと
+            // スワップを噛んで90秒を超えることがあるので、ここで見張ると
+            // **正常なロードを殺す。** 正常系を壊さないための線引きがこの `if` である。
+            //
+            // 代償として「取得済み判定だが一部のファイルが欠けていて再取得が走る」経路は
+            // 見張れない。そちらは `MLXModelCatalog.isDownloaded` が
+            // config.json と *.safetensors の両方を確認しているぶん、起こりにくい。
+            let watch = ModelDownloadStallWatch(startedAt: SuspendingClock().now)
+            let watchdog: Task<Void, Never>? = alreadyOnDisk
+                ? nil
+                : Self.startDownloadWatchdog(
+                    watch: watch, modelID: modelID, into: continuation)
+            // 正常終了・例外・キャンセルのどれで抜けても必ず畳む。
+            defer { watchdog?.cancel() }
 
             // ダウンロードは初回のみ。2回目以降は HuggingFace のキャッシュから読む。
             //
@@ -294,6 +421,14 @@ actor MLXEngine: InferenceEngine {
                     let fraction = progress.fractionCompleted
                     let completed = progress.completedUnitCount
                     let total = progress.totalUnitCount
+
+                    // 見張りへ「いま何バイトか」を渡す。**判定はここではしない。**
+                    // このクロージャは swift-huggingface 側のスレッドから
+                    // 100ms 間隔で呼ばれるので、重い処理を置くと取得そのものが遅くなる。
+                    watch.note(
+                        completedBytes: completed, totalBytes: total,
+                        at: SuspendingClock().now)
+
                     continuation.yield(LoadProgress(
                         stage: fraction >= 1.0 ? .loadingWeights : .downloading,
                         completedBytes: completed > 0 ? completed : nil,
@@ -301,7 +436,11 @@ actor MLXEngine: InferenceEngine {
                         fraction: fraction,
                         detail: fraction >= 1.0
                             ? "重みをメモリへ展開しています"
-                            : "モデルを取得しています（\(Int(fraction * 100))%）"))
+                            // **バイト数を必ず添える。** 「0%」だけだと、待てばいいのか
+                            // 壊れているのかが判別できない。「0.00 GB / 4.62 GB」なら
+                            // 一目で異常だと分かる（今回いちばん欠けていた情報）。
+                            : "モデルを取得しています（\(Int(fraction * 100))%・"
+                                + "\(formatDownloadedBytes(completed: completed, total: total))）"))
                 }
             )
 
@@ -335,6 +474,95 @@ actor MLXEngine: InferenceEngine {
 
         } catch {
             continuation.finish(throwing: SophiaError.fromModelLoad(error))
+        }
+    }
+
+    // MARK: - 取得の見張り本体
+
+    /// 取得が進んでいるかを一定間隔で見て、止まっていたら**利用者へ伝える。**
+    ///
+    /// ## `Task.detached` である理由 ── ここを `Task {}` にしてはいけない
+    ///
+    /// `Task {}` は囲っている actor（`MLXEngine`）の隔離を**継承する。**
+    /// すると見張りは「`MLXEngine` の executor が空くのを待つ」ことになる。
+    /// 取得側が `await` を挟まずに回り続けている場合
+    /// （今回の事故は **CPU 11〜14% を食っていた** ＝ 何かが回っていた）、
+    /// **見張りの番が永久に来ない。** 検知したい状況でだけ検知できない見張りになる。
+    /// 独立した executor で回すために `detached` にしてある。
+    ///
+    /// ## 打ち切り方 ── 例外を投げずにストリームを終わらせる
+    ///
+    /// `continuation.finish(throwing:)` を呼ぶと、
+    ///   1. 読み手（`ChatViewModel.loadModel`）の `for try await` がその場で throw する
+    ///      ＝ **画面にエラーが出る。ここが本命**
+    ///   2. `load(_:)` で仕込んだ `continuation.onTermination` が発火し、
+    ///      `performLoad` の Task がキャンセルされる ＝ 取得側にも止まれと伝わる
+    ///
+    /// 2 が効くかは取得側の実装次第だが、**1 は取得側の協力なしに必ず成立する。**
+    /// 「落ちないまま黙っている」を潰すのが目的なので、この順序で正しい。
+    ///
+    /// - Returns: 見張りの Task。閾値が `0`（＝無効）なら nil。
+    private static func startDownloadWatchdog(
+        watch: ModelDownloadStallWatch,
+        modelID: String,
+        into continuation: AsyncThrowingStream<LoadProgress, any Error>.Continuation
+    ) -> Task<Void, Never>? {
+        // 閾値を先に値として取り出す。**`Self` を detached クロージャの中で参照しない**
+        // ため（静的プロパティは隔離されていないので参照自体は通るが、
+        //  「何を見て判定したか」を起動時の値で固定しておきたい）。
+        let firstByteGrace = downloadFirstByteGrace
+        let stallTimeout = downloadStallTimeout
+        let interval = downloadWatchdogInterval
+        let logs = logsModelLoad
+
+        // どちらかが 0 なら見張りごと止める（環境変数による緊急避難）。
+        guard firstByteGrace > .zero, stallTimeout > .zero else { return nil }
+
+        return Task.detached(priority: .utility) {
+            while !Task.isCancelled {
+                // キャンセルされると `Task.sleep` が throw する。`try?` で受けて
+                // 直後にもう一度 `isCancelled` を見る（**畳むのを1周期遅らせない**）。
+                try? await Task.sleep(for: interval)
+                if Task.isCancelled { return }
+
+                let verdict = watch.evaluate(
+                    at: SuspendingClock().now,
+                    firstByteGrace: firstByteGrace,
+                    stallTimeout: stallTimeout)
+
+                switch verdict {
+                case .healthy(let report):
+                    if logs { writeModelLoadLine("tick", model: modelID, report: report) }
+
+                case .idle(let report):
+                    // **まだ打ち切らない。が、黙っていない。**
+                    // 閾値の半分を過ぎた時点で「変化がありません」と画面に出す。
+                    // 打ち切りまで無言で待たせると、結局「0% のまま固まっている」
+                    // という同じ体験になる。
+                    //
+                    // **[承知の上の限界]** 進捗ハンドラが 100ms 間隔で鳴り続けたまま
+                    // バイトだけが増えない場合、この1行は直後のハンドラ側の yield に
+                    // 上書きされて消える。**打ち切り（`finish`）は上書きされない**ので
+                    // 最終的な通知は必ず届くし、バイト数と経過秒数は画面に出続ける。
+                    // ここを勝ち残らせるには `LoadProgress` に警告の段階を足す必要があり、
+                    // Shared の型を触ることになるので、今回はそこまでやっていない。
+                    if logs { writeModelLoadLine("idle", model: modelID, report: report) }
+                    continuation.yield(LoadProgress(
+                        stage: .downloading,
+                        completedBytes: report.completedBytes > 0 ? report.completedBytes : nil,
+                        totalBytes: report.totalBytes > 0 ? report.totalBytes : nil,
+                        fraction: report.fraction,
+                        detail: report.waitingDetail))
+
+                case .stalled(let report):
+                    // **この1行は `SOPHIA_LOG_LOAD` と無関係に必ず出す。**
+                    // 「ログ出力 無し」で原因が追えなかったのが今回の事故である。
+                    writeModelLoadLine("stalled", model: modelID, report: report)
+                    continuation.finish(
+                        throwing: SophiaError.modelDownloadStalled(report, modelID: modelID))
+                    return
+                }
+            }
         }
     }
 
@@ -1045,6 +1273,259 @@ private final class PrefillMemoryProbe: @unchecked Sendable {
 }
 
 // =============================================================================
+//  取得の無進捗を見張る箱 ── 「例外が来るか」ではなく「バイトが増えたか」を見る
+// -----------------------------------------------------------------------------
+//  ## なぜ箱が要るのか（actor に直接書けない）
+//
+//  進捗コールバックは `@Sendable` で、**swift-huggingface 側のスレッドから
+//  100ms 間隔で呼ばれる**（`HubClient+Files.swift` の
+//  `makeSnapshotProgressSamplingTask`）。`MLXEngine` は actor なので、
+//  そこから隔離された状態へは触れない ── `PrefillMemoryProbe` とまったく同じ事情である。
+//
+//  `Mutex`（Synchronization）を使えば `@unchecked` を外せるが、
+//  **あちらは macOS 15 以上**で、このアプリの下限は macOS 14
+//  （`MACOSX_DEPLOYMENT_TARGET = 14.0`）。だから `NSLock` を使う。
+//
+//  ## なぜ `SuspendingClock` なのか ── **`Date` / `ContinuousClock` にしないこと**
+//
+//  **スリープしていた時間を数えないため。**
+//  4.62GB の取得は数分かかる。その途中でノートの蓋が閉じられるのは普通に起こる。
+//  `Date` や `ContinuousClock` はスリープ中も進むので、復帰した瞬間に
+//  「8時間 無進捗」と判定してしまう ── **実際には正常に再開している取得を殺す。**
+//  `SuspendingClock` はスリープ中に止まるので、数えるのは**起きていた時間だけ**になる。
+//
+//  ## 判定に使うのは「増えたか」だけ ── 速度を見ない
+//
+//  速度で判定すると閾値が回線に依存し、遅い回線を必ず殺す。
+//  ここは **1バイトでも増えたら時計を0に戻す**方式にしてある。
+//  20MB/s の1/1000（20KB/s）まで落ちた回線でも60秒で1.2MB増えるので誤検知しない。
+//  逆に「まったく増えない」は速度の問題ではなく、**接続が存在しない**ことを意味する。
+// =============================================================================
+
+/// 取得の進みを「最後にバイトが増えた時刻」へ要約して持つ箱。**判定もここで行う。**
+///
+/// `MLXEngine` の外に出してあるのは、**ダウンロードを1バイトも走らせずに
+/// 判定ロジックを試験できるようにするため**である（`ModelDownloadStallTests`）。
+/// 4.62GB を落とさないと確かめられない見張りは、結局誰も確かめない。
+final class ModelDownloadStallWatch: @unchecked Sendable {
+
+    /// 見張りが出す所見1件。**ここに入っていない情報は画面にも出せない。**
+    struct Report: Sendable, Equatable {
+        /// これまでに落ちたバイト数。**0 なら1バイトも来ていない。**
+        var completedBytes: Int64
+        /// 総量。**0 なら不明**（＝ファイル一覧すら取れていない ＝ もっと手前で詰まっている）。
+        var totalBytes: Int64
+        /// 進捗コールバックが鳴った回数。**0 なら取得が始まってすらいない。**
+        var callbackCount: Int
+        /// 最後に増えてから何秒 無風だったか。**スリープ中は数えない。**
+        var idleSeconds: Double
+
+        /// 1バイトでも届いたか。**文言を「始まらない」と「途中で止まった」に割る唯一の材料。**
+        var sawAnyBytes: Bool { completedBytes > 0 }
+
+        /// 0.0〜1.0。総量が不明なら nil（UI は不定形インジケータにする）。
+        var fraction: Double? {
+            guard totalBytes > 0 else { return nil }
+            return min(1.0, Double(completedBytes) / Double(totalBytes))
+        }
+
+        /// 「0.00 GB / 4.62 GB」。**利用者が異常だと判断するための数字。**
+        var progressText: String {
+            formatDownloadedBytes(completed: completedBytes, total: totalBytes)
+        }
+
+        /// 打ち切る前に画面へ出す1行。**待つべきか判断できる形にする。**
+        var waitingDetail: String {
+            let seconds = Int(idleSeconds.rounded())
+            if sawAnyBytes {
+                return "モデルを取得しています（\(progressText)）"
+                    + "— \(seconds)秒間 変化がありません"
+            }
+            return "モデルの取得を待っています（\(progressText)）"
+                + "— \(seconds)秒間 まだ1バイトも届いていません"
+        }
+    }
+
+    /// 見張りの判断。**「進んでいる／黙っていられない／打ち切る」の3値。**
+    enum Verdict: Sendable, Equatable {
+        /// 進んでいる、または取得が終わっている。何もしない。
+        case healthy(Report)
+        /// 閾値の半分を超えた。**打ち切らないが、画面には出す。**
+        case idle(Report)
+        /// 閾値を超えた。打ち切る。
+        case stalled(Report)
+    }
+
+    private let lock = NSLock()
+    private var completedBytes: Int64 = 0
+    private var totalBytes: Int64 = 0
+    private var callbackCount = 0
+
+    /// 最後に **`completedBytes` が増えた**時刻。まだ増えていなければ取得の開始時刻。
+    private var lastAdvanceAt: SuspendingClock.Instant
+
+    /// 取得しきったか。**ここが `true` になったら見張りは黙る。**
+    ///
+    /// **これが正常系を守っている一点である。** 取得のあとには重みの展開が続き、
+    /// その間バイトは1つも増えない（16GB機では数十秒〜。スワップを噛めばもっと）。
+    /// 黙らせないと、**正常に読み込んでいる最中に「進んでいません」と誤検知する。**
+    private var finished = false
+
+    init(startedAt: SuspendingClock.Instant) {
+        lastAdvanceAt = startedAt
+    }
+
+    /// 進捗コールバックから呼ぶ。**増えたときだけ時計を戻す。**
+    ///
+    /// 100ms ごとに呼ばれる想定なので、ここは意図的に軽くしてある
+    /// （ログも判定も行わない。取得そのものを遅くしないため）。
+    func note(completedBytes: Int64, totalBytes: Int64, at now: SuspendingClock.Instant) {
+        lock.lock()
+        defer { lock.unlock() }
+
+        callbackCount += 1
+        if totalBytes > 0 { self.totalBytes = totalBytes }
+
+        // **増えたときだけ。** 同じ値で何度呼ばれても時計は戻さない
+        // ── 「コールバックが鳴っている」ことと「取得が進んでいる」ことは別である。
+        // 今回の事故では前者だけが成立している可能性もあった。
+        if completedBytes > self.completedBytes {
+            self.completedBytes = completedBytes
+            lastAdvanceAt = now
+        }
+
+        // 取得しきった。以降は重みの展開なので見張りを止める（`finished` の説明を参照）。
+        if totalBytes > 0, completedBytes >= totalBytes { finished = true }
+    }
+
+    /// いま止まっているかを判定する。**時刻を引数で受けるのは試験のため**
+    /// （実時間を待たずに「90秒後」を作れる）。
+    ///
+    /// - Parameters:
+    ///   - firstByteGrace: **まだ1バイトも来ていない**ときに使う猶予。長いほう。
+    ///   - stallTimeout: 一度でもバイトが来たあとに使う閾値。短いほう。
+    func evaluate(
+        at now: SuspendingClock.Instant,
+        firstByteGrace: Duration,
+        stallTimeout: Duration
+    ) -> Verdict {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let idle = lastAdvanceAt.duration(to: now)
+        let report = Report(
+            completedBytes: completedBytes,
+            totalBytes: totalBytes,
+            callbackCount: callbackCount,
+            idleSeconds: max(0, idle.milliseconds / 1000))
+
+        // 取得は終わっている。ここから先は展開の時間なので、何秒無風でも正常。
+        if finished { return .healthy(report) }
+
+        // **1バイトも来ていない間は長いほうの猶予を使う。**
+        // 最初の1バイトまでには、一覧APIも DNS も TLS も含まれる（閾値の説明を参照）。
+        let limit = completedBytes > 0 ? stallTimeout : firstByteGrace
+
+        if idle >= limit { return .stalled(report) }
+        // 半分を過ぎたら画面へ出す。**打ち切りまで無言で待たせない**のが要点で、
+        // これが無いと「0% のまま固まっている」という体験自体は変わらない。
+        if idle >= limit / 2 { return .idle(report) }
+        return .healthy(report)
+    }
+}
+
+/// 「0.00 GB / 4.62 GB」の形に整える。
+///
+/// **`ByteCountFormatter` を使わない。** 0 バイトを「ゼロバイト」と訳してしまい、
+/// **いちばん見せたい異常値がいちばん読みにくくなる**（ロケール次第で表記も動く）。
+/// 単位は 10 進（1 GB = 1e9）。`MLXModelCatalog` の `sizeBytes: 4_620_000_000` を
+/// 「4.62 GB」と表示するためで、`[MEM]` 行の MiB とは**別の桁**である点に注意。
+func formatDownloadedBytes(completed: Int64, total: Int64) -> String {
+    func gigabytes(_ bytes: Int64) -> String {
+        String(format: "%.2f GB", Double(bytes) / 1_000_000_000)
+    }
+    func megabytes(_ bytes: Int64) -> String {
+        String(format: "%.0f MB", Double(bytes) / 1_000_000)
+    }
+    guard total > 0 else {
+        // 総量が取れていない ＝ ファイル一覧すら返っていない。**その事実自体が手がかり。**
+        return "受信 \(completed) バイト・総量は未取得"
+    }
+    if total >= 1_000_000_000 {
+        return "\(gigabytes(completed)) / \(gigabytes(total))"
+    }
+    return "\(megabytes(completed)) / \(megabytes(total))"
+}
+
+/// 取得の状況を stderr へ1行で吐く。
+///
+/// **`print` を使わない。** `[MEM]` / `[STATS]` と同じ経路（生の `write(2)`）・
+/// 同じ `key=value` 形式に揃えてあり、`2> ログ` でそのまま拾える。
+/// **値に空白を入れないこと**（`model=` にリポジトリIDが入るが空白は含まない）。
+///
+/// バイト数を MB/GB へ丸めずに生で出しているのは、**丸めが桁の取り違えを生む**ため。
+/// ログは人が読む前に grep されるので、単位の解釈は読み手に委ねるほうが安全である。
+private func writeModelLoadLine(
+    _ event: String, model: String, report: ModelDownloadStallWatch.Report
+) {
+    let fields = [
+        "event=\(event)",
+        "model=\(model)",
+        "completed_bytes=\(report.completedBytes)",
+        "total_bytes=\(report.totalBytes)",
+        "callbacks=\(report.callbackCount)",
+        "idle_s=\(String(format: "%.1f", report.idleSeconds))",
+    ].joined(separator: " ")
+    FileHandle.standardError.write(Data("[LOAD] \(fields)\n".utf8))
+}
+
+extension SophiaError {
+
+    /// 無進捗の所見を、**原因と対処をセットにした日本語**へ変換する（FR-11）。
+    ///
+    /// 文言を2通りに割っているのは、**利用者が取るべき行動が違うから**である。
+    ///
+    /// | 観測 | 読み | 出す対処 |
+    /// |---|---|---|
+    /// | 1バイトも来ていない | 接続が**成立していない** | 回線の確認 ＋ VPN/プロキシ/ファイアウォール |
+    /// | 途中で止まった | 接続が**切れた** | 回線の確認 ＋ 続きから再開できる旨 |
+    ///
+    /// 「失敗しました」だけにしないこと ── それは今回黙っていたのと大差ない。
+    static func modelDownloadStalled(
+        _ report: ModelDownloadStallWatch.Report, modelID: String
+    ) -> SophiaError {
+        let seconds = Int(report.idleSeconds.rounded())
+        let message: String
+        let hint: String
+
+        if report.sawAnyBytes {
+            message = "モデルの取得が途中で止まりました。"
+                + "\(seconds)秒のあいだ、受信量が1バイトも増えていません（\(report.progressText)）。"
+            hint = "ネットワークの接続を確認して「再試行」を押してください。"
+                + "ここまで取得した分は残っており、その続きから再開されます。"
+        } else {
+            message = "モデルの取得が始まりませんでした。"
+                + "\(seconds)秒待っても1バイトも届いていません（\(report.progressText)）。"
+            hint = "ネットワークの接続を確認して「再試行」を押してください。"
+                + "接続できているのに始まらない場合は、VPN・プロキシ・ファイアウォールが "
+                + "huggingface.co への通信を止めていないかを確認してください。"
+        }
+
+        return SophiaError(
+            code: .modelDownloadStalled,
+            message: message,
+            hint: hint,
+            // 開発者向け。`[LOAD] event=stalled` の行と同じキーで揃えてある
+            // ── 画面のスクリーンショットとログを突き合わせられるようにするため。
+            detail: "completed_bytes=\(report.completedBytes) "
+                + "total_bytes=\(report.totalBytes) "
+                + "callbacks=\(report.callbackCount) "
+                + "idle_s=\(String(format: "%.1f", report.idleSeconds)) "
+                + "model=\(modelID)")
+    }
+}
+
+// =============================================================================
 //  実機で確かめること（このファイルは実行していない）
 // -----------------------------------------------------------------------------
 //  1. **トークンが実際に流れるか。** `.chunk` が届き、日本語が化けないこと
@@ -1061,4 +1542,24 @@ private final class PrefillMemoryProbe: @unchecked Sendable {
 //  7. **メモリが持つか。** 4.62GB の重み + KVキャッシュで、
 //     この機体（空き0.5〜2.8GB / スワップ6〜7GB）が耐えるか
 //  8. **計測時はデバッガを外す**（cmd-opt-r → "Debug Executable" のチェックを外す）
+//
+//  ## 取得の見張りについて確かめること（2026-08-18 に追加）
+//
+//  判定ロジックは `ModelDownloadStallTests` が実ダウンロード無しで確かめている。
+//  **実機でしか確かめられないのは、配管が繋がっているかどうかだけ**である。
+//
+//  9. **誤検知しないこと（最優先）。** キャッシュを消してから普通に取得し、
+//     **最後まで通ること。** 特に「取得100% → 重みの展開」の数十秒で
+//     打ち切られないこと（`finished` が立っているか）
+//  10. **検知できること。** 取得中に Wi-Fi を切り、**60〜65秒**で
+//      「取得が途中で止まりました」が画面に出ること
+//  11. **始まらない場合を検知できること。** 機内モードのまま起動し、
+//      **90〜95秒**で「取得が始まりませんでした」が出ること
+//  12. **再試行が効くこと。** 回線を戻して「再試行」を押し、
+//      **途中から**再開されること（0 バイトからやり直しになっていないこと）
+//  13. **`isLoading` が戻ること。** 打ち切りのあと「再試行」が
+//      「すでに進行中です」にならないこと。**なる場合は取得側がキャンセルを
+//      見ていない**ので、そのことをここに記録すること（別途の対処が要る）
+//  14. **ログが出ること。** `SOPHIA_LOG_LOAD=1` で `[LOAD] event=tick` が
+//      5秒ごとに出て、打ち切り時は設定に関係なく `event=stalled` が出ること
 // =============================================================================

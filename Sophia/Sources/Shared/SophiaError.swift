@@ -15,6 +15,16 @@ struct SophiaError: Error, Sendable, Equatable, LocalizedError {
         case modelNotFound
         /// モデルの取得に失敗した（回線断・容量不足）。NFR-10 の復帰対象。
         case modelDownloadFailed
+        /// モデルの取得が**進まない**。例外は上がらないが、バイトが増えていない。
+        ///
+        /// **`modelDownloadFailed` と分けてあるのは、観測できたことが違うからである。**
+        /// あちらは「失敗した」という報せが実際に届いた場合。こちらは
+        /// **何も届かないまま止まっている**場合で、原因を特定できていない。
+        /// 文言も対処も変わる（「もう一度」ではなく「まだ始まっていない」を伝える必要がある）。
+        ///
+        /// 2026-08-18 の事故がこれ。0%・エラー無し・ログ無し・TCP 0本・書き込み0バイトで
+        /// **永久に待ち続けた。** 落ちなかったことではなく、落ちないまま黙っていたことが問題だった。
+        case modelDownloadStalled
         /// モデルの読み込みに失敗した（破損・形式違い）。
         /// **GGUF を渡すとここに来る**（MLX_SWIFT.md 第2.1節）。
         case modelLoadFailed
@@ -70,6 +80,14 @@ struct SophiaError: Error, Sendable, Equatable, LocalizedError {
         case .modelDownloadFailed:
             ("モデルの取得に失敗しました。",
              "ネットワークと空き容量を確認して、もう一度お試しください。途中まで取得した分から再開できます。")
+        case .modelDownloadStalled:
+            // **既定文は「最後の砦」である。** 実際にはここへ来ない想定で、
+            // 検知した側（`MLXEngine.startDownloadWatchdog`）が
+            // 実測値（何秒・何バイト）を埋めた文を作って渡す。
+            // 数字が無いと「待てばいいのか、やり直すべきか」を利用者が決められない。
+            ("モデルの取得が進んでいません。",
+             "ネットワークの接続を確認して「再試行」を押してください。"
+             + "ここまで取得した分は残っており、その続きから再開されます。")
         case .modelLoadFailed:
             ("モデルを読み込めませんでした。",
              "MLX 形式（safetensors）のモデルが必要です。GGUF 形式は読み込めません。")

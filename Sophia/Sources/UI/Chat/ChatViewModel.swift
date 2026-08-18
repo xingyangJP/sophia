@@ -58,6 +58,24 @@ final class ChatViewModel {
     /// 起動時などの、会話に紐づかないエラー（FR-11）。
     private(set) var globalError: SophiaError?
 
+    /// モデルの読み込みが走っている間 true。
+    /// **再試行ボタンの二重押しを止めるためだけに持つ。** 押せてしまうと
+    /// エンジン側の「すでに進行中です」に化けて、利用者には理由が分からない。
+    private(set) var isLoadingModel = false
+
+    /// 読み込みを始めた時刻。nil なら走っていない。
+    ///
+    /// **画面に経過秒数を出すために持つ。** 「0% のまま止まっている」と
+    /// 「まだ10秒しか経っていない」は、進捗率だけを見ていると区別できない。
+    /// 利用者が「待つ／やり直す」を決められる唯一の材料がこれである。
+    private(set) var modelLoadStartedAt: Date?
+
+    /// 再試行ボタンを出してよいか。**モデルが載っていないときだけ。**
+    ///
+    /// 保存（`Store`）の失敗でも `globalError` は立つが、そちらは
+    /// 読み込みをやり直しても直らない。押しても何も起きないボタンを出さないための条件。
+    var canRetryModelLoad: Bool { model == nil && !isLoadingModel }
+
     let engine: any InferenceEngine
 
     var engineIsStub: Bool { engine.identifier == .stub }
@@ -156,7 +174,7 @@ final class ChatViewModel {
     /// 逆にモデル読み込み（数秒〜数分）の後ろに置くと、
     /// その間の送信が保存されない窓ができる。
     func prepare() async {
-        guard model == nil else { return }
+        guard model == nil, !isLoadingModel else { return }
 
         if store == nil {
             do {
@@ -167,16 +185,44 @@ final class ChatViewModel {
             }
         }
 
+        await loadModel()
+    }
+
+    /// 失敗した読み込みをやり直す（FR-07 の「中断・再開」／ NFR-10 の復帰）。
+    ///
+    /// **DB は開き直さない。** `prepare()` と分けてあるのはそのためで、
+    /// 保存の可否と読み込みの可否は別々に失敗する。
+    /// 取得済みのバイトは HuggingFace のキャッシュに残るので、**続きから再開される。**
+    func retryModelLoad() async {
+        guard canRetryModelLoad else { return }
+        // 前回の失敗を消してから始める。**残したままだと、進捗と一緒に
+        // 古いエラーが並んで「いま失敗しているのか」が分からなくなる。**
+        globalError = nil
+        await loadModel()
+    }
+
+    /// 読み込み1回ぶん。`prepare()` と `retryModelLoad()` の共通部分。
+    private func loadModel() async {
+        isLoadingModel = true
+        modelLoadStartedAt = Date()
+        defer {
+            isLoadingModel = false
+            modelLoadStartedAt = nil
+        }
+
         do {
             for try await progress in engine.load(SophiaDefaults.modelID) {
                 loading = progress.stage == .ready ? nil : progress
             }
+            loading = nil
             model = await engine.loadedModel()
             capabilities = await engine.capabilities()
             if capabilities?.canDisableThinking == false { thinkingEnabled = true }
         } catch {
             loading = nil
             let wrapped = SophiaError.wrap(error, fallback: .modelLoadFailed)
+            // 中断（FR-02）は異常ではないので赤字にしない。
+            // **無進捗の打ち切り（`.modelDownloadStalled`）はここを通って画面に出る。**
             if !wrapped.isCancellation { globalError = wrapped }
         }
     }

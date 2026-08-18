@@ -72,21 +72,13 @@ struct ConversationView: View {
         }
     }
 
+    /// 会話に紐づかないエラー（FR-11）。
+    ///
+    /// **空の画面（`EmptyConversationView`）と同じ部品を使う。**
+    /// 以前はここだけに独自の表示があり、しかも起動直後は `turns` が空で
+    /// このビュー自体が出ないため、**読み込みの失敗がどこにも出なかった。**
     private func globalErrorRow(_ error: SophiaError) -> some View {
-        VStack(alignment: .leading, spacing: SophiaMetrics.space1) {
-            Text(error.message)
-                .font(SophiaFont.body)
-                .foregroundStyle(SophiaColor.ink)
-            if let hint = error.hint {
-                Text(hint)
-                    .font(SophiaFont.callout)
-                    .foregroundStyle(SophiaColor.ink2)
-            }
-        }
-        .padding(SophiaMetrics.space3)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(SophiaColor.surface)
-        .clipShape(RoundedRectangle(cornerRadius: SophiaMetrics.controlRadius))
+        LoadErrorCard(model: model, error: error)
     }
 }
 
@@ -159,10 +151,22 @@ private struct ScrollFollower: View {
 ///
 /// 見出しは**モデルIDではなく Sophia の名前**を出す（10.2-#9）。
 /// 提案カードは A1 のスコープ外。
+///
+/// ## ここが起動時の失敗の唯一の出口である（2026-08-18 に判明）
+///
+/// `globalError` を描いていたのは `ConversationView` の中だけだった。
+/// ところが `ChatScreen` は **`turns.isEmpty` のときこのビューへ分岐する**ので、
+/// **起動時の読み込み失敗は画面のどこにも出ていなかった。**
+/// 「モデルを取得しています（0%）」だけが残り、失敗しても表示が変わらない
+/// ── 今回いちばんの問題（落ちないまま黙っていた）の、UI 側の半分がこれである。
+/// **エラーと再試行をここから外さないこと。**
+///
+/// 引数で受け取らず `ChatViewModel` をそのまま受けているのは、
+/// 出すものが4つ（進捗・経過時間・エラー・再試行）に増えて、
+/// 引数で配ると `ChatScreen` 側が中継役になるだけだから。
 struct EmptyConversationView: View {
 
-    let engineIsStub: Bool
-    let loading: LoadProgress?
+    @Bindable var model: ChatViewModel
 
     var body: some View {
         VStack(spacing: SophiaMetrics.space4) {
@@ -178,16 +182,13 @@ struct EmptyConversationView: View {
                 .font(SophiaFont.body)
                 .foregroundStyle(SophiaColor.ink2)
 
-            if let loading {
-                HStack(spacing: SophiaMetrics.space2) {
-                    ProgressView()
-                        .controlSize(.small)
-                        .tint(SophiaColor.accentVivid)
-                    Text(loading.detail ?? "モデルを準備しています")
-                        .font(SophiaFont.callout)
-                        .foregroundStyle(SophiaColor.ink3)
-                }
-            } else if engineIsStub {
+            if let loading = model.loading {
+                loadingRow(loading)
+            }
+
+            if let error = model.globalError {
+                LoadErrorCard(model: model, error: error)
+            } else if model.loading == nil, model.engineIsStub {
                 // 「本物が動いている」と誤解させない。
                 // `EngineIdentifier.stub` の宣言にある約束（ダミーである旨を出す）。
                 Text("いまはダミーのエンジンです。モデルは読み込まれていません")
@@ -196,6 +197,107 @@ struct EmptyConversationView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, SophiaMetrics.space5)
         .padding(.bottom, SophiaMetrics.space6)
+    }
+
+    /// 読み込み中の表示。**進捗率だけを出さない。**
+    ///
+    /// 出すのは3つで、どれが欠けても「待つ／やり直す」を判断できない。
+    ///   1. 何をしているか（`detail`。エンジン側が**バイト数込み**の日本語を入れている）
+    ///   2. **どれだけ経ったか**（0% が10秒目なのか10分目なのかで意味が正反対になる）
+    ///   3. どこまで進んだか（バー）
+    private func loadingRow(_ loading: LoadProgress) -> some View {
+        VStack(spacing: SophiaMetrics.space2) {
+            HStack(spacing: SophiaMetrics.space2) {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(SophiaColor.accentVivid)
+                Text(loading.detail ?? "モデルを準備しています")
+                    .font(SophiaFont.callout)
+                    .foregroundStyle(SophiaColor.ink3)
+                    .multilineTextAlignment(.center)
+            }
+
+            if let startedAt = model.modelLoadStartedAt {
+                HStack(spacing: SophiaMetrics.space1) {
+                    Text("経過")
+                    // 毎秒更新されるのはこの1行だけ（`LiveElapsedText` の説明を参照）。
+                    LiveElapsedText(since: startedAt)
+                }
+                .font(SophiaFont.footnote)
+                .foregroundStyle(SophiaColor.ink4)
+            }
+
+            // 取得中だけバーを出す。展開中は総量が分からないので不定形のままにする。
+            if loading.stage == .downloading, let fraction = loading.fraction {
+                ProgressView(value: fraction)
+                    .progressViewStyle(.linear)
+                    .tint(SophiaColor.accentVivid)
+                    .frame(maxWidth: 280)
+            }
+        }
+    }
+}
+
+/// 読み込みの失敗（FR-11）と、そこからの復帰手段（NFR-10）。
+///
+/// 見た目は `TurnView.errorRow` に揃えてある。**同じ「失敗」が画面の場所によって
+/// 違う顔をしないこと**が目的で、違うのは再試行ボタンが付く点だけ。
+struct LoadErrorCard: View {
+
+    @Bindable var model: ChatViewModel
+    let error: SophiaError
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: SophiaMetrics.space2) {
+            HStack(alignment: .firstTextBaseline, spacing: SophiaMetrics.space2) {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.system(size: 11))
+                    .foregroundStyle(SophiaColor.accent)
+                Text(error.message)
+                    .font(SophiaFont.body)
+                    .foregroundStyle(SophiaColor.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if let hint = error.hint {
+                Text(hint)
+                    .font(SophiaFont.callout)
+                    .foregroundStyle(SophiaColor.ink2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, SophiaMetrics.space5)
+            }
+
+            #if DEBUG
+            // `detail` は開発者向けなので**製品ビルドには出さない**（SophiaError の約束）。
+            // ここに置いてあるのは、画面とログ（`[LOAD] event=stalled`）を
+            // 同じキーで突き合わせられるようにするため。
+            if let detail = error.detail {
+                Text(detail)
+                    .font(SophiaFont.footnote)
+                    .foregroundStyle(SophiaColor.ink4)
+                    .textSelection(.enabled)
+                    .padding(.leading, SophiaMetrics.space5)
+            }
+            #endif
+
+            if model.canRetryModelLoad {
+                Button("再試行") {
+                    Task { await model.retryModelLoad() }
+                }
+                .controlSize(.small)
+                .padding(.leading, SophiaMetrics.space5)
+                .help("モデルの取得をやり直します。取得済みの分はそのまま使われ、続きから再開されます")
+            }
+        }
+        .padding(SophiaMetrics.space3)
+        .frame(maxWidth: SophiaLayout.columnMaxWidth, alignment: .leading)
+        .background(SophiaColor.surface)
+        .clipShape(RoundedRectangle(cornerRadius: SophiaMetrics.controlRadius))
+        .overlay(
+            RoundedRectangle(cornerRadius: SophiaMetrics.controlRadius)
+                .stroke(SophiaColor.accentVivid.opacity(0.5), lineWidth: SophiaMetrics.hairline)
+        )
     }
 }
