@@ -1,0 +1,15 @@
+{
+  "model": "mlx-community/Qwen3-8B-4bit",
+  "display_name": "Omoikane 8B v1.0",
+  "thinking": true,
+  "system_prompt": true,
+  "build": "Debug",
+  "date": "2026-08-18",
+  "stats": {
+    "in": 387, "out": 1668,
+    "ttft_s": 2.59, "ttfr_s": 40.91,
+    "prefill_tps": 156.83, "decode_tps": 18.05,
+    "total_s": 94.92
+  },
+  "note": "利用者の実使用から採取。作った題材ではない"
+}
