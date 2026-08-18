@@ -221,6 +221,39 @@ probe:
 		2>&1 | tee -a $(PROBE_LOG) | grep -E '^\[PROBE|Executed|error:|\*\* TEST' || true
 	@echo "計測ログ: $(PROBE_LOG)"
 
+# --- ツール呼び出しが成立するかを測る（DESIGN 第16章の関門）------------------
+# **第16章（FR-19 フォルダ参照）はこの1点に懸かっている。**
+# テンプレートが対応していることと、4bit量子化された8Bが日本語の指示で
+# 正しい形式を守れることは別である。**呼べなければ設計ごと変わる。**
+#
+# `probe` と同じく `.xctestrun` 経由で環境変数を渡す（TEST_RUNNER_ は効かない）。
+# ホストアプリにモデルを読ませないため SOPHIA_ENGINE=stub も入れる。
+TOOLPROBE_N    ?= 3
+TOOLPROBE_TEMP ?= 0.7
+TOOLPROBE_LOG  ?= logs/toolcall-probe.log
+
+.PHONY: toolprobe
+
+toolprobe:
+	@mkdir -p logs
+	@SRC=$$(find $(XC_DERIVED)/Build/Products -name '*.xctestrun' ! -name '*probe.xctestrun' | head -1); \
+	if [ -z "$$SRC" ]; then echo "先に make probe-build を実行すること"; exit 1; fi; \
+	RUN=$$(dirname "$$SRC")/toolprobe.xctestrun; cp "$$SRC" "$$RUN"; \
+	ENV_PATH=:TestConfigurations:0:TestTargets:0:EnvironmentVariables; \
+	for kv in SOPHIA_TOOLPROBE=1 SOPHIA_ENGINE=stub \
+	          SOPHIA_TOOLPROBE_N=$(TOOLPROBE_N) \
+	          SOPHIA_TOOLPROBE_TEMP=$(TOOLPROBE_TEMP); do \
+		k=$${kv%%=*}; v=$${kv#*=}; \
+		/usr/libexec/PlistBuddy -c "Add $$ENV_PATH:$$k string $$v" "$$RUN" >/dev/null 2>&1 \
+			|| /usr/libexec/PlistBuddy -c "Set $$ENV_PATH:$$k $$v" "$$RUN"; \
+	done; \
+	printf '=== %s n=%s temp=%s ===\n' "$$(date '+%F %T')" "$(TOOLPROBE_N)" "$(TOOLPROBE_TEMP)" \
+		>> $(TOOLPROBE_LOG); \
+	xcodebuild test-without-building -xctestrun "$$RUN" -destination '$(XC_DEST)' \
+		-only-testing:SophiaTests/ToolCallProbeTests \
+		2>&1 | tee -a $(TOOLPROBE_LOG) | grep -E '^\[TOOLPROBE\]|error:|\*\* TEST' || true
+	@echo "計測ログ: $(TOOLPROBE_LOG)"
+
 # 系全体のページング状況を別経路で記録する。**計測の前に別窓で起動しておくこと。**
 probe-watch:
 	@./scripts/probe-watch.sh 2 logs/probe-system.log
