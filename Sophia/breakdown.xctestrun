@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>TestConfigurations</key>
+	<dict>
+		<key>0</key>
+		<dict>
+			<key>TestTargets</key>
+			<dict>
+				<key>0</key>
+				<dict>
+					<key>EnvironmentVariables</key>
+					<dict>
+						<key>SOPHIA_ENGINE</key>
+						<string>stub</string>
+						<key>SOPHIA_TOOLTOKENS</key>
+						<string>1</string>
+					</dict>
+				</dict>
+			</dict>
+		</dict>
+	</dict>
+</dict>
+</plist>

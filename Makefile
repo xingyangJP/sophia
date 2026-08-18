@@ -313,3 +313,30 @@ tooltokens:
 		-only-testing:SophiaTests/EngineToolWiringTests/testToolDefinitionTokenCost \
 		2>&1 | tee -a $(TOOLTOKENS_LOG) | grep -E '^\[TOOLTOKENS|Executed|error:|\*\* TEST' || true
 	@echo "計測ログ: $(TOOLTOKENS_LOG)"
+
+# --- ツール定義の費用の「内訳」を測る（16.9節 項目4 の但し書き）------------
+# **総額だけでは打ち手が選べない。** テンプレートの固定文なのか、JSON の構造なのか、
+# 説明文なのかで、効く手がまったく違う。
+#
+# **実際に描画された文を丸ごと出す。** 再構成の合計が実測と合わなかったとき、
+# 推測で差を埋めないため ── 2026-08-18、これで `tojson` の `\uXXXX` 展開が見つかった。
+TOOLBREAKDOWN_LOG ?= logs/tool-cost-breakdown.log
+
+.PHONY: toolbreakdown
+
+toolbreakdown:
+	@mkdir -p logs
+	@SRC=$$(find $(XC_DERIVED)/Build/Products -name '*.xctestrun' ! -name '*probe.xctestrun' ! -name 'tooltokens.xctestrun' ! -name 'breakdown.xctestrun' | head -1); \
+	if [ -z "$$SRC" ]; then echo "先に make probe-build を実行すること"; exit 1; fi; \
+	RUN=$$(dirname "$$SRC")/breakdown.xctestrun; cp "$$SRC" "$$RUN"; \
+	ENV_PATH=:TestConfigurations:0:TestTargets:0:EnvironmentVariables; \
+	for kv in SOPHIA_TOOLTOKENS=1 SOPHIA_ENGINE=stub; do \
+		k=$${kv%%=*}; v=$${kv#*=}; \
+		/usr/libexec/PlistBuddy -c "Add $$ENV_PATH:$$k string $$v" "$$RUN" >/dev/null 2>&1 \
+			|| /usr/libexec/PlistBuddy -c "Set $$ENV_PATH:$$k $$v" "$$RUN"; \
+	done; \
+	printf '=== %s ===\n' "$$(date '+%F %T')" >> $(TOOLBREAKDOWN_LOG); \
+	xcodebuild test-without-building -xctestrun "$$RUN" -destination '$(XC_DEST)' \
+		-only-testing:SophiaTests/ToolCostBreakdownTests \
+		2>&1 | tee -a $(TOOLBREAKDOWN_LOG) | grep -E '^\[BREAKDOWN|Executed|error:|\*\* TEST' || true
+	@echo "計測ログ: $(TOOLBREAKDOWN_LOG)"
