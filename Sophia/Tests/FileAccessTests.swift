@@ -637,17 +637,58 @@ final class FileAccessTests: XCTestCase {
         XCTAssertFalse(error.modelMessage.contains("/private/etc/passwd"))
     }
 
-    /// **これは「まだ足りていないもの」を固定するテストである。**
+    /// **これは「まだ半分しか繋がっていないもの」を固定するテストである。**
     ///
-    /// `SophiaError.Code` にファイル参照のケースが無いので、いまは全部 `.unknown` に落ちている。
-    /// **UI は「フォルダの失効」だけを特別扱いする分岐が書けない**（16.8節の自動化ができない）。
-    /// ケースが足されたら**このテストが落ちる。** 落ちたら
-    /// `FolderAccessError.sophiaError` の `code:` を差し替えて、ここを直すこと。
-    func testFileAccessErrorsStillFallBackToUnknownCode() {
-        XCTAssertEqual(FolderAccessError.accessDenied("x").sophiaError.code, .unknown)
-        XCTAssertFalse(
-            SophiaError.Code.allCases.contains { "\($0)".lowercased().contains("folder") },
-            "SophiaError.Code にフォルダ用のケースが入った。FolderAccessError.sophiaError を直すこと")
+    /// 2026-08-18、`SophiaError.Code` に `.folderAccessDenied` と `.folderUnavailable` が
+    /// **入った**（推論エンジン側の担当作業）。旧テスト
+    /// `testFileAccessErrorsStillFallBackToUnknownCode` は、その時点で落ちる仕掛けだった。
+    /// 予定どおり落ちたので、いまの状態に書き換えてある。
+    ///
+    /// **残っているのは `FolderAccessError.sophiaError` の `code:` の差し替えだけ**である
+    /// （`Sources/Files/` 側の作業。対応表は `SophiaError.Code.folderUnavailable` の
+    /// ドキュメントコメントに置いてある）。それまでは全件 `.unknown` のままなので、
+    /// **UI はまだ「フォルダの失効」を特別扱いできない**（16.8節の自動化が待ち）。
+    ///
+    /// **差し替えたらこのテストが落ちる。** 落ちたら下の2行を、
+    /// `.folderAccessDenied` / `.folderUnavailable` を期待する形に書き換えること。
+    /// **2026-08-18 結線した。** 対応表は `SophiaError.Code.folderUnavailable` にある。
+    ///
+    /// **後半（封じ込めが `.unknown` のままであること）を消さないこと。**
+    /// あそこが本題である ── 「フォルダが壊れた」と
+    /// 「モデルが範囲外を要求したのでアプリが止めた」を同じ `code` にすると、
+    /// UI が後者に対しても「フォルダを選び直してください」と言い出す。
+    /// **利用者が選び直しても何も直らない。**
+    func testFolderErrorsCarryTheirOwnCodes() {
+        // 使えない（移動・削除・改名・権限の復元不能）。
+        for error: FolderAccessError in [
+            .rootUnavailable("x"),
+            .rootNotADirectory("x"),
+            .rootMoved(expected: "a", actual: "b"),
+            .bookmarkUnreadable(detail: "x"),
+        ] {
+            XCTAssertEqual(error.sophiaError.code, .folderUnavailable, "\(error)")
+        }
+
+        // 在るのに読めない。**上と分けてあるのは、利用者に言うことが違うから。**
+        XCTAssertEqual(FolderAccessError.accessDenied("x").sophiaError.code, .folderAccessDenied)
+    }
+
+    /// **封じ込めの拒否は `.unknown` のままであること。**
+    ///
+    /// これは「まだ結線していない」のではなく**結線してはいけない**。
+    /// 上のテストと別に立ててあるのは、片方を消したときにもう片方が残るようにするため。
+    func testContainmentRejectionsDoNotBorrowTheFolderCodes() {
+        for error: FolderAccessError in [
+            .outsideRoot(requested: "link/x", resolved: "/etc/x"),
+            .absolutePathRejected("/etc/passwd"),
+            .homeRelativePathRejected("~/Documents"),
+            .parentTraversalRejected("../x"),
+            .invalidPath("a\u{0}b"),
+        ] {
+            XCTAssertEqual(
+                error.sophiaError.code, .unknown,
+                "封じ込めの拒否に `.folder*` を与えないこと: \(error)")
+        }
     }
 
     // MARK: - 補助

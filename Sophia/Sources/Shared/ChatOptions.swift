@@ -22,6 +22,52 @@ struct ChatOptions: Sendable, Equatable, Codable {
     /// 繰り返し抑制。nil ならモデルの既定。
     var repetitionPenalty: Double?
 
+    // MARK: - ツール定義（FR-19 / FR-21 / DESIGN.md 第16.2節）
+
+    /// **このターンでモデルに見せるツールの定義。既定は空 ＝ 1文字も注入しない。**
+    ///
+    /// ## FR-21 はこの1つの配列に還元されている
+    ///
+    /// Qwen3 のチャットテンプレートは `{%- if tools %}` を門にしている
+    /// （16.1節。開発機に落ちている `tokenizer_config.json` で確認済み）。
+    /// **`tools` を渡さなければ、ツールの system ブロックは1文字も描画されない。**
+    /// つまり FR-21 は「気をつけて実装する」種類の約束ではなく、
+    /// **この配列を空のままにするかどうか**である。
+    ///
+    /// | 会話の状態（16.2節） | ここに入るもの | 毎ターンの費用 |
+    /// |---|---|--:|
+    /// | `idle`（**既定**） | `[]` | **0** |
+    /// | `armed`（利用者がフォルダを結び付けた） | 3つの定義 | 定義ぶん |
+    /// | `resolving`（往復の最中） | 3つの定義 | 定義ぶん |
+    /// | 往復が終わったら | **`[]` に戻す** | **0** |
+    ///
+    /// ## 状態そのものはここに持たない（**重要**）
+    ///
+    /// `idle` / `armed` / `resolving` の enum をこの型に足さないこと。
+    /// **真実の出所が2つになり、必ず食い違う**（`.armed` なのに配列が空、など）。
+    /// 状態は会話を持っている層が持ち、**この層に届く時点では
+    /// 「配列が空かどうか」に潰れている**のが正しい。
+    ///
+    /// ## 引き金は利用者の操作だけである
+    ///
+    /// **利用者の文からツールの要否を推定する分類器を置かないこと**（16.2節）。
+    /// それ自体が推論であり、判定のために毎ターン計算を払う ──
+    /// VISION 第1因子（そもそも無駄を送らない）に真正面から反する。
+    /// **モデルの出力でここを埋める経路も作らないこと**（16.6節の約束3）。
+    ///
+    /// ## なぜ `[ToolSpec]` をそのまま持たないのか
+    ///
+    /// MLX の `ToolSpec` は `[String: any Sendable]` である。あれを持つと
+    /// (1) `ChatOptions` が `Equatable` / `Codable` を失い、
+    /// (2) `Shared/` が MLX を知ることになって NFR-09（エンジン差し替え）が壊れる。
+    /// **JSON への変換は MLX を知っている `MLXEngine` の側に閉じてある**
+    /// （`MLXEngine.toolSpecs(for:)`）。
+    ///
+    /// > **永続化していない。** `ChatOptions` は `Store` に落ちていない（A1 現在）。
+    /// > 落とすことになったら、このキーを持たない古い JSON は
+    /// > synthesized の `init(from:)` で失敗する点に注意すること。
+    var tools: [ToolDefinition]
+
     // MARK: - A2以降の最適化用（A1 では nil のまま）
 
     /// KVキャッシュの上限トークン数。超えたら古いものから捨てる。
@@ -44,6 +90,9 @@ struct ChatOptions: Sendable, Equatable, Codable {
         thinking: Bool = false,
         seed: UInt64? = nil,
         repetitionPenalty: Double? = nil,
+        // **既定は空。** FR-21 の既定値がここにある（16.2節の `idle`）。
+        // 呼び手が何も言わなければ 0 トークンになる、という順序にしておくこと。
+        tools: [ToolDefinition] = [],
         maxKVSize: Int? = nil,
         kvBits: Int? = nil,
         kvScheme: String? = nil
@@ -56,6 +105,7 @@ struct ChatOptions: Sendable, Equatable, Codable {
         self.thinking = thinking
         self.seed = seed
         self.repetitionPenalty = repetitionPenalty
+        self.tools = tools
         self.maxKVSize = maxKVSize
         self.kvBits = kvBits
         self.kvScheme = kvScheme
@@ -75,6 +125,90 @@ extension ChatOptions {
         var copy = self
         copy.maxTokens = SophiaDefaults.thinkingMinMaxTokens
         return copy
+    }
+}
+
+// =============================================================================
+//  ツールの定義（FR-19 / DESIGN.md 第16.4節）
+// =============================================================================
+
+/// モデルに見せるツール1つの定義。**MLX を知らない形で持つ。**
+///
+/// ## 何になるのか
+///
+/// `MLXEngine.toolSpec(for:)` が、これを OpenAI 互換の JSON Schema
+/// （`{"type":"function","function":{"name":…,"description":…,"parameters":…}}`）へ
+/// 変換して `UserInput(chat:tools:)` に渡す。テンプレートはそれを
+/// `<tools>` ブロックに `tool | tojson` で流し込む（16.1節）。
+///
+/// **この形は 2026-08-18 に実測で通っている** ── 日本語3条件×3回＋英語×3回で
+/// 選択 12/12・スキーマ適合 12/12・雑談での誤爆 0/6（`ToolCallProbeTests`）。
+/// **形を変えるなら測り直すこと。** 通ったのは「ツール呼び出し一般」ではなく、この形である。
+///
+/// ## 説明文は短く書くこと
+///
+/// **定義1つが、そのまま `armed` の間の毎ターンの費用になる**（16.2節）。
+/// Open WebUI は32個・約4,550トークンを毎ターン注入して「こんにちは」への応答を
+/// 34秒にしていた（TUNING.md 第2章）。**同じ構造を自分で作らないための型である。**
+/// 定義は3つまで（16.4節）。4つ目を足したくなったら、まず3つで足りなかった実例を出すこと。
+struct ToolDefinition: Sendable, Equatable, Codable {
+
+    /// 関数名。モデルはこの綴りで呼んでくる。`ToolCallRequest.name` と突き合わせる。
+    var name: String
+
+    /// 何をするか。**モデルが読む唯一の手掛かり**であり、同時に毎ターンの費用でもある。
+    var description: String
+
+    /// 引数。**順序を保つため配列で持つ**（辞書にすると JSON の並びが安定せず、
+    /// テストで形を固定できなくなる）。
+    var parameters: [Parameter]
+
+    init(name: String, description: String, parameters: [Parameter]) {
+        self.name = name
+        self.description = description
+        self.parameters = parameters
+    }
+
+    /// 必須引数の名前。**戻り値の検証ではなく、スキーマの `required` を組むために使う。**
+    var requiredParameterNames: [String] {
+        parameters.filter(\.isRequired).map(\.name)
+    }
+}
+
+extension ToolDefinition {
+
+    /// ツールの引数1つ。
+    ///
+    /// **`ToolDefinition` の入れ子にしてあるのは名前の衝突を避けるためである。**
+    /// MLXLMCommon が `public struct ToolParameter` を持っており、
+    /// 素の `ToolParameter` は **両方が見える文脈で `is ambiguous for type lookup`
+    /// になる**（2026-08-18、実際に `EngineToolWiringTests` のコンパイルが止まった）。
+    /// `Shared/` は MLX を import できない（NFR-09 / エンジンの差し替え可能性）ので
+    /// **向こうの型を使う選択肢は無く**、こちらが名前空間へ引っ込むのが筋である。
+    struct Parameter: Sendable, Equatable, Codable {
+
+    /// JSON Schema の型。**16.4節の3つのツールは string と integer しか使わない。**
+    /// `array` / `object` を意図的に置いていない ── 入れ子は説明文が伸びて費用が増え、
+    /// 受け取り側（`ToolCallRequest`）の取り出しも複雑になる。要るなら実例と一緒に足すこと。
+    enum ValueType: String, Sendable, Equatable, Codable, CaseIterable {
+        case string
+        case integer
+        case number
+        case boolean
+    }
+
+    var name: String
+    var type: ValueType
+    var description: String
+    /// スキーマの `required` に入れるか。
+    var isRequired: Bool
+
+    init(name: String, type: ValueType, description: String, isRequired: Bool) {
+        self.name = name
+        self.type = type
+        self.description = description
+        self.isRequired = isRequired
+    }
     }
 }
 

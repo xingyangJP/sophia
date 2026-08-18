@@ -19,16 +19,15 @@ import Foundation
 /// だから**種別を保った enum をこの層の内部通貨にし**、境界で
 /// `sophiaError` / `modelMessage` のどちらかへ変換する。
 ///
-/// ## `sophiaError` の `code` が `.unknown` になっている件
+/// ## `sophiaError` の `code`（**2026-08-18 結線済み**）
 ///
-/// `SophiaError.Code`（`Sources/Shared/SophiaError.swift`）に
-/// **ファイル参照に当たるケースが1つも無い。** `StoreFailure` が
-/// `.storageFailed` を待っているのと同じ事情である。
+/// `.folderAccessDenied` / `.folderUnavailable` を `SophiaError.Code` に足し、
+/// **この層から渡すようにした。** 対応表は `SophiaError.Code.folderUnavailable` の
+/// ドキュメントコメントにある。これで UI は 16.8節が求める
+/// 「結び付けを外して選び直しを促す」を `code` で分岐できる。
 ///
-/// **A2 までに `.folderAccessDenied` と `.folderUnavailable` を足してもらうこと。**
-/// 足りたらここの `code:` を差し替えるだけで済むよう、文言はこのファイルに集めてある。
-/// いまは `.unknown` なので、**UI は「フォルダの失効」だけを特別扱いする分岐が書けない**
-/// （16.8節が求める「結び付けを外して選び直しを促す」を、UI 側で自動化できない）。
+/// **封じ込めの拒否（`outsideRoot` / `absolutePathRejected` ほか）は `.unknown` のままである。**
+/// 意図的にそうしてある ── 理由は `make(_:_:_:code:)` を読むこと。
 ///
 /// ## `detail` に読んだ中身は入れない
 ///
@@ -152,22 +151,26 @@ enum FolderAccessError: Error, Sendable, Equatable {
         case .rootUnavailable(let path):
             make("結び付けたフォルダが見つかりませんでした。",
                  "移動・削除・改名されたようです。フォルダを選び直してください。",
-                 "root unavailable: \(path)")
+                 "root unavailable: \(path)",
+                 code: .folderUnavailable)
 
         case .rootNotADirectory(let path):
             make("結び付けたものがフォルダではありませんでした。",
                  "フォルダを選び直してください。",
-                 "root is not a directory: \(path)")
+                 "root is not a directory: \(path)",
+                 code: .folderUnavailable)
 
         case .rootMoved(let expected, let actual):
             make("結び付けたフォルダの場所が変わりました。",
                  "安全のため参照を中止しました。フォルダを選び直してください。",
-                 "root moved: expected=\(expected) actual=\(actual)")
+                 "root moved: expected=\(expected) actual=\(actual)",
+                 code: .folderUnavailable)
 
         case .bookmarkUnreadable(let detail):
             make("前回選んだフォルダへのアクセス権を復元できませんでした。",
                  "フォルダを選び直してください。会話はそのまま続けられます。",
-                 "bookmark unreadable: \(detail)")
+                 "bookmark unreadable: \(detail)",
+                 code: .folderUnavailable)
 
         case .bookmarkCreationFailed(let detail):
             make("選んだフォルダへのアクセス権を保存できませんでした。",
@@ -177,7 +180,8 @@ enum FolderAccessError: Error, Sendable, Equatable {
         case .accessDenied(let path):
             make("フォルダを読む権限がありませんでした。",
                  "フォルダを選び直してください。会話はそのまま続けられます。",
-                 "access denied: \(path)")
+                 "access denied: \(path)",
+                 code: .folderAccessDenied)
 
         case .notFound(let path):
             make("ファイルが見つかりませんでした（\(path)）。",
@@ -222,9 +226,17 @@ enum FolderAccessError: Error, Sendable, Equatable {
         }
     }
 
-    private func make(_ message: String, _ hint: String, _ detail: String) -> SophiaError {
-        // `code` は `.unknown` 固定。型コメントの但し書きを読むこと。
-        SophiaError(code: .unknown, message: message, hint: hint, detail: detail)
+    /// - Parameter code: **既定は `.unknown`。** 渡すのは
+    ///   `SophiaError.Code.folderUnavailable` のドキュメントにある対応表に載っている
+    ///   ケースだけであり、**封じ込めの拒否（`outsideRoot` 等）には渡さないこと。**
+    ///   あれは「フォルダが壊れた」ではなく「モデルが範囲外を要求したのでアプリが止めた」で、
+    ///   利用者が選び直しても何も直らない。同じ `code` を与えると UI が
+    ///   「フォルダを選び直してください」という的外れな助言を出す。
+    private func make(
+        _ message: String, _ hint: String, _ detail: String,
+        code: SophiaError.Code = .unknown
+    ) -> SophiaError {
+        SophiaError(code: code, message: message, hint: hint, detail: detail)
     }
 
     // MARK: - モデルへ（16.8節）

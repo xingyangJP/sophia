@@ -104,19 +104,147 @@ enum ContextWindow {
 
         let allLines = lines(of: text)
         let totalLines = allLines.count
-        let totalBytes = text.utf8.count
 
         // モデルが要求した窓を、ファイルの実際の範囲へ収める。
         // **ここで落とすのは範囲の話だけで、封じ込め（16.5節）ではない。**
         // パスの解決は `Sophia/Sources/Files/` の責務であり、この層は中身しか見ていない。
-        let start = max(window.offset, 1) - 1
-        let requestedEnd: Int
+        //
+        // 足し算の前に `min` を取っているのは桁あふれ避けである。
+        // `offset` / `limit` は**モデルが書いてくる数**なので `Int.max` が来うる。
+        // `start + limit` を先に計算すると、それだけでプロセスが落ちる。
+        let start = min(max(window.offset, 1) - 1, totalLines)
+        let remaining = totalLines - start
+        let take: Int
         if let limit = window.limit, limit > 0 {
-            requestedEnd = min(start + limit, totalLines)
+            take = min(limit, remaining)
         } else {
-            requestedEnd = totalLines
+            take = remaining
         }
-        let candidateCount = max(requestedEnd - start, 0)
+
+        return clip(
+            candidate: allLines[start..<(start + take)],
+            startingAtLineIndex: start,
+            path: path,
+            totalLines: totalLines,
+            totalBytes: text.utf8.count,
+            budget: budget,
+            counter: counter
+        )
+    }
+
+    /// **既に窓で読み終えたものを受ける入口**（DESIGN.md 第16.3節 第1段の橋）。
+    ///
+    /// ## なぜ入口が2つ要るのか
+    ///
+    /// `clip(_:path:window:budget:counter:)` は**ファイル全文**を受け取り、
+    /// 総行数も総バイト数も自分で数える。ところが実際に読むのは
+    /// `FolderReader.readText`（`Sophia/Sources/Files/`）で、**あれは既に窓で切った
+    /// `FileWindow` を返す。** 全文はどこにも無い ── 8,192トークンの上限に対して
+    /// 数百行のファイルは単独で壁を作るので、**全文を持つこと自体を避けている**（16.3節 / 発見19）。
+    ///
+    /// 全文が無いまま前者に渡すと、**窓の中だけを「ファイル全体」として数えることになる。**
+    /// 見出しは「全80行すべて」と言い、412行のファイルを読んだモデルは
+    /// **全部読んだと信じる。** 16.3節が「一番危ない」と名指しした状態そのものである。
+    ///
+    /// だから**総数は数えず、読み手から受け取る。** 受け取った総数を使って、
+    /// 行番号も「切ったかどうか」も**ファイル全体を基準に**組み立てる。
+    ///
+    /// - Parameters:
+    ///   - text: 窓に入った本文だけ。**ファイル全文ではない。**
+    ///   - firstLine: `text` の1行目が、ファイル全体では何行目か（**1始まり**）。
+    ///   - totalLines: **ファイル全体**の行数（`FileWindow.totalLines`）。
+    ///   - totalBytes: **ファイル全体**のバイト数（`FileWindow.totalBytes`）。
+    ///
+    /// ## 申告が窓と食い違ったら、総数のほうを信じない
+    ///
+    /// `totalLines` が「窓の右端」より小さいことは、事実としてありえない。
+    /// それでも渡されたら**窓の右端まで引き上げる。** 過大に言う害（「まだ先がある」）は
+    /// 保留を1回増やすだけだが、**過少に言う害は「全部読んだ」という断定を作る。**
+    /// 対称ではないので、安全な側へ倒す。
+    ///
+    /// ## CRLF について（`FileWindow` との既知の差）
+    ///
+    /// `FolderReader.readText` は CRLF の `\r` を落として返し、こちらの `lines(of:)` は残す。
+    /// **この入口には既に `\r` の落ちた本文が来る**ので、両者が食い違うことはない。
+    /// ただし `totalBytes` は**落とす前のファイルの実バイト数**なので、
+    /// CRLF のファイルでは `body` のバイト数より必ず大きくなる。
+    /// **これは誤差ではなく、そう決めた**（判断の理由は `FolderToolExecution` の CRLF の節）。
+    static func clip(
+        windowed text: String,
+        path: String,
+        firstLine: Int,
+        totalLines: Int,
+        totalBytes: Int,
+        budget: ContextBudget = .singleRead,
+        counter: TokenCounter = .estimate
+    ) -> ReadOutcome {
+
+        let windowLines = lines(of: text)
+
+        // **`firstLine` が暴走しない上限を、引数そのもので与える。**
+        //
+        // `firstLine` は `FolderToolExecution` の `window.firstLine ?? offset` から来る。
+        // **窓が空でない限り読み手由来**（実ファイルを数えた値）だが、
+        // 空のときだけモデルの `offset` がそのまま入る ── `Int.max` が来る。
+        //
+        // **2026-08-18: ここは3度書き直している。記録を残す。**
+        //
+        // | 版 | 式 | 何が起きたか |
+        // |---|---|---|
+        // | 1 | 上限なし | `start + count` が桁あふれして **SIGTRAP でプロセスごと死亡** |
+        // | 2 | `Int.max - count - 1` | 落ちなくなったが **2行のファイルが 922京行** と申告された |
+        // | 3 | `totalLines - count` | 暴走は止まったが、**下の「過少申告を持ち上げる」保証を壊した** |
+        //
+        // 2版目の教訓が本題である ── **「落ちないこと」だけを確かめて
+        // 「正しい値か」を確かめていなかった。** 表明を生存ではなく値に置いて初めて出た。
+        //
+        // 3版目で分かったのは、`totalLines` を絶対の真としてはいけないことである。
+        // **過少申告は「全部読んだ」という嘘の断定を作る**（下の `reportedTotal` の理由）。
+        // したがって持ち上げは残し、**上限だけを引数に縛る。**
+        // 現実の入力では `start` は必ず `totalLines - count` 以下なので、
+        // この上限が実際に効くのは**あり得ない入力のとき**だけである。
+        let start = min(max(firstLine, 1) - 1, max(totalLines, 0) + windowLines.count)
+
+        // **1行も入っていないときは、`firstLine` を総数の根拠にしないこと。**
+        // 窓が空なら「その行が在る」ことを何も示していない ── 終端を越えた `offset`
+        // （モデルは平気で 999 と書く）を総数に化けさせると、
+        // **「offset は 1〜998 で指定してください」という嘘の案内**になる。
+        // 実測で1件落ちた（`ToolExecutionTests` の範囲外の節）。
+        let reportedTotal = windowLines.isEmpty
+            ? totalLines
+            : max(totalLines, start + windowLines.count)
+
+        return clip(
+            candidate: windowLines[windowLines.startIndex...],
+            startingAtLineIndex: start,
+            path: path,
+            totalLines: reportedTotal,
+            totalBytes: max(totalBytes, text.utf8.count),
+            budget: budget,
+            counter: counter
+        )
+    }
+
+    /// 2つの入口が共有する本体。**切り詰めの規則をここ1か所にしか置かない。**
+    ///
+    /// 入口ごとに書くと、全文の側と窓の側で「切ったと言う条件」が少しずつずれる。
+    /// ずれた側が「切っていない」に倒れた瞬間、**静かに嘘をつく実装**になる（`ReadOutcome` の型コメント）。
+    ///
+    /// - Parameters:
+    ///   - candidate: 窓に入りうる行（**ファイル全体ではない**）。
+    ///   - startingAtLineIndex: `candidate` の先頭が、ファイル全体では何行目か（**0始まり**）。
+    private static func clip(
+        candidate: ArraySlice<Substring>,
+        startingAtLineIndex start: Int,
+        path: String,
+        totalLines: Int,
+        totalBytes: Int,
+        budget: ContextBudget,
+        counter: TokenCounter
+    ) -> ReadOutcome {
+
+        let candidateCount = candidate.count
+        let base = candidate.startIndex
 
         /// 途中経過から `ReadOutcome` を組む。
         ///
@@ -133,7 +261,7 @@ enum ContextWindow {
             let partial: PartialLine?
 
             if let characters = partialCharacters, candidateCount > 0 {
-                let line = allLines[start]
+                let line = candidate[base]
                 body = String(line.prefix(characters))
                 partial = PartialLine(
                     line: start + 1,
@@ -141,7 +269,7 @@ enum ContextWindow {
                     totalCharacters: line.count
                 )
             } else if lineCount > 0 {
-                body = allLines[start..<(start + lineCount)].joined(separator: "\n")
+                body = candidate[base..<(base + lineCount)].joined(separator: "\n")
                 partial = nil
             } else {
                 body = ""
@@ -229,7 +357,13 @@ enum ContextWindow {
         // 巨大なファイルで無駄に巨大な文字列を組まないよう、バイト数で足切りする。
         // 1トークンあたり8バイトを超えて入ることは、どの数え方でもまず無い ─
         // 試さずに飛ばしても答えは変わらない（どのみち入らない）。
-        if candidateCount == totalLines,
+        //
+        // **`start == 0` も条件に入れてある。** 「候補の数＝ファイルの行数」だけでは
+        // 「ファイル全体を覆っている」と言い切れない ── 窓の申告が食い違っていれば、
+        // 途中から始まる窓が全体と同じ行数を名乗りうる。全体を覆っていないのに
+        // この道へ入ると、**切ったものを「全部入った」として返す。**
+        if start == 0,
+           candidateCount == totalLines,
            totalBytes / 8 <= budget.tokens,
            fits(lineCount: candidateCount) {
             return draft(lineCount: candidateCount)
@@ -239,7 +373,7 @@ enum ContextWindow {
         // **バイト数だけで判定できるので、巨大な1行を文字列として組まずに済む** ─
         // 改行の無い20万文字のファイルで、無駄な20万文字の組み立てが1回消える。
         var lineCount = 0
-        if allLines[start].utf8.count / 8 <= budget.tokens {
+        if candidate[base].utf8.count / 8 <= budget.tokens {
             lineCount = largestFitting(upTo: candidateCount) { fits(lineCount: $0) }
             // 見出しの数字の桁が変わると、理屈の上では1トークンだけ単調性が崩れうる。
             // **最後に実物で確かめる。** 減る一方なので必ず止まる。
@@ -257,7 +391,7 @@ enum ContextWindow {
         // モデルは同じ要求を繰り返すか、諦めて中身を知らないまま答える。
         // 行を諦めて**文字で切る。** ただし範囲の言い方が変わる（`nextOffset` が nil になる）ので、
         // `ClipReason.withinLine` として区別して伝える。
-        let lineLength = allLines[start].count
+        let lineLength = candidate[base].count
         var characters = largestFitting(upTo: lineLength) { fits(lineCount: 0, partialCharacters: $0) }
         while characters > 0, !fits(lineCount: 0, partialCharacters: characters) { characters -= 1 }
 

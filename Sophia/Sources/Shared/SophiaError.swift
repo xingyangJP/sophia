@@ -41,6 +41,46 @@ struct SophiaError: Error, Sendable, Equatable, LocalizedError {
         /// このモデル／エンジンでは要求された機能が使えない
         /// （例: 思考モードを OFF にできないモデルに OFF を要求した）。
         case unsupported
+
+        // MARK: - フォルダ参照（FR-19 / DESIGN.md 第16.8節）
+
+        /// **結び付けたフォルダを読む権限が無い。** 権限が外れた／`startAccessing` が false。
+        ///
+        /// `folderUnavailable` と分けてあるのは、**観測できたことが違うから**である
+        /// （`modelDownloadFailed` と `modelDownloadStalled` を分けたのと同じ理由）。
+        /// こちらは**フォルダは在るのに読めない**。利用者が取る行動は「選び直す」だが、
+        /// 「移動してしまった」と言われると探しに行ってしまうので、文言を分ける必要がある。
+        ///
+        /// 16.8節が求める「黙って読めないまま進まない」を UI 側で自動化するための分岐点。
+        case folderAccessDenied
+
+        /// **結び付けたフォルダが使えない。** 移動・削除・改名され、ブックマークが失効した。
+        ///
+        /// 16.8節: 「会話から結び付けを外し、**選び直しを促す。** 会話は続行する」。
+        /// **この `code` を見て、UI が結び付けを外すところまで自動で行うこと。**
+        ///
+        /// ---
+        ///
+        /// ## `FolderAccessError` からの対応表（**Files 層への申し送り。まだ結線していない**）
+        ///
+        /// `Sources/Files/FolderAccessError.swift` の `sophiaError` は
+        /// **いまも全件 `.unknown` を返している。** ケースを足したのはこのファイルの担当で、
+        /// 差し替えは Files 層の担当作業なので、**分業の境界をまたいでいない。**
+        /// `FileAccessTests.testFolderCodesExistButAreNotWiredYet` が現状を固定してあり、
+        /// **差し替えた時点でそのテストが落ちて知らせる。**
+        ///
+        /// | `FolderAccessError` | 足すべき `code` |
+        /// |---|---|
+        /// | `.accessDenied` | `.folderAccessDenied` |
+        /// | `.rootUnavailable` / `.rootNotADirectory` / `.rootMoved` | `.folderUnavailable` |
+        /// | `.bookmarkUnreadable` | `.folderUnavailable`（権限を復元できない ＝ 使えない） |
+        /// | `.outsideRoot` / `.absolutePathRejected` ほか封じ込め系 | **どちらでもない。** `.unknown` のまま |
+        ///
+        /// **封じ込めの拒否をここへ寄せないこと。** あれは「フォルダが壊れた」ではなく
+        /// 「モデルが範囲外を要求したのでアプリが止めた」であり、
+        /// **利用者が選び直しても何も直らない。** 対処が違うものに同じ `code` を与えると、
+        /// UI が「フォルダを選び直してください」を出してしまう。
+        case folderUnavailable
         /// 想定外。`detail` に原文を入れる。
         case unknown
     }
@@ -108,6 +148,14 @@ struct SophiaError: Error, Sendable, Equatable, LocalizedError {
         case .unsupported:
             ("この操作は、いま使っているモデルでは行えません。",
              "別のモデルに切り替えるか、設定を戻してください。")
+        case .folderAccessDenied:
+            // **既定文は最後の砦である。** 実際には `FolderAccessError.sophiaError` が
+            // どのパスで何が起きたかを埋めた文を渡してくる（文言はあちらに集めてある）。
+            ("フォルダを読む権限がありませんでした。",
+             "フォルダを選び直してください。会話はそのまま続けられます。")
+        case .folderUnavailable:
+            ("結び付けたフォルダが見つかりませんでした。",
+             "移動・削除・改名されたようです。フォルダを選び直してください。")
         case .unknown:
             ("予期しないエラーが発生しました。",
              "もう一度お試しください。繰り返す場合はアプリを再起動してください。")

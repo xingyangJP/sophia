@@ -182,7 +182,17 @@ struct GenerationClock: Sendable {
             if firstOutputAt == nil { firstOutputAt = now }
             if firstContentAt == nil { firstContentAt = now }
             contentCharacterCount += text.count
-        case .prefill, .done:
+        case .prefill, .done, .toolCall:
+            // `.toolCall` を文字数に数えないこと。**あれは本文でも思考でもない**
+            // （FR-19 / 16章）。数えると TTFT の起点と出力トークンの概算が両方ずれる。
+            break
+        @unknown default:
+            // **2026-08-18 追加。** ここは `Chunk.swift` が「網羅 switch を書かないこと」と
+            // 明記しているのに網羅で書かれており、`.toolCall` を足した時点で
+            // **コンパイルが止まった**（唯一の違反箇所だった）。
+            // `ChatViewModel.apply(_:)` / `PrefillProbeTests` と同じ `@unknown default` に
+            // 揃えてある ── 素の `default:` だと「到達しない」警告が出るのに対し、
+            // これは無警告で、かつケースが増えたときだけ教えてくれる。
             break
         }
     }

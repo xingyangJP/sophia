@@ -643,9 +643,22 @@ actor MLXEngine: InferenceEngine {
             let additionalContext = try strategy.additionalContext(
                 forThinkingEnabled: options.thinking)
 
+            // --- ツール定義（FR-19 / FR-21。DESIGN.md 第16.2節）--------------------
+            //
+            // **FR-21 はこの1行に還元されている。** テンプレートの `{%- if tools %}` が
+            // 門なので、`nil` を渡せばツールの system ブロックは1文字も描画されない。
+            // `toolSpecs(for:)` は空配列を **nil に潰す**（`[]` を渡さない）:
+            // Jinja では `[]` も偽なので結果は同じだが、**保証をこちら側に置く**ためである。
+            //
+            // ここに「利用者の文を見てツールが要るか推定する」判定を書かないこと（16.2節）。
+            // **引き金は利用者の操作だけ**であり、この関数に届く時点では
+            // `options.tools` が空かどうかに潰れている。
+            let toolSpecs = Self.toolSpecs(for: options.tools)
+
             // チャットテンプレート（Jinja）はこの `prepare` の内側で
             // トークナイザが適用する。Ollama ではサーバの仕事だった部分。
-            let userInput = UserInput(chat: chat, additionalContext: additionalContext)
+            let userInput = UserInput(
+                chat: chat, tools: toolSpecs, additionalContext: additionalContext)
             let lmInput = try await container.prepare(input: userInput)
 
             let promptTokens = lmInput.text.tokens.asArray(Int.self)
@@ -701,12 +714,23 @@ actor MLXEngine: InferenceEngine {
             // **この `generate` 呼び出しの内側で同期的に走る。**
             // 上の progress コールバックはストリームが返る前に発火する。
             // `continuation` は既に存在しているので取りこぼさない。
+            //
+            // **`tools:` をここでも渡すこと。`UserInput` に入れただけでは足りない。**
+            // 別経路である ── `UserInput.tools` はテンプレートの描画にしか効かず、
+            // `generate` の `tools:` は `ToolCallProcessor` の `allowedToolNames` になる
+            // （`Evaluate.swift:1746-1763` → `ToolCallProcessor.init`）。
+            // 渡さないと `allowedToolNames` が nil になり、**未宣言の名前でも
+            // そのまま `.toolCall` として通る**（`?? true` に落ちる）。
+            // 渡してあれば、モデルが名前を捏造したとき `.rejectedToolCall(.undeclaredTool)`
+            // として弾かれる ── 16.8節「ツール名が一致しない」の第一の防壁である。
+            // スキーマは引数の型付けにも使われる（宣言した型へ寄せてくれる）。
             let stream = try await container.perform(nonSendable: lmInput) { context, input in
                 try MLXLMCommon.generate(
                     input: input,
                     parameters: parameters,
                     context: context,
-                    components: components)
+                    components: components,
+                    tools: toolSpecs)
             }
 
             // --- プリフィル完了の1点を回収する -------------------------------------
@@ -738,9 +762,13 @@ actor MLXEngine: InferenceEngine {
             var info: GenerateCompletionInfo?
             var sawFirstChunk = false
 
+            // 振り分けの規則は `MLXEngine.route(_:toolsWereSent:)` に切り出してある。
+            // **モデルを読み込まずにテストできるようにするため**であり、
+            // `EngineToolWiringTests` が「`.toolCall` は分離器を通らない」を固定している。
             for await item in stream {
-                switch item {
-                case .chunk(let text):
+                switch Self.route(item, toolsWereSent: toolSpecs != nil) {
+
+                case .separatorText(let text):
                     // **確保が出揃った側の計測点。** 断片が復号されて届いた ＝
                     // プリフィルの最終フォワードも最初のデコードも `eval` が済んでいる。
                     // `prefill_end` が下限側（発行済み・完了前を含む）なのに対して、
@@ -753,11 +781,30 @@ actor MLXEngine: InferenceEngine {
                     for segment in separator.process(text) {
                         emit(segment, clock: &clock, into: continuation)
                     }
-                case .info(let received):
-                    info = received
-                default:
-                    // `.toolCall` / `.rejectedToolCall` は A1 では使わない。
-                    // ツール定義を送らない以上、来ないはず（VISION 第1因子）。
+
+                case .passThrough(let chunk):
+                    // **分離器を通さずに流す。** ツール呼び出しは本文でも思考でもない。
+                    clock.record(chunk)
+                    continuation.yield(chunk)
+
+                case .completion:
+                    info = item.info
+
+                case .unexpectedToolCall(let name):
+                    // **ツールを渡していないのに呼んできた。** 実行できるものが無いので流さない。
+                    // 16.6節の約束3 ── 注入の状態をモデルの出力で変えない。
+                    // **黙って捨てない**（16.8節）ので、ログには必ず残す。
+                    writeToolLine("unexpected_call", fields: [("tool", name)])
+
+                case .rejected(let reason, let name):
+                    // 形式が壊れていた／宣言していない名前だった。
+                    // **原文は絶対に出さない** ── `RejectedToolCall.rawTextPreview` は
+                    // 「ライブラリが自動でログや永続化に載せてはならない」と明記されており、
+                    // 引数には利用者のファイル名や検索語が入る（NFR-01）。
+                    writeToolLine(
+                        "rejected", fields: [("reason", reason), ("tool", name ?? "-")])
+
+                case .ignored:
                     break
                 }
             }
@@ -847,6 +894,122 @@ actor MLXEngine: InferenceEngine {
             }
         clock.record(chunk)
         continuation.yield(chunk)
+    }
+
+    // MARK: - ツール（FR-19 / FR-21 / DESIGN.md 第16章）
+
+    /// **FR-21 の門。** 空なら `nil` を返す ── テンプレートの `{%- if tools %}` が
+    /// 開かず、ツールの system ブロックは**1文字も出ない**（16.1節・16.2節）。
+    ///
+    /// 空配列をそのまま渡しても Jinja では偽なので結果は同じだが、**それに頼らない。**
+    /// 依存先の真偽値の扱いではなく、**自分のコードで 0 を保証する**ほうが、
+    /// テンプレートを差し替えたときに壊れない。
+    ///
+    /// 呼び分けの判断はここでしない。**引き金は利用者の操作だけ**であり（16.2節）、
+    /// この関数に届く時点では「配列が空かどうか」に潰れている。
+    /// **利用者の文からツールの要否を推定する分類器をここに書かないこと。**
+    nonisolated static func toolSpecs(for tools: [ToolDefinition]) -> [ToolSpec]? {
+        guard !tools.isEmpty else { return nil }
+        return tools.map(toolSpec(for:))
+    }
+
+    /// `ToolDefinition` を OpenAI 互換の JSON Schema へ落とす。
+    ///
+    /// **この形は実測で通っている**（2026-08-18 `make toolprobe`: 選択 12/12・
+    /// スキーマ適合 12/12・誤爆 0/6）。`ToolCallProbeTests.toolSpecs()` に直書きされている
+    /// 形と同じものが出るよう組んであり、`EngineToolWiringTests` がそれを固定している。
+    /// **形を変えるなら測り直すこと。**
+    ///
+    /// 型注釈を各段に明示してあるのは好みではない。`[String: any Sendable]` の
+    /// 入れ子はリテラルのままだと型推論が `[String: String]` 等へ落ちて
+    /// コンパイルが通らない（`ToolCallProbeTests` が `as [String: any Sendable]` を
+    /// 各段に書いているのと同じ理由）。
+    nonisolated static func toolSpec(for definition: ToolDefinition) -> ToolSpec {
+        var properties: [String: any Sendable] = [:]
+        for parameter in definition.parameters {
+            let property: [String: any Sendable] = [
+                "type": parameter.type.rawValue,
+                "description": parameter.description,
+            ]
+            properties[parameter.name] = property
+        }
+
+        let parameters: [String: any Sendable] = [
+            "type": "object",
+            "properties": properties,
+            "required": definition.requiredParameterNames,
+        ]
+        let function: [String: any Sendable] = [
+            "name": definition.name,
+            "description": definition.description,
+            "parameters": parameters,
+        ]
+        return ["type": "function", "function": function]
+    }
+
+    /// MLX の `ToolCall` を、MLX を知らない `ModelToolCall` へ落とす（NFR-09）。
+    ///
+    /// **`Tools/ToolCallRequest` をここで作らないこと。** あちらは実行層の型で、
+    /// 引数の解釈まで持っている。推論層が作ると、**エンジンがツールの意味を知る**
+    /// ことになり、差し替え可能性（NFR-09）が静かに失われる。
+    /// 橋渡しは `ToolCallRequest(name:jsonArguments:)` を呼ぶ側の仕事である。
+    ///
+    /// 引数は `[String: JSONValue]` ── **ライブラリが既にパースし終えた型付きの値**である。
+    /// ここで JSON 文字列へ戻すのは、`Shared/` に MLX の型を持ち込まないためだけの理由。
+    ///
+    /// `.sortedKeys` を付けてあるのは**同じ呼び出しが同じ文字列になるようにする**ため。
+    /// 付けないと辞書の並びが実行ごとに変わり、`Equatable` な比較もログの突き合わせも壊れる。
+    nonisolated static func modelToolCall(from call: ToolCall) -> ModelToolCall {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+
+        // 失敗経路は実際には無いはず（`JSONValue` は JSON で表せる値しか持てない）。
+        // それでも握りつぶさず、**空の引数として渡す** ── 受け取った側が
+        // 「必須の引数が無い」と判断してモデルへ返せる（16.8節: 往復を1回で打ち切らない）。
+        let json =
+            (try? encoder.encode(call.function.arguments))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+
+        return ModelToolCall(
+            name: call.function.name, argumentsJSON: json, callID: call.id)
+    }
+
+    /// 生成ストリームの1項目の行き先を決める。**思考分離（FR-17）との交点である。**
+    ///
+    /// | 来たもの | 行き先 | なぜ |
+    /// |---|---|---|
+    /// | `.chunk` | 思考分離器 | 本文と思考はここでしか分けられない |
+    /// | `.toolCall` | **分離器を通さず素通し** | `<tool_call>` は `.chunk` に混ざらない（16.1節） |
+    /// | `.toolCall`（ツール未送信） | **流さない。ログのみ** | 実行できるものが無い。16.6節の約束3 |
+    /// | `.rejectedToolCall` | ログのみ | 原文は出さない（NFR-01） |
+    /// | `.info` | 呼び出し側が `item.info` から取る | `GenerateCompletionInfo` は Equatable でないので運ばない |
+    ///
+    /// **`static` にしてあるのはテストのため。** actor の状態にも MLX のモデルにも
+    /// 触らないので、`EngineToolWiringTests` が 4.6GB を読み込まずに固定できる。
+    nonisolated static func route(_ item: Generation, toolsWereSent: Bool) -> GenerationRoute {
+        switch item {
+        case .chunk(let text):
+            return .separatorText(text)
+
+        case .info:
+            return .completion
+
+        case .toolCall(let call):
+            // **渡していないのに呼ばれたら流さない。** 実行できるツールが1つも無いのだから、
+            // ここで通しても消費側は何もできない。16.6節の約束3（注入の状態を
+            // モデルの出力で変えない）の、最後の関門でもある。
+            guard toolsWereSent else {
+                return .unexpectedToolCall(name: call.function.name)
+            }
+            return .passThrough(.toolCall(modelToolCall(from: call)))
+
+        case .rejectedToolCall(let rejection):
+            return .rejected(reason: rejection.reason.rawValue, toolName: rejection.toolName)
+
+        @unknown default:
+            // `Generation` は別モジュールの enum である。増えても止まらないこと。
+            return .ignored
+        }
     }
 
     // MARK: - 思考分離器の組み立て
@@ -1457,6 +1620,54 @@ func formatDownloadedBytes(completed: Int64, total: Int64) -> String {
     return "\(megabytes(completed)) / \(megabytes(total))"
 }
 
+/// 生成ストリームの1項目の行き先（`MLXEngine.route(_:toolsWereSent:)` の戻り値）。
+///
+/// **`GenerateCompletionInfo` を運んでいないのは意図的である。** あれは `Equatable` ではなく、
+/// 載せた瞬間にこの enum の等値比較が書けなくなる ＝ **テストで固定できなくなる。**
+/// `.completion` を受けた側が `item.info` から取ればよい（1行で済む）。
+enum GenerationRoute: Sendable, Equatable {
+    /// 思考分離器（FR-17）へ通すテキスト。
+    case separatorText(String)
+    /// **分離器を通さずにそのまま流す断片。** いまはツール呼び出しだけ。
+    case passThrough(Chunk)
+    /// `.info` が来た。中身は呼び出し側が `item.info` から取る。
+    case completion
+    /// ツール定義を渡していないのに呼び出しが来た。**流さない**（16.6節の約束3）。
+    case unexpectedToolCall(name: String)
+    /// ツール呼び出しの形をしていたが、解釈も認可もできなかった。
+    /// **原文は運ばない** ── 引数には利用者のファイル名や検索語が入る（NFR-01）。
+    case rejected(reason: String, toolName: String?)
+    /// 将来ケース。黙って捨ててよい。
+    case ignored
+}
+
+/// ツールまわりの出来事を stderr へ1行で吐く。
+///
+/// **`[LOAD]` / `[MEM]` / `[STATS]` と同じ経路・同じ `key=value` 形式**に揃えてある。
+/// 環境変数で切っていないのは、ここに出るのが**まれで、かつ必ず知りたいこと**
+/// （呼べなかった／弾かれた）だけだからである。
+///
+/// > **原文を書かないこと。** `RejectedToolCall.rawTextPreview` には
+/// > 「ライブラリが自動でログや永続化に載せてはならない」と明記されており、
+/// > 実際に利用者のファイル名や検索語が入る。NFR-01（会話を端末の外に出さない）は
+/// > ログ経由の流出も含む（`SophiaDatabase.configuration` と同じ考え方）。
+/// > **値はモデルが書いた文字列である。** ツール名は捏造されうるので、
+/// > 空白・改行を潰し、長さも切ってから出す ── **さもないと1行の `key=value` が
+/// > 崩れ、最悪ログの行そのものをモデルに書かれる**（`[LOAD]` の値はアプリが作るので
+/// > この心配が無かった。ここが初めての「外から来る値」である）。
+private func writeToolLine(_ event: String, fields: [(key: String, value: String)]) {
+    func sanitize(_ value: String) -> String {
+        let collapsed = value.unicodeScalars.map {
+            CharacterSet.whitespacesAndNewlines.contains($0) ? "_" : String($0)
+        }.joined()
+        return String(collapsed.prefix(64))
+    }
+
+    let line = (["event=\(event)"] + fields.map { "\($0.key)=\(sanitize($0.value))" })
+        .joined(separator: " ")
+    FileHandle.standardError.write(Data("[TOOL] \(line)\n".utf8))
+}
+
 /// 取得の状況を stderr へ1行で吐く。
 ///
 /// **`print` を使わない。** `[MEM]` / `[STATS]` と同じ経路（生の `write(2)`）・
@@ -1562,4 +1773,26 @@ extension SophiaError {
 //      見ていない**ので、そのことをここに記録すること（別途の対処が要る）
 //  14. **ログが出ること。** `SOPHIA_LOG_LOAD=1` で `[LOAD] event=tick` が
 //      5秒ごとに出て、打ち切り時は設定に関係なく `event=stalled` が出ること
+//
+//  ## ツール呼び出しについて確かめること（2026-08-18 に追加 / FR-19・第16章）
+//
+//  **配線の形は `EngineToolWiringTests` がモデル無しで固定している。**
+//  実機でしか分からないのは、モデルを通したときの振る舞いである。
+//  （`ToolCallProbeTests` が測ったのは**モデルの能力**であって、この経路ではない）
+//
+//  15. **`idle` で 0 トークンであること（FR-21 の本丸）。**
+//      `SOPHIA_TOOLTOKENS=1` で `EngineToolWiringTests` の計測を回し、
+//      **同じ会話で「ツールあり」と「なし」の実トークン数の差**を見る。
+//      `[TOOLTOKENS] with=… without=… delta=…` が出る。
+//      **`delta` が `inputTokenBudget = 1000` の何割かが、16.2節の宿題の答えである**
+//      （16.9節の項目4。「32個で4,550だから3個なら430」という割り算はしないこと）
+//  16. **アプリからツールが呼べること。** `options.tools` を渡した往復で
+//      `.toolCall` が届くこと。**プローブが通ったのは別経路である**（16.9節の但し書き）
+//  17. **思考モードとの同時使用（16.9節の項目3。未確認のまま残っている）。**
+//      思考ONでツールを渡し、`<tool_call>` が `.thinking` / `.content` に
+//      **1文字も混ざらない**こと。混ざったら `ToolCallProcessor` の緩衝と
+//      `<think>` の入れ子が干渉している ＝ 16.1節の前提が崩れる
+//  18. **`[TOOL]` 行が出ないこと（普段は）。** `event=rejected` が出るなら
+//      モデルが形式を守れていない。`event=unexpected_call` が出るなら
+//      **ツールを渡していない会話で呼びに来ている** ── どちらも設計の前提が揺れる報せ
 // =============================================================================
