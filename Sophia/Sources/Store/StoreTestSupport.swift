@@ -138,6 +138,58 @@ extension Store {
     }
 }
 
+/// **v1 だけが当たった状態のDB** をテストのために作る。
+///
+/// `Store` は開くたびに migrator を丸ごと走らせるので、`Store` 経由では
+/// 「v1 までしか当たっていないDB」を作れない。**そこが検証したい状態である** ──
+/// 利用者像（v2）が**既に会話の入っているDBへ後から当たる**のが、
+/// 出荷後に実際に起きることだからである。
+///
+/// GRDB の型はここで閉じてある（テスト側は `import GRDB` しない。理由は上の型コメント）。
+extension SophiaMigrations {
+
+    /// v1 だけを当てたDBをファイルに作り、会話とメッセージを1件ずつ入れておく。
+    ///
+    /// - Returns: 入れた会話の id。
+    static func createV1OnlyDatabaseForTesting(
+        at url: URL,
+        conversationTitle: String,
+        messageContent: String
+    ) throws -> String {
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let queue = try SophiaDatabase.openQueue(at: url)
+
+        // **本番の migrator を使わない。** v1 だけを登録した別の migrator を組む。
+        var v1Only = DatabaseMigrator()
+        v1Only.registerMigration(SophiaMigration.v1Initial.rawValue) { db in
+            try db.execute(sql: SophiaMigrations.v1InitialSQL)
+        }
+        try v1Only.migrate(queue)
+
+        let conversationID = UUID().uuidString
+        try queue.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO conversations (id, title, model_id, created_at, updated_at)
+                    VALUES (?, ?, 'mlx-community/Qwen3-8B-4bit', 1, 1)
+                    """,
+                arguments: [conversationID, conversationTitle]
+            )
+            try db.execute(
+                sql: """
+                    INSERT INTO messages (id, conversation_id, role, content, created_at)
+                    VALUES (?, ?, 'user', ?, 1)
+                    """,
+                arguments: [UUID().uuidString, conversationID, messageContent]
+            )
+        }
+        return conversationID
+    }
+}
+
 /// テストから生SQLへ渡せる値。
 ///
 /// `(any DatabaseValueConvertible)?` をそのまま受け取ると、GRDB の非同期 API が要求する

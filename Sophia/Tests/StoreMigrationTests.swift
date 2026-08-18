@@ -21,7 +21,7 @@ final class StoreMigrationTests: StoreTestCase {
     /// リテラルで固定して、うっかりの改名を落とす。
     func testMigrationIdentifiersAreFrozen() {
         XCTAssertEqual(SophiaMigration.v1Initial.rawValue, "v1.initial")
-        XCTAssertEqual(SophiaMigration.allCases.map(\.rawValue), ["v1.initial"])
+        XCTAssertEqual(SophiaMigration.allCases.map(\.rawValue), ["v1.initial", "v2.userTraits"])
     }
 
     func testReopeningTheSameFileDoesNotReapplyMigrations() async throws {
@@ -67,7 +67,7 @@ final class StoreMigrationTests: StoreTestCase {
         )
 
         let recorded = try await store.rawAppliedMigrationIdentifiers()
-        XCTAssertEqual(Set(recorded), ["v1.initial", "test.v2.ttfr"], "追加分だけが当たること")
+        XCTAssertEqual(Set(recorded), ["v1.initial", "v2.userTraits", "test.v2.ttfr"], "追加分だけが当たること")
 
         let columns = try await store.columnNames(of: "messages")
         XCTAssertEqual(columns.last, "ttfr_ms")
@@ -98,7 +98,7 @@ final class StoreMigrationTests: StoreTestCase {
 
         let known = try await store.appliedMigrationIdentifiers()
         let superseded = try await store.hasBeenSupersededByNewerSchema()
-        XCTAssertEqual(known, ["v1.initial"], "知らない移行は一覧に出ない（だから検知が別に要る）")
+        XCTAssertEqual(known, ["v1.initial", "v2.userTraits"], "知らない移行は一覧に出ない（だから検知が別に要る）")
         XCTAssertTrue(superseded)
     }
 

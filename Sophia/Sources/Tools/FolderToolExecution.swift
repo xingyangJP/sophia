@@ -425,8 +425,10 @@ enum FolderToolExecution {
     ///
     /// 16.3節の縮約は**二段**である。第1段（上限で切る）だけでなく、
     /// **第2段（往復が終わったら生の戻り値を送信列から落とす）が要る。**
-    /// 落とす仕組みは `ContextTranscript` にあり、入口は `ContextEntry.read(ReadOutcome)` の1つだけ。
-    /// **一覧を別の型で返すと、一覧だけが毎ターン送られ続ける。**
+    /// 落とす仕組みは `ContextTranscript` にあり、入口は**どちらも `ReadOutcome` から出ている** ──
+    /// ターンをまたぐ側が `ContextEntry.read(ReadOutcome)`、
+    /// 往復の最中（`MLXEngine` の周回）が `ToolResult.bookmarkLine`（＝ `ReadOutcome.bookmarkLine`）である。
+    /// **一覧を別の型で返すと、栞が作れない ＝ 一覧だけが落ちずに残り続ける。**
     /// 200件の一覧が毎ターン残るのは、まさに Open WebUI の形である（16.2節）。
     ///
     /// ## 上限の測り方は `ContextWindow` と同じ規律にしてある

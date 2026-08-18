@@ -385,7 +385,13 @@ enum SophiaDefaults {
             fixedPreamble + (armed ? toolDefinitions : 0)
         }
 
-        /// `ContextTranscript.fit(_:budget:…)` へ渡す上限。
+        /// `ContextTranscript.fitRoundTrip(_:budget:…)` へ渡す上限。
+        ///
+        /// > **2026-08-19 に呼ばれるようになった。** それまでは作られただけで
+        /// > 呼び手が1つも無かった（16.3節の「二段目の縮約」が存在しなかった）。
+        /// > 入口が `fit` ではなく `fitRoundTrip` なのは、往復の最中は
+        /// > **各周の assistant 発言が呼び出しであって答えではない**ため、
+        /// > 「後ろに assistant があるか」で終わりを判定できないからである。
         ///
         /// **`fit` はツール定義もテンプレートの固定分も数えない**（発言の本文しか見ない）ので、
         /// 総額をそのまま渡すと、数えていない分だけ必ず超える。**先に引いておく。**

@@ -44,6 +44,7 @@ enum StoreFailure {
         // 読み取りは非同期で、Task のキャンセルで `CancellationError` が飛ぶ。
         // これは異常ではないので、赤字のエラー表示にしない（FR-02 と同じ扱い）。
         if error is CancellationError { return SophiaError(code: .cancelled) }
+        if let sophia = error as? SophiaError { return sophia }
 
         return SophiaError(
             code: .unknown,
@@ -54,12 +55,51 @@ enum StoreFailure {
     }
 
     static func write(_ error: any Error) -> SophiaError {
-        SophiaError(
+        // **すでに利用者向けの文言になっているものを包み直さない。**
+        // `Store.write` はトランザクションの本体から出た例外を一律ここへ通すので、
+        // 包み直すと `traitNotFound` / `placementIsDerived` が
+        // 「会話を保存できませんでした」に化けて、**原因が消える。**
+        if let sophia = error as? SophiaError { return sophia }
+
+        return SophiaError(
             code: .unknown,
             message: "会話を保存できませんでした。",
             hint: "ディスクの空き容量を確認してください。"
                 + "表示されている内容はこのウィンドウを閉じるまで残ります。",
             detail: describe(error)
+        )
+    }
+
+    // MARK: - 利用者像（14.14節）
+
+    /// 存在しない利用者像を訂正・強化しようとした。**実装の誤りである。**
+    ///
+    /// 利用者から見える形にはならないはずなので、文言は最小限にしてある。
+    static func traitNotFound(id: String) -> SophiaError {
+        SophiaError(
+            code: .unknown,
+            message: "その情報は見つかりませんでした。",
+            hint: "すでに削除されている可能性があります。設定画面を開き直してください。",
+            detail: "user_traits に id=\(id) が無い"
+        )
+    }
+
+    /// `placement` を `translating` に**手で**書こうとした。
+    ///
+    /// ## なぜ弾くのか
+    ///
+    /// `translating`（＝翻訳役の重みに入っている）は**事実であって、意思ではない。**
+    /// `user_trait_bakes` と、そのアダプタ世代が有効かどうかから導出される。
+    /// 手で書けるようにすると、**重みに入っていない像が「入っている」と表示されうる。**
+    /// 14.15節が設定画面へ出すと決めている「いま重みに入っている像の一覧」が嘘になり、
+    /// **嘘をつく方向が最悪である** ── 消したはずの像が残っているのを見逃す側に倒れる。
+    static func placementIsDerived(id: String) -> SophiaError {
+        SophiaError(
+            code: .unknown,
+            message: "この状態は直接変更できません。",
+            hint: "重みに反映されているかどうかは、学習の記録から自動的に決まります。",
+            detail: "user_traits.placement = 'translating' は user_trait_bakes からの導出値である"
+                + "（id=\(id)）。recordAdapterGeneration / activateAdapterGeneration を使うこと"
         )
     }
 

@@ -381,8 +381,16 @@ actor Store {
         )
     }
 
+    // ⚠ `write` / `read` は `private` を外してある（`internal`）。
+    //
+    // 利用者像の API（14.14節）は `UserTraitsStore.swift` にあり、
+    // `extension Store` として別ファイルに置いた。Swift の `private` はファイル単位なので、
+    // そのままでは下の2つが見えない。**`dbQueue` 自体は private のまま**であり、
+    // トランザクション境界と `StoreFailure` への変換はこの2つに集まったままである。
+    // **`dbQueue` を直接触る道は（DEBUG の窓を除いて）開けていない。**
+
     /// 書き込み。**同期。キャンセルを見ない**（型の説明を参照）。
-    private func write<T>(_ body: (Database) throws -> T) throws -> T {
+    func write<T>(_ body: (Database) throws -> T) throws -> T {
         do {
             return try dbQueue.write(body)
         } catch {
@@ -391,7 +399,7 @@ actor Store {
     }
 
     /// 読み取り。非同期。取り消されうる。
-    private func read<T: Sendable>(
+    func read<T: Sendable>(
         _ body: @escaping @Sendable (Database) throws -> T
     ) async throws -> T {
         do {

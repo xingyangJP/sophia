@@ -206,3 +206,187 @@ enum ContextTranscript {
         )
     }
 }
+
+// =============================================================================
+//  同じ第2段を、**1つのターンの中**で効かせる（FR-19 / DESIGN.md 第16.3節・第16.8節）
+// -----------------------------------------------------------------------------
+//  # なぜ `fit(_:budget:…)` をそのまま呼べないのか
+//
+//  上の `fit` は**ターンとターンのあいだ**の縮約である。入口は `ContextEntry.read`
+//  ＝ `ReadOutcome` を値として持っている層（`ChatViewModel`）からしか作れない。
+//
+//  ところが**費用が実際に積み上がるのは1つのターンの中**である ──
+//  `FolderToolRunner.callLimit` は 6、1回の読み取りは `InputBudget.singleRead`（360）まで。
+//  **6回で 2,160トークンが、入力予算 1,000 の中に積み上がる。**
+//  しかも往復のたびに全部プリフィルし直す（KV再利用なし）。
+//  つまり**積み上がった生の戻り値を、周回のたびに払い直している。**
+//
+//  その積み上がりが起きる場所（`MLXEngine.performChat` の `rounds:` ループ）には
+//  `ReadOutcome` が無い。あるのは実行役が返した2つの文字列
+//  （`ToolExecutionOutcome.responseText` と `.summaryLine`）だけである ──
+//  推論層に `ReadOutcome` を持ち込まないのは NFR-09 の決定であって、迂回ではない
+//  （`ToolExecutionOutcome` の型コメント）。
+//
+//  # だから規則ではなく入口を増やしてある
+//
+//  | | `fit(_ entries:)` | `fitRoundTrip(_ items:)` |
+//  |---|---|---|
+//  | いつ | ターンをまたぐとき | **1つのターンの中（往復の最中）** |
+//  | 生のまま始める範囲 | 最後の assistant より後だけ | **全部**（往復はまだ終わっていない） |
+//  | 落とす順 | 古いものから | 古いものから（**同じ**） |
+//  | 落とし切るか | **落とし切る** | **一番新しい1件は残す** |
+//
+//  下2行が違う理由は同じ1つである ── **往復の最中は、まだ答えが出ていない。**
+//  ターンをまたぐ側では「モデル自身が書いた答えが履歴に残っている」ことが
+//  生の戻り値を落としてよい根拠だが（16.3節）、ループの中にはその答えがまだ無い。
+//  各周の assistant 発言は**ツールの呼び出し**であって答えではないので、
+//  「後ろに assistant があるか」では往復の終わりを判定できない。
+// =============================================================================
+
+extension ContextTranscript {
+
+    /// 落とした読み取りの跡に、栞のあとへ添える1行。
+    ///
+    /// ## なぜ栞だけでは足りないのか
+    ///
+    /// 第1段（`ReadOutcome.clipNotice`）が既に同じ判断をしている ──
+    ///
+    /// > 見出しには既に `1-80行` と範囲が出ているので、読めば一部だと分かる ──
+    /// > **分かるはずだ、では足りない。** 範囲の表記は数字であって主張ではない。
+    ///
+    /// 第2段でも事情は同じである。栞は `<tool_response>` の中に入るので、
+    /// **モデルから見れば「read_file がこれだけ返してきた」ようにしか見えない。**
+    /// 中身が「無かった」のか「取り下げた」のかを、数字ではなく文として書く。
+    ///
+    /// **【承知の上の費用】この1行は配分表の外にある。**
+    /// 概算で12トークン、`FolderToolRunner.callLimit`（6）ぶんで 72。
+    /// `InputBudget.bookmarks`（180）は栞だけを見て置かれた枠であり、
+    /// 一覧の栞（28）＋この1行 ＝ 40 × 6 ＝ 240 で**超える。**
+    /// 枠は `Shared/ChatOptions.swift` にあり、超過の事実は申し送りにしてある
+    /// （同じ枠は「件数上限で切れた一覧の栞は 51、6件で 306」という穴を既に抱えている）。
+    static let demotionNotice = "（内容は文脈の上限のため省略）"
+
+    /// 往復の最中の送信列の1項目。**2つの姿を持つものと、1つしか持たないものがある。**
+    ///
+    /// `ContextEntry` と役割は同じで、持ち方だけが違う ──
+    /// あちらは `ReadOutcome` を最後まで値で持ち、こちらは**既に文字列になった2つの姿**を持つ。
+    /// ループの中に届くのが文字列だけだからで、ここで `ReadOutcome` を要求すると
+    /// 推論層が `Sources/Context/` の値型ごと抱えることになる（NFR-09）。
+    struct RoundTripItem: Sendable, Equatable {
+
+        /// 生のまま送るときの文字列。
+        var rawText: String
+
+        /// 栞へ落としたときの文字列。**nil は「落とせない」という意味である。**
+        var demotedText: String?
+
+        var isDemotable: Bool { demotedText != nil }
+
+        /// 落とせない項目 ── 利用者の発言・アシスタントの発言・失敗の文。
+        ///
+        /// **失敗の文を落とさないのは 16.8節のためである。**
+        /// あれは1行しかなく、しかも「そのパスは無い」を忘れたモデルは
+        /// 次の周で同じパスをまた書く（`ToolResult.contextEntry` と同じ判断）。
+        static func fixed(_ text: String) -> Self {
+            RoundTripItem(rawText: text, demotedText: nil)
+        }
+
+        /// 落とせる項目（読み取り・一覧の結果）。
+        ///
+        /// **断り書き（`demotionNotice`）はここで足す。**
+        /// 呼び出し側に足させると、足し忘れた経路が「黙って中身を消す」実装になる ──
+        /// `ToolResult` が `contextText` を自前で組ませないのと同じ規律である。
+        static func demotable(raw: String, bookmark: String) -> Self {
+            RoundTripItem(
+                rawText: raw,
+                demotedText: bookmark + "\n" + ContextTranscript.demotionNotice)
+        }
+    }
+
+    /// 往復の最中に組み直した結果と、その費用。
+    ///
+    /// **`texts` を返しているのが要点である。** 落とす位置（`demotedIndices`）だけを返すと、
+    /// 呼び出し側が文字列を組み直すことになり、**測った文字列と送る文字列が別物になる。**
+    /// この食い違いは、`ReadOutcome.contextText` が型コメントで名指しして禁じているものと同じ形。
+    struct RoundTripFit: Sendable, Equatable {
+
+        /// 各項目の、**この周に実際に送る姿**。`items` と同じ並び・同じ数。
+        var texts: [String]
+
+        /// 栞へ落とした位置。
+        var demotedIndices: Set<Int>
+
+        /// `texts` の概算/実測トークン数（`perMessageOverhead` を含む）。
+        var tokens: Int
+
+        var budget: Int
+
+        var tokensAreEstimated: Bool
+
+        /// 落とした件数。上の `ContextFit.demotedReads` と同じ語を使ってある。
+        var demotedReads: Int { demotedIndices.count }
+
+        /// 収まったか。**false でもエラーにしない**（`fit` と同じ理由。16.3節）。
+        /// ここから先（窓を狭めて読み直す）は、この層にはできない。
+        var fits: Bool { tokens <= budget }
+    }
+
+    /// 往復の1周ぶんを、上限に収まるところまで落とす（DESIGN.md 第16.3節 第2段）。
+    ///
+    /// ## 一番新しい1件だけは落とさない
+    ///
+    /// `fit` は落とせるものを**落とし切る**（収まるまで、最後の1件も含めて）。
+    /// こちらは残す。**いま読んだばかりの中身を落とすと、モデルは中身を見ないまま答える** ──
+    /// それは「読みに行った」という往復そのものを無意味にする。
+    /// 収まらなければ `fits == false` として事実だけ返す。
+    ///
+    /// > 落とし切らないので、**この関数だけでは予算を守り切れないことがある。**
+    /// > 守り切れなかったことは `fits` に出る。**「落とせるものが無い」を「収まった」と偽らない。**
+    ///
+    /// - Parameters:
+    ///   - perMessageOverhead: 1発言あたりのチャットテンプレートの固定分。
+    ///     **既定 0 は「まだ測っていない」という意味である**（`fit` と同じ）。
+    ///     さらにここでは `tool_calls` の JSON も数えていない ── どちらも**過少**に出る。
+    static func fitRoundTrip(
+        _ items: [RoundTripItem],
+        budget: Int,
+        counter: TokenCounter = .estimate,
+        perMessageOverhead: Int = 0
+    ) -> RoundTripFit {
+
+        // 落とせる位置を、**古い順**に並べたもの。
+        let demotable = items.indices.filter { items[$0].isDemotable }
+        // 一番新しい1件（＝いま答えさせようとしている材料）。落とさない。
+        let newest = demotable.last
+
+        var demoted: Set<Int> = []
+
+        while true {
+            let texts = items.indices.map { index -> String in
+                guard demoted.contains(index), let text = items[index].demotedText else {
+                    return items[index].rawText
+                }
+                return text
+            }
+            let tokens = texts.reduce(0) { $0 + counter($1) + perMessageOverhead }
+
+            // 収まった、あるいはこれ以上落とせない。
+            // **落とせるものが無い状態を「収まった」と偽らない**（`fit` と同じ）。
+            guard
+                tokens > budget,
+                let next = demotable.first(where: { $0 != newest && !demoted.contains($0) })
+            else {
+                return RoundTripFit(
+                    texts: texts,
+                    demotedIndices: demoted,
+                    tokens: tokens,
+                    budget: budget,
+                    tokensAreEstimated: counter.isEstimate
+                )
+            }
+
+            // 古いものから落とす。**失って害が小さいほうから**（`fit` と同じ順序）。
+            demoted.insert(next)
+        }
+    }
+}

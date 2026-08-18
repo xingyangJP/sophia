@@ -147,6 +147,13 @@ struct ToolResult: Sendable, Equatable {
     ///
     /// 失敗の文は落とさない。**1行しかなく、しかも次のターンで同じ失敗を繰り返させない
     /// ための情報である**（「そのパスは無い」を忘れると、モデルはまた同じパスを書く）。
+    ///
+    /// > **【申し送り / 2026-08-19】この口は `Sources/` から一度も呼ばれていない。**
+    /// > 呼ぶのは会話を持っている層（`ChatViewModel`）だが、あちらは毎ターン
+    /// > `turns` から送信列を組み直しており、**ツールの往復は痕跡ごと消える** ──
+    /// > つまり栞を置く者がいない。ターンをまたいで栞を残すと決めたら、置き場はここである。
+    /// > **1つのターンの中**の縮約は別経路で通っている
+    /// > （`bookmarkLine` → `ToolExecutionOutcome.summaryLine` → `MLXEngine.compacted`）。
     var contextEntry: ContextEntry {
         switch kind {
         case .read(let outcome), .listing(let outcome):

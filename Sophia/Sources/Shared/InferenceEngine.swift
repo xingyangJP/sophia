@@ -113,7 +113,15 @@ import Foundation
 /// ### `SophiaMessage` に tool 役を足さないこと（決定済み）
 ///
 /// 生の往復は**エンジンの中だけに存在し、外へは出ない。**
-/// 履歴に残るのは栞1行である（16.3節 第2段 / `ContextTranscript`）。
+///
+/// > **【事実の訂正 / 2026-08-19】ここには「履歴に残るのは栞1行である」と書いてあった。嘘だった。**
+/// > **ターンの中では**生の戻り値が栞1行へ落ちる（`MLXEngine.compacted` / 2026-08-19 配線）。
+/// > **ターンをまたぐと、往復は痕跡ごと消える** ── 栞も残らない。
+/// > `engineMessages()` が `turns` から毎回組み直すためである。
+/// >
+/// > **栞をターンまたぎで残すかは決めていない。** 残すなら
+/// > **永久に毎ターン払う項を1つ作る**ことになる（`fit` は栞を落とせない）。
+/// > `armed` の会話で利用者に残るのは 33トークンしかない（`SophiaDefaults.InputBudget`）。
 /// `MessageRole` を増やすと `messages.role` の CHECK 制約
 /// （`SophiaMigrations.swift`）と `StoreSchemaTests` に波及する ──
 /// **得るものが無いのに移行を1つ増やすことになる。**
@@ -241,7 +249,11 @@ struct ToolExecutionOutcome: Sendable, Equatable {
     /// **そのまま `<tool_response>` に入る文字列**（＝`ToolResult.contextText`）。
     var responseText: String
 
-    /// 画面と履歴に残る1行（＝`ToolResult.bookmarkLine`）。
+    /// 画面に出す1行（＝`ToolResult.bookmarkLine`）。
+    ///
+    /// **「履歴に残る」とは書かないこと。** ターンをまたぐと往復は痕跡ごと消える
+    /// （上の型コメントの訂正を読むこと）。**同じ文字列であることは真だが、
+    /// 残っているのは画面のほうだけである。**
     var summaryLine: String
 
     /// 読めなかった／呼び出しが成立しなかった。**往復は続く。**

@@ -817,16 +817,53 @@ actor MLXEngine: InferenceEngine {
             //  接頭辞が一致せず、**再利用が黙って壊れた結果を作る**ほうが怖い。
             //  費用は `.done` の `inputTokens`（周ごとの合計）に必ず載るので、
             //  **測ってから手を入れること。**
+            //
+            //  **だからこそ、周の頭で第2段の縮約を通している**（16.3節 / `compacted`）。
+            //  払い直すのが避けられないなら、せめて**払い直す量を減らす**しかない ──
+            //  古い読み取りは栞1行に落ち、次の周からはその1行ぶんだけを払う。
             // =====================================================================
             rounds: while true {
                 round += 1
                 try Task.checkCancellation()
 
-                // **毎周ここで組み直す。** Sendable な記録から作るので、
-                // 出来た配列は独立した領域に入り、そのまま `prepare` へ送れる。
-                let chat = Self.chatMessages(for: transcript)
                 // クロージャへ渡すので不変にする（`toolSpecs` は var である）。
                 let roundTools = toolSpecs
+
+                // --- 第2段の縮約（DESIGN.md 第16.3節）-----------------------------
+                //
+                // **ここが「生の戻り値を落として栞1行に置き換える」の実行点である。**
+                // 1回の読み取りは 360トークンまで、往復は6回まで ＝ **1ターンで 2,160。**
+                // 入力予算は 1,000 で、しかも**周ごとに会話全体をプリフィルし直す**
+                // （上の但し書き）。落とさなければ、積み上がった中身を毎周払い直すことになる。
+                //
+                // 上限を `roundTools` から出しているのは、**門が閉じた周は
+                // ツール定義を1文字も送らない**からである（FR-21）。
+                // 送らない周にツール定義ぶん（322）を引くと、その周だけ不当に厳しくなる。
+                //
+                // **落とすのは送信列だけで、`transcript` は生のまま置いておく。**
+                // 毎周ここから組み直すので、この層に状態は要らない（`ContextTranscript` の但し書き）。
+                let compaction = Self.compacted(
+                    transcript,
+                    budget: SophiaDefaults.InputBudget.transcript(armed: roundTools != nil))
+
+                // **落としたら必ず言う**（16.3節）。宛先は2つあり、両方へ出している ──
+                //   モデルへ … 栞の次の行（`ContextTranscript.demotionNotice`）
+                //   開発者へ … この1行。**収まらなかった周も出す**
+                //             （落とさずに超えている、が一番見えなくてはいけない状態である）
+                if compaction.fit.demotedReads > 0 || !compaction.fit.fits {
+                    writeToolLine("compacted", fields: [
+                        ("round", "\(round)"),
+                        ("demoted", "\(compaction.fit.demotedReads)"),
+                        ("tokens", "\(compaction.fit.tokens)"),
+                        ("budget", "\(compaction.fit.budget)"),
+                        ("fits", compaction.fit.fits ? "1" : "0"),
+                        ("counter", compaction.fit.tokensAreEstimated ? "estimate" : "exact"),
+                    ])
+                }
+
+                // **毎周ここで組み直す。** Sendable な記録から作るので、
+                // 出来た配列は独立した領域に入り、そのまま `prepare` へ送れる。
+                let chat = Self.chatMessages(for: compaction.messages)
 
                 // チャットテンプレート（Jinja）はこの `prepare` の内側で
                 // トークナイザが適用する。Ollama ではサーバの仕事だった部分。
@@ -1012,8 +1049,8 @@ actor MLXEngine: InferenceEngine {
 
                     // 連続する tool メッセージは、テンプレートが**1つの user ターンに
                     // まとめて**描画する（16.1節）。だから素直に並べてよい。
-                    transcript.append(.toolResult(
-                        text: outcome.responseText, id: outcome.callID, name: outcome.toolName))
+                    // 落とせる側に入れるかどうかは `transcriptEntry(for:)` が決める。
+                    transcript.append(Self.transcriptEntry(for: outcome))
 
                     // **無言の時間を埋める。** 区間の始まりは `.toolCall` が既に伝えており、
                     // ここが終わりである（16.7節「何を読んだか」）。
@@ -1330,8 +1367,118 @@ actor MLXEngine: InferenceEngine {
                 return Chat.Message.assistant(text, toolCalls: toolCalls.isEmpty ? nil : toolCalls)
             case .toolResult(let text, let id, let name):
                 return Chat.Message.tool(text, id: id, name: name)
+            case .demotableToolResult(let text, _, let id, let name):
+                // **生の姿で描く。** どちらの姿にするかは
+                // `compacted(_:budget:counter:)` が周ごとに決めており、
+                // `performChat` はその戻り値（`.toolResult` に潰れている）を渡してくる。
+                // ここへ落ちてくるのは「縮約を通さずに描いた」場合だけなので、
+                // **落としていない側**＝そのまま送る側を選ぶ。
+                return Chat.Message.tool(text, id: id, name: name)
             }
         }
+    }
+
+    /// ツール1回の結果を、往復の記録へ入れる形にする。
+    ///
+    /// **決めているのは1つだけ ── 落とせる側に入れるかどうかである**（16.3節 第2段）。
+    ///
+    /// | | 入る先 | なぜ |
+    /// |---|---|---|
+    /// | 中身のある結果 | `.demotableToolResult` | 往復が進めば栞1行に落ちる |
+    /// | **失敗の文** | `.toolResult`（落とせない） | 1行しかなく、**忘れると同じ誤りを繰り返す**（16.8節） |
+    ///
+    /// **文字列は組み直さない。** `responseText` と `summaryLine` は実行役が
+    /// 同じ値から作って渡してきたものである（`ToolResult.executionOutcome`）──
+    /// ここで1文字でも足したら、測った値と入れる値が別物になる。
+    ///
+    /// **`static` にしてあるのはテストのため**（この判断だけを外から確かめられるように）。
+    nonisolated static func transcriptEntry(for outcome: ToolExecutionOutcome) -> RoundTripMessage {
+        guard !outcome.isFailure else {
+            return .toolResult(
+                text: outcome.responseText, id: outcome.callID, name: outcome.toolName)
+        }
+        return .demotableToolResult(
+            text: outcome.responseText, bookmark: outcome.summaryLine,
+            id: outcome.callID, name: outcome.toolName)
+    }
+
+    /// **第2段の縮約を、往復の1周ぶんに当てる**（FR-19 / DESIGN.md 第16.3節）。
+    ///
+    /// ---
+    ///
+    /// # なぜ往復のループの中で要るのか
+    ///
+    /// | | |
+    /// |---|--:|
+    /// | 1回の読み取りの上限（`InputBudget.singleRead`） | 360 |
+    /// | 1ターンの往復の上限（`FolderToolRunner.callLimit`） | × 6 |
+    /// | **1ターンの中で積み上がりうる量** | **2,160** |
+    /// | 入力予算（`InputBudget.total`） | **1,000** |
+    ///
+    /// しかも**周ごとに会話全体をプリフィルし直している**（KVキャッシュの再利用なし。
+    /// このファイルの `rounds:` ループの但し書き）。**積み上がった生の戻り値を、
+    /// 周回のたびに払い直している**ということである（実測でプリフィル21秒）。
+    ///
+    /// 落とせば、次の周に払うのは栞1行になる。
+    ///
+    /// # 何を落とし、何を落とさないか（判断は `ContextTranscript` に置いてある）
+    ///
+    /// | | |
+    /// |---|---|
+    /// | 落とす | `.demotableToolResult` の**古いものから**、収まるまで |
+    /// | 落とさない | 利用者・system・assistant の発言、失敗の文（`.toolResult`）、**一番新しい読み取り** |
+    ///
+    /// **一番新しい読み取りを残すのは、それが「いま答えさせようとしている材料」だから**である
+    /// （`ContextTranscript.fitRoundTrip` の但し書き）。
+    ///
+    /// # 数え方は概算である（**過少に出る**）
+    ///
+    /// `counter` の既定は `TokenCounter.estimate` で、発見19 の実測では
+    /// **概算は実測に対して 1.47倍 甘い。** さらにここは
+    /// チャットテンプレートの固定分も `tool_calls` の JSON も数えていない。
+    /// **したがって「収まった」は【未確認】であり、過少の側へ倒れている。**
+    /// 実トークナイザは1行下（`container.prepare` の `lmInput.text.tokens.count`）で
+    /// 手に入るので、差し替えるならそこを `TokenCounter.exact` に包むこと（第15章の宿題）。
+    ///
+    /// **`static` にしてあるのはテストのため**である（`chatMessages(for:)` と同じ理由）。
+    /// モデルもトークナイザも要らないので、`TranscriptCompactionTests` が
+    /// 4.6GB を読まずに「何が落ちて何が残るか」を固定できる。
+    nonisolated static func compacted(
+        _ transcript: [RoundTripMessage],
+        budget: Int,
+        counter: TokenCounter = .estimate
+    ) -> (messages: [RoundTripMessage], fit: ContextTranscript.RoundTripFit) {
+
+        let items = transcript.map { message -> ContextTranscript.RoundTripItem in
+            switch message {
+            case .system(let text), .user(let text):
+                return .fixed(text)
+            case .assistant(let text, _):
+                // **`tool_calls` の JSON は数えていない。** 数えるなら
+                // テンプレートが描く綴りそのものを組む必要があり、それは実測の側の仕事である。
+                return .fixed(text)
+            case .toolResult(let text, _, _):
+                return .fixed(text)
+            case .demotableToolResult(let text, let bookmark, _, _):
+                return .demotable(raw: text, bookmark: bookmark)
+            }
+        }
+
+        let fit = ContextTranscript.fitRoundTrip(items, budget: budget, counter: counter)
+
+        // **送るのは、いま測った当の文字列である**（`fit.texts`）。
+        // ここで栞を組み直すと、測った値と送る値が別物になる
+        // （`ReadOutcome.contextText` が名指しで禁じている食い違い）。
+        var messages = transcript
+        for (index, text) in fit.texts.enumerated() where index < messages.count {
+            guard case .demotableToolResult(_, _, let id, let name) = messages[index] else {
+                continue
+            }
+            // **`role=tool` のまま、id と name も持ったまま**送る。
+            // 落ちたのは中身だけで、`<tool_call>` との対応づけは切れていない。
+            messages[index] = .toolResult(text: text, id: id, name: name)
+        }
+        return (messages, fit)
     }
 
     /// 生成ストリームの1項目の行き先を決める。**思考分離（FR-17）との交点である。**
@@ -1987,13 +2134,21 @@ func formatDownloadedBytes(completed: Int64, total: Int64) -> String {
 /// # これは `SophiaMessage` ではない。そして `SophiaMessage` にしないと決めた
 ///
 /// 生の往復（`<tool_call>` と `<tool_response>`）は**エンジンの中だけに存在し、
-/// 外へは1つも出ない。** 履歴に残るのは栞1行である（16.3節 第2段 / `ContextTranscript`）。
+/// 外へは1つも出ない。** ターンが終われば、この配列ごと消える。
 ///
 /// | 足さない理由 | 中身 |
 /// |---|---|
-/// | 残す必要が無い | 往復が終われば生の戻り値は落ちて `読んだ: notes.md（…）` に置き換わる |
+/// | 残す必要が無い | **ターンの中では**生の戻り値が落ちて `読んだ: notes.md（…）` に置き換わる（`.demotableToolResult` / 16.3節 第2段） |
 /// | 代金が高い | `MessageRole` を増やすと `messages.role` の CHECK 制約（`SophiaMigrations.swift`）と `StoreSchemaTests` に波及する。**移行を1つ増やすことになる** |
 /// | 得るものが無い | `Chunk` の流れは途切れないので FR-17 と既存 UI はそのまま生きる |
+///
+/// > **【事実の訂正 / 2026-08-19】ここには「履歴に残るのは栞1行である」と書いてあった。
+/// > 書いていたが、置く者がいなかった。**
+/// > `ChatViewModel.engineMessages()` は毎ターン `turns`（UI の記録）から組み直すので、
+/// > **ツールの往復はターンの終わりに痕跡ごと消える** ── 栞も残らない。
+/// > いま栞へ落ちるのは**このループの中だけ**である（`MLXEngine.compacted(_:budget:counter:)`）。
+/// > ターンをまたいで栞を残すかどうかは未決で、実装するなら置き場は
+/// > `ChatViewModel`（`ContextEntry` / `ToolResult.contextEntry` が既にその形をしている）。
 ///
 /// # なぜ `[Chat.Message]` を直接持ち回らないのか
 ///
@@ -2026,6 +2181,26 @@ enum RoundTripMessage: Sendable, Equatable {
     /// 連続する tool メッセージは、テンプレートが**1つの user ターンにまとめて**描く。
     /// だから1周で複数のツールを呼ばれても、素直に並べてよい。
     case toolResult(text: String, id: String?, name: String)
+
+    /// **落とせるツールの戻り値**（DESIGN.md 第16.3節 第2段）。
+    ///
+    /// `.toolResult` と役は同じで、**姿を2つ持っている**点だけが違う ──
+    /// 生の中身（`text`）と、中身を落としたあとに残す栞（`bookmark`）である。
+    /// どちらを送るかは周ごとに `MLXEngine.compacted(_:budget:counter:)` が決める。
+    ///
+    /// | どちらが入るか | 何が来たか |
+    /// |---|---|
+    /// | `.demotableToolResult` | 中身のある結果（`read_file` / `list_directory` / `search_files`） |
+    /// | `.toolResult` | **失敗の文**（読めなかった・名前が違う・上限に達した） |
+    ///
+    /// **失敗の文を落とせる側に入れないこと**（`ToolResult.contextEntry` と同じ判断）。
+    /// あれは1行しかなく、しかも「そのパスは無い」を忘れたモデルは
+    /// 次の周で同じパスをまた書く ── 16.8節「往復を1回で打ち切らない」の材料である。
+    ///
+    /// **`id` と `name` は落としても持ち続ける。** 落とすのは中身だけであって、
+    /// `<tool_call>` と `<tool_response>` の対応づけではない ──
+    /// 切ると、モデルから見て「誰が何を訊いたのか分からない返事」に戻る（16.1節）。
+    case demotableToolResult(text: String, bookmark: String, id: String?, name: String)
 }
 
 /// 生成ストリームの1項目の行き先（`MLXEngine.route(_:toolsWereSent:)` の戻り値）。

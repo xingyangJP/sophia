@@ -18,7 +18,11 @@ final class StoreSchemaTests: StoreTestCase {
 
         XCTAssertEqual(
             tables,
-            ["conversations", "messages", "model_files", "models", "profiles"],
+            [
+            "adapter_generations", "conversations", "messages", "model_files",
+            "models", "profiles", "user_trait_bakes", "user_trait_revisions",
+            "user_traits",
+        ],
             "第8章（+8.2節）が定めた5枚以外のテーブルができている、または足りない"
         )
     }

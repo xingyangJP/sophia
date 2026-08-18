@@ -452,3 +452,129 @@ lora:
 	rm -f "$$RUN"
 	@echo "計測ログ: $(LORA_LOG)"
 	@echo "読む順: [LORA-PLAN] → [LORA-APPLY]（adapted_modules が 0 でないこと）→ [LORA-CFG] → [LORA-EST]"
+
+# --- 何件の学習データで様式が乗るかを測る（DESIGN 14.10節 / 14.16節 ⑦）------
+# **設計の中に残った食い違いを1つ潰すための計測である。**
+#
+#   | 出所 | 主張 |
+#   |---|---|
+#   | 10.5節   | LoRA で意味のある差を出すには **数千件** |
+#   | 第14章   | 質問30問と訂正の蓄積 ＝ **数十〜数百件** |
+#
+# **どちらが正しいかで第14章が成立するかどうかが変わる。**
+# 初回の質問で集められるのはせいぜい数十件であり、**数千件が要るなら質問だけでは足りない。**
+# 資源の側は 14.13a節で決着済み（16GB で 8B 本体でも回る）。残るのは件数だけである。
+#
+# ## 何をするか
+#
+# **「自明な様式」を的にして、20 / 50 / 100 件で立ち上がりを見る。**
+# 的は「答えの全行を `- ` で始める」── 見れば分かり、機械で数えられ、素の出力とは形が違う。
+# **学習前（陰性対照）と、指示文を足した場合（陽性対照）を必ず先に測る。**
+# 学習前に通ってしまう規則なら何も測れていないので、**掃引に入る前に落とす。**
+#
+# `lora` と同じく `.xctestrun` 経由で環境変数を渡す（`TEST_RUNNER_` はこの構成では効かない）。
+# **`SOPHIA_ENGINE=stub` を必ず入れる。** 入れないとホストアプリがモデルをもう1つ読み、
+# 測定値がちょうど2倍になる。効いているかは `[LORASIZE-PRE] suspect_double_load=` で見る。
+#
+# `.xctestrun` の名前を `lorasizeprobe.xctestrun` にしてあるのは、
+# **既存の各ターゲットの `find ... ! -name '*probe.xctestrun'` に自動で引っかかるため**である
+# （途中で殺されて残っても、`lora` / `toolprobe` / `tooltokens` / `toolbreakdown` が
+# これを SRC として拾わない）。名前を変えるときはこの点を確かめること。
+#
+# ## 打つ順序
+#
+#   make probe-build              # 1回だけ。計測のたびにビルドしない（条件が揃わなくなる）
+#   （別窓で） make probe-watch    # 系全体の数字。**これ無しで結論を出さない**
+#   make lorasize
+#
+# ## まず配管だけ通したいとき（**1時間を賭ける前に**）
+#
+#   make lorasize LORASIZE_N=20 LORASIZE_EPOCHS=1 LORASIZE_SEEDS=1 LORASIZE_MAXTOK=120
+#
+# 数分で終わり、`[LORASIZE-RULE] ok=1` →`[LORASIZE-APPLY] adapted_modules≠0` →
+# `[LORASIZE-COND] ok=1` まで通ることを確かめられる。**そこが通ってから本番を回す。**
+# 0.6B で更に軽くしたいなら `LORASIZE_MODEL=mlx-community/Qwen3-0.6B-4bit` を足す
+# （ローカルに無ければ測らずにスキップする。取得は計測に混ぜない）。
+#
+# ## 2周目に必ず回すこと ── **交絡の切り分け**
+#
+# `LoRABatchIterator` はデータを無限に周回するので、**ステップ数は件数と独立に決まる。**
+# 既定（周回数を固定）では、件数が増えるとステップ数も増える ＝ **2つの効果が混ざっている。**
+#
+#   make lorasize LORASIZE_ITERS=200      # ステップ数を固定して、件数の効果だけを見る
+#
+# `[LORASIZE-CURVE] confounded=` が 1 なら混ざったまま、0 なら分けて測った回である。
+LORASIZE_N          ?= 20,50,100
+LORASIZE_EPOCHS     ?= 4
+LORASIZE_ITERS      ?= 0
+LORASIZE_LAYERS     ?= 16
+LORASIZE_RANK       ?= 8
+LORASIZE_BATCH      ?= 1
+LORASIZE_LR         ?= 1e-5
+LORASIZE_KEYS       ?=
+LORASIZE_SEEDS      ?= 2
+LORASIZE_MAXTOK     ?= 220
+LORASIZE_TEMP       ?= 0.7
+LORASIZE_THINK      ?= 0
+LORASIZE_REPORT     ?= 10
+LORASIZE_MODEL      ?=
+LORASIZE_LABEL      ?=
+LORASIZE_LOG        ?= logs/lora-sample-size.log
+
+.PHONY: lorasize
+
+lorasize:
+	@mkdir -p logs
+	@if [ -n "$$(pgrep -x Sophia)" ]; then \
+		echo "Sophia が起動している。**先に落とすこと**: pkill -x Sophia"; \
+		echo "（4.4GB を持つプロセスが2つ居ると、測るのは学習の費用ではなくメモリ争奪になる）"; \
+		exit 1; \
+	fi
+	@echo "**重い。** 既定（20/50/100 × 4周）で1時間前後かかる見込み。"
+	@echo "実測に基づく残り時間は [LORASIZE-ETA] 行に出る。まず配管だけ通すなら:"
+	@echo "  make lorasize LORASIZE_N=20 LORASIZE_EPOCHS=1 LORASIZE_SEEDS=1 LORASIZE_MAXTOK=120"
+	@SRC=$$(find $(XC_DERIVED)/Build/Products -name '*.xctestrun' ! -name '*probe.xctestrun' ! -name 'tooltokens.xctestrun' ! -name 'breakdown.xctestrun' | head -1); \
+	if [ -z "$$SRC" ]; then echo "先に make probe-build を実行すること"; exit 1; fi; \
+	RUN=$$(dirname "$$SRC")/lorasizeprobe.xctestrun; rm -f "$$RUN"; cp "$$SRC" "$$RUN"; \
+	ENV_PATH=:TestConfigurations:0:TestTargets:0:EnvironmentVariables; \
+	for kv in SOPHIA_LORASIZE=1 SOPHIA_ENGINE=stub \
+	          SOPHIA_LORASIZE_N=$(LORASIZE_N) \
+	          SOPHIA_LORASIZE_EPOCHS=$(LORASIZE_EPOCHS) \
+	          SOPHIA_LORASIZE_ITERS=$(LORASIZE_ITERS) \
+	          SOPHIA_LORASIZE_LAYERS=$(LORASIZE_LAYERS) \
+	          SOPHIA_LORASIZE_RANK=$(LORASIZE_RANK) \
+	          SOPHIA_LORASIZE_BATCH=$(LORASIZE_BATCH) \
+	          SOPHIA_LORASIZE_LR=$(LORASIZE_LR) \
+	          SOPHIA_LORASIZE_KEYS=$(LORASIZE_KEYS) \
+	          SOPHIA_LORASIZE_SEEDS=$(LORASIZE_SEEDS) \
+	          SOPHIA_LORASIZE_MAXTOK=$(LORASIZE_MAXTOK) \
+	          SOPHIA_LORASIZE_TEMP=$(LORASIZE_TEMP) \
+	          SOPHIA_LORASIZE_THINK=$(LORASIZE_THINK) \
+	          SOPHIA_LORASIZE_REPORT=$(LORASIZE_REPORT) \
+	          SOPHIA_LORASIZE_MODEL=$(LORASIZE_MODEL) \
+	          SOPHIA_LORASIZE_LABEL=$(LORASIZE_LABEL); do \
+		k=$${kv%%=*}; v=$${kv#*=}; \
+		/usr/libexec/PlistBuddy -c "Add $$ENV_PATH:$$k string $$v" "$$RUN" >/dev/null 2>&1 \
+			|| /usr/libexec/PlistBuddy -c "Set $$ENV_PATH:$$k $$v" "$$RUN"; \
+	done; \
+	printf '=== %s n=%s epochs=%s iters=%s layers=%s rank=%s seeds=%s maxtok=%s label=%s ===\n' \
+		"$$(date '+%F %T')" "$(LORASIZE_N)" "$(LORASIZE_EPOCHS)" "$(LORASIZE_ITERS)" \
+		"$(LORASIZE_LAYERS)" "$(LORASIZE_RANK)" "$(LORASIZE_SEEDS)" "$(LORASIZE_MAXTOK)" \
+		"$(LORASIZE_LABEL)" >> $(LORASIZE_LOG); \
+	sysctl -n vm.swapusage >> $(LORASIZE_LOG); \
+	vm_stat | grep -E 'Pages free|occupied by compressor' >> $(LORASIZE_LOG); \
+	xcodebuild test-without-building -xctestrun "$$RUN" -destination '$(XC_DEST)' \
+		-only-testing:SophiaTests/LoRASampleSizeTests \
+		2>&1 | tee -a $(LORASIZE_LOG) | grep -E '^\[LORASIZE|Executed|error:|\*\* TEST' || true; \
+	sysctl -n vm.swapusage >> $(LORASIZE_LOG); \
+	vm_stat | grep -E 'Pages free|occupied by compressor' >> $(LORASIZE_LOG); \
+	rm -f "$$RUN"
+	@echo "計測ログ: $(LORASIZE_LOG)"
+	@echo "  （学習データと出力の全文はログにだけ入る。端末には [LORASIZE...] 行しか出ない）"
+	@echo "読む順:"
+	@echo "  1. [LORASIZE-RULE]  ok=1 か（判定規則が対象を測っているか）"
+	@echo "  2. [LORASIZE-COND]  id=n0-plain の pass_rate（学習前。低いほど計測が成立している）"
+	@echo "  3. [LORASIZE-COND]  id=n0-instructed の pass_rate（天井）"
+	@echo "  4. [LORASIZE-COND]  各 n の loss_moved=1 / trusted=1 を確認してから pass_rate を読む"
+	@echo "  5. [LORASIZE-CURVE] **結論。** rises_at が答え。confounded= も必ず見ること"
+	@echo "  疑わしいときは [LORASIZE-OUT-BEGIN]〜[LORASIZE-OUT-END] の全文を読むこと"
