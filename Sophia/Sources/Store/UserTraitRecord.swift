@@ -145,6 +145,34 @@ enum UserTraitDefaults {
     /// **【未確認】0.1 にも裏付けは無い。** 意味を持つのは
     /// 「`onboarding` の 0.5 が閾値 0.7 に届くまでに2回かかる」という回数のほうである。
     static let reinforcementStep: Double = 0.1
+
+    /// 確信度を歩幅ぶん上げて、**0.0…1.0 に収める。**
+    ///
+    /// ## `min(1.0, confidence + step)` と書いてはいけない
+    ///
+    /// Swift の `min(_:_:)` は **`y < x ? y : x`** である。
+    /// `y` が NaN なら比較が必ず false になり、**`x`（＝1.0）がそのまま返る。**
+    /// 頭打ちのつもりの `min` が、**NaN を最大値へ昇格させる装置**になる ──
+    /// 1.0 は関門（`trainingConfidenceThreshold` = 0.7）の上なので、
+    /// **その像は一撃で学習データに入り、履歴にも「確信度 1.0」の版が残る**（NFR-12 が嘘をつく）。
+    ///
+    /// **したがって NaN / ±∞ は `min` / `max` へ渡す前に落とす。**
+    /// 有限でない歩幅は歩幅ではないので、**確信度を1ミリも動かさない。**
+    /// 例外にしていないのは、`reinforceTrait` が
+    /// **強化のたびに落ちうる関数**になるのを避けるためである（頭打ちを制約で受けないのと同じ理由）。
+    ///
+    /// > **14.13c節（2026-08-19 の決定）を壊さないこと。**
+    /// > 意味を持つのは閾値との**大小**だけであり、`onboarding`（0.5）が
+    /// > 関門（0.7）に届かないという順序がここで崩れてはならない。
+    /// > 歩幅の異常値を「上へ」丸めると、質問だけで焼かれる像ができてしまう。
+    static func reinforced(_ confidence: Double, by step: Double) -> Double {
+        // 現在値そのものが有限でないことは DB の CHECK と NOT NULL が防いでいるが、
+        // **防いでいる側を当てにして NaN を min へ渡さない。**
+        guard confidence.isFinite else { return 0.0 }
+        let floored = Swift.min(1.0, Swift.max(0.0, confidence))
+        guard step.isFinite else { return floored }
+        return Swift.min(1.0, Swift.max(0.0, floored + step))
+    }
 }
 
 // MARK: - user_traits

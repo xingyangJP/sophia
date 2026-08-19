@@ -109,21 +109,12 @@ final class AdversarialTraitsStoreTests: StoreTestCase {
             after?.adapterGen, 1,
             "前提が崩れている: 手で置き場所を書いたら世代まで消えた")
 
-        XCTExpectFailure(
+        XCTAssertEqual(
+            after?.placement, .translating,
             """
-            既知の欠陥: `setTraitPlacement` は `translating` を**書く**ことしか禁じていない。
-            焼き込み済みの像を手で `stored` に落とすと、
-            `statementsInActiveAdapter`（重みに入っている）と `placement`（貯めているだけ）が
-            食い違ったまま残る。禁じるべきは「導出値を手で書くこと」であって、値の向きではない。
-            """
-        ) {
-            XCTAssertEqual(
-                after?.placement, .translating,
-                """
-                重みに入っている像の置き場所が \(after?.placement.rawValue ?? "nil") になっている。
-                `adapter_gen` は \(String(describing: after?.adapterGen)) のままである。
-                """)
-        }
+            重みに入っている像の置き場所が \(after?.placement.rawValue ?? "nil") になっている。
+            `adapter_gen` は \(String(describing: after?.adapterGen)) のままである。
+            """)
     }
 
     /// **しかも、次の再計算では直らない。**
@@ -151,17 +142,9 @@ final class AdversarialTraitsStoreTests: StoreTestCase {
         let inWeights = try await store.statementsInActiveAdapter()
         XCTAssertEqual(inWeights.count, 1, "前提が崩れている: v1 が有効なままであること")
 
-        XCTExpectFailure(
-            """
-            既知の欠陥: 導出値の再計算が、手で壊された行を直せない。
-            `WHERE adapter_gen IS NOT (…) OR (placement = 'translating' AND NOT EXISTS (…))` の
-            どちらにも当たらないため、矛盾した行だけが素通りする。
-            """
-        ) {
-            XCTAssertEqual(
-                after?.placement, .translating,
-                "再計算を通しても \(after?.placement.rawValue ?? "nil") のままである")
-        }
+        XCTAssertEqual(
+            after?.placement, .translating,
+            "再計算を通しても \(after?.placement.rawValue ?? "nil") のままである")
     }
 
     /// **「次の反映を待っている件数」が、既に反映済みの像を数える。**
@@ -187,11 +170,9 @@ final class AdversarialTraitsStoreTests: StoreTestCase {
         let inWeights = try await store.statementsInActiveAdapter().count
         XCTAssertEqual(inWeights, 1, "前提が崩れている: 重みには入ったままであること")
 
-        XCTExpectFailure("既知の欠陥: 重みに入っている像が『反映を待っている』件数に数えられる（同じ像が両方に1件ずつ立つ）。") {
-            XCTAssertEqual(
-                waiting, 0,
-                "重みに入っている1件を『待っている』と数えている（待ち \(waiting) / 重み \(inWeights)）")
-        }
+        XCTAssertEqual(
+            waiting, 0,
+            "重みに入っている1件を『待っている』と数えている（待ち \(waiting) / 重み \(inWeights)）")
     }
 
     /// **存在しない像の置き場所を書いても、成功したように見える。**
@@ -214,11 +195,7 @@ final class AdversarialTraitsStoreTests: StoreTestCase {
             refused = true
         }
 
-        XCTExpectFailure(
-            "既知の欠陥: 存在しない id への `setTraitPlacement` が成功する（`reviseTrait` / `reinforceTrait` は `traitNotFound` を投げる）。"
-        ) {
-            XCTAssertTrue(refused, "存在しない像の置き場所を書けてしまっている（UPDATE が0行に当たっただけ）")
-        }
+        XCTAssertTrue(refused, "存在しない像の置き場所を書けてしまっている（UPDATE が0行に当たっただけ）")
 
         // **消す側も同じ形をしている**（こちらは印を付けていない ──
         // 「0件消えた」は答えとして成立しており、戻り値で見分けがつく）。
@@ -257,17 +234,9 @@ final class AdversarialTraitsStoreTests: StoreTestCase {
         XCTAssertTrue(
             inTranslator.isEmpty, "前提が崩れている: 翻訳役には1件も焼いていない")
 
-        XCTExpectFailure(
-            """
-            既知の欠陥: `recalculateTraitPlacements` の副問い合わせに `g.adapter` の条件が無い。
-            本体アダプタに焼いただけの像が `translating`（翻訳役の重みに入った）になり、
-            アダプタで絞っている `statementsInActiveAdapter(.translator)` と食い違う。
-            """
-        ) {
-            XCTAssertNotEqual(
-                after?.placement, .translating,
-                "翻訳役には入っていない像が translating を名乗っている")
-        }
+        XCTAssertNotEqual(
+            after?.placement, .translating,
+            "翻訳役には入っていない像が translating を名乗っている")
     }
 
     /// **世代番号が、もう一方のアダプタの番号に化ける。**
@@ -294,17 +263,9 @@ final class AdversarialTraitsStoreTests: StoreTestCase {
         XCTAssertEqual(activeTranslator?.generation, 1, "前提が崩れている: 翻訳役 v1 が有効でない")
         XCTAssertEqual(activeBase?.generation, 7, "前提が崩れている: 本体 v7 が有効でない")
 
-        XCTExpectFailure(
-            """
-            既知の欠陥: `adapter_gen` はアダプタを持たない1本の列で、再計算は
-            両アダプタを混ぜた `MAX(generation)` を入れる。翻訳役 v1 の像が v7 を指す。
-            列を1本のままにするなら、少なくとも翻訳役だけを見るべきである。
-            """
-        ) {
-            XCTAssertEqual(
-                after?.adapterGen, 1,
-                "翻訳役 v1 に入っている像が v\(String(describing: after?.adapterGen)) を指している")
-        }
+        XCTAssertEqual(
+            after?.adapterGen, 1,
+            "翻訳役 v1 に入っている像が v\(String(describing: after?.adapterGen)) を指している")
     }
 
     // =========================================================================
@@ -332,21 +293,12 @@ final class AdversarialTraitsStoreTests: StoreTestCase {
         let after = try await store.trait(id: trait.id)
         let ready = try await store.traitsForTraining()
 
-        XCTExpectFailure(
+        XCTAssertNotEqual(
+            raised, 1.0,
             """
-            既知の欠陥: NaN の歩幅が `min(1.0, …)` を素通りして 1.0 になる
-            （Swift の `min` は `y < x ? y : x` で、NaN との比較は必ず false）。
-            確信度は関門を一撃で越え、履歴にも 1.0 の版が残る。
-            NaN は拒むか、`isFinite` を確かめてから足すこと。
-            """
-        ) {
-            XCTAssertNotEqual(
-                raised, 1.0,
-                """
-                NaN の歩幅で確信度が最大になった（戻り値 \(raised) / 保存後 \(after?.confidence ?? -1)）。
-                学習データに入った件数: \(ready.count)
-                """)
-        }
+            NaN の歩幅で確信度が最大になった（戻り値 \(raised) / 保存後 \(after?.confidence ?? -1)）。
+            学習データに入った件数: \(ready.count)
+            """)
     }
 
     /// **関門の境界そのものを固定する。**
@@ -431,26 +383,37 @@ final class AdversarialTraitsStoreTests: StoreTestCase {
     ///
     /// **拒むか、そのまま保存するかのどちらかであるべきで、黙って変えてはいけない。**
     /// NUL は手では打てないが、モデルの出力・貼り付けたファイル片から来る。
-    func testAStatementContainingNULIsSilentlyTruncatedWhenStored() async throws {
+    /// > **2026-08-19 に直した。書き換えの理由を残す。**
+    /// >
+    /// > 旧名は `…IsSilentlyTruncatedWhenStored` で、**切り捨てを「前提」として
+    /// > 印の外で表明していた**（`XCTAssertEqual(returned.statement, statement)`）。
+    /// > **拒否・落とす・置換のどれを選んでもその本文は通らない** ──
+    /// > 印を外すだけでは済まず、表明ごと書き換える必要があった。
+    /// >
+    /// > **選んだのは拒否である。** 理由は「戻り値と保存された行が一致することを
+    /// > **構造で**保証できるのは拒否だけ」だから。落とす／置換は、
+    /// > 各書き込み経路で正規化を忘れた瞬間に再発する。
+    /// >
+    /// > **「長さを渡して保存する」は GRDB では成立しない**【確認済】──
+    /// > 書き込みが `sqlite3_bind_text(…, -1, …)` なだけでなく、
+    /// > **読み出しも `String(cString:)`** なので、入れられても同じ場所で切れる。
+    func testAStatementContainingNULIsRefusedInsteadOfSilentlyTruncated() async throws {
         let store = try makeInMemoryStore()
-        let statement = "前半\u{0000}後半"
 
-        let returned = try await store.recordTrait(
-            kind: .style, category: "tone", statement: statement, source: .manual)
-        let stored = try await store.trait(id: returned.id)
-
-        XCTAssertEqual(returned.statement, statement, "前提が崩れている: 戻り値は渡した文そのままである")
-
-        XCTExpectFailure(
-            """
-            既知の欠陥: NUL 以降が保存されない（GRDB は `sqlite3_bind_text(…, -1, …)` を使う）。
-            返ってきた記録と保存された行が食い違う。拒むか、長さを渡して保存すること。
-            """
-        ) {
-            XCTAssertEqual(
-                stored?.statement, statement,
-                "保存された文が切られている: \(stored?.statement ?? "nil")")
+        var thrown: Error?
+        do {
+            _ = try await store.recordTrait(
+                kind: .style, category: "tone", statement: "前半\u{0000}後半", source: .manual)
+        } catch {
+            thrown = error
         }
+
+        XCTAssertNotNil(thrown, "NUL 入りの文が黙って保存された")
+
+        // **拒んだのに行が残っていないこと。** 投げるだけ投げて書いていたら、
+        // 「保存されていない」と思っている利用者の DB に切られた文が残る。
+        let remaining = try await store.allTraits()
+        XCTAssertTrue(remaining.isEmpty, "拒んだのに行が残っている: \(remaining.count)件")
     }
 
     /// **NUL 以外は、そのまま戻る。**

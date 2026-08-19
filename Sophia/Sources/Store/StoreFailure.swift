@@ -103,6 +103,30 @@ enum StoreFailure {
         )
     }
 
+    /// **NUL を含む文字列を保存しようとした。**
+    ///
+    /// ## なぜ弾くのか
+    ///
+    /// GRDB は文字列を `sqlite3_bind_text(…, -1, …)` で束縛し、読むほうも
+    /// `String(cString:)` である。**長さを渡していないので、NUL 以降が黙って消える。**
+    /// 通すと `recordTrait` が返した記録と保存された行が食い違い、
+    /// **どちらが重みに焼かれたのかを後から言えなくなる**（NFR-12）。
+    ///
+    /// **黙って切るくらいなら書かせないほうがよい。**
+    /// 14.14節の `statement` は「**言語化された文**」であり、
+    /// 利用者の知らないところで別物になった文が重みへ入ると、**世代ごとしか戻せない**
+    /// （14.11節④）。NUL は手では打てず、モデルの出力か貼り付けたファイル片から来る。
+    static func textContainsNUL(field: String) -> SophiaError {
+        SophiaError(
+            code: .unknown,
+            message: "保存できない文字が含まれていました。",
+            hint: "貼り付けた内容に制御文字（NUL）が混ざっています。"
+                + "その部分を取り除いてから、もう一度保存してください。",
+            detail: "\(field) に U+0000 が含まれている。"
+                + "SQLite は NUL 以降を保存しないため、黙って切らずに拒否している"
+        )
+    }
+
     /// `localizedDescription` を使わないこと。
     /// `DatabaseError` は `LocalizedError` ではないため、
     /// 「The operation couldn't be completed.」という中身の無い文字列になる。

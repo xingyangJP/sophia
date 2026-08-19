@@ -124,21 +124,15 @@ final class AdversarialCompactionTests: XCTestCase {
             "前提が崩れている: 空のファイルの読み取りになっていない（\(outcome.responseText)）")
         XCTAssertFalse(outcome.isFailure, "前提が崩れている: 空のファイルは失敗ではない")
 
-        XCTExpectFailure(
+        // **2026-08-19 に直した（印を外した）。**
+        // `RoundTripItem.demotable(raw:bookmark:counter:)` が、落とした姿のほうが高い項目では
+        // **落とした姿を生の姿へ潰す**（`demotedText == rawText`）。
+        XCTAssertLessThanOrEqual(
+            counter(demoted), counter(item.rawText),
             """
-            既知の欠陥: 落としたほうが高くつく。栞（\(outcome.summaryLine.count)文字）に
-            断り書き（\(ContextTranscript.demotionNotice.count)文字）を足すと、
-            生の中身（\(outcome.responseText.count)文字）を超える。
-            `RoundTripItem.demotable` にも `fitRoundTrip` にも「落として得になるか」を見る行が無い。
-            """
-        ) {
-            XCTAssertLessThanOrEqual(
-                counter(demoted), counter(item.rawText),
-                """
-                落とした姿のほうが高い ── 生 \(counter(item.rawText)) / 落とした後 \(counter(demoted))。
-                縮約が費用を増やしている。
-                """)
-        }
+            落とした姿のほうが高い ── 生 \(counter(item.rawText)) / 落とした後 \(counter(demoted))。
+            縮約が費用を増やしている。
+            """)
     }
 
     /// **同じことが、出荷される道でそのまま起きる。**
@@ -172,16 +166,15 @@ final class AdversarialCompactionTests: XCTestCase {
         XCTAssertEqual(
             after.fit.demotedReads, 2, "前提が崩れている: 一番新しい1件を除いて落ちるはずである")
 
-        XCTExpectFailure(
-            "既知の欠陥: 縮約を通したほうが高い（空のファイルは栞のほうが長いため）。落とした件数だけを見ていると成功に見える。"
-        ) {
-            XCTAssertLessThanOrEqual(
-                after.fit.tokens, before.fit.tokens,
-                """
-                縮約が費用を増やしている ── 通す前 \(before.fit.tokens) / 通した後 \(after.fit.tokens)。
-                `demotedReads` は \(after.fit.demotedReads) を申告している。
-                """)
-        }
+        // **2026-08-19 に直した（印を外した）。**
+        // 落とした姿が生と同じになるので、**件数は出るが費用は1トークンも動かない** ──
+        // 「増えないこと」がここの表明である（減ったかどうかは `tokens` を見ること）。
+        XCTAssertLessThanOrEqual(
+            after.fit.tokens, before.fit.tokens,
+            """
+            縮約が費用を増やしている ── 通す前 \(before.fit.tokens) / 通した後 \(after.fit.tokens)。
+            `demotedReads` は \(after.fit.demotedReads) を申告している。
+            """)
     }
 
     // =========================================================================
@@ -234,20 +227,15 @@ final class AdversarialCompactionTests: XCTestCase {
 
         XCTAssertTrue(joined.contains("NEEDLE-C"), "前提が崩れている: 一番新しい1件は残るはずである")
 
-        XCTExpectFailure(
+        // **2026-08-19 に直した（印を外した）。**
+        // 守る単位が「一番新しい1件」から**周**になった
+        // （`RoundTripItem.startsRound` → `ContextTranscript.currentRoundIndices`）。
+        XCTAssertTrue(
+            joined.contains("NEEDLE-A"),
             """
-            既知の欠陥: 同じ周で頼まれた3件のうち2件が、モデルが一度も見ないまま栞へ落ちる。
-            守られるのは `demotable.last` の1件だけで、「同じ周か」は見ていない。
-            往復の回数は既に消費済みなので、読み直すこともできない。
-            """
-        ) {
-            XCTAssertTrue(
-                joined.contains("NEEDLE-A"),
-                """
-                この周に読んだばかりの a.log の中身が、答える前に消えている
-                （落ちた件数: \(compacted.fit.demotedReads)）。
-                """)
-        }
+            この周に読んだばかりの a.log の中身が、答える前に消えている
+            （落ちた件数: \(compacted.fit.demotedReads)）。
+            """)
     }
 
     // =========================================================================

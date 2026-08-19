@@ -44,6 +44,18 @@ import XCTest
 //  2. **数え方は概算である。** 実トークナイザとの比は 1.47倍（発見19）。
 //     「予算に収まった」は、ここが全部緑でも【未確認】のままである。
 //     確かめる道は `TokenCounter.exact` を挿すこと（第15章の宿題）。
+//
+//  # 2026-08-19: **緑だったが測れていなかった3点を直した**
+//
+//  検証役（`AdversarialCompactionTests`）の指摘である。
+//
+//  | 何が測れていなかったか | どう直したか |
+//  |---|---|
+//  | 本命（6件読んだターン）が **`fits` を一度も見ていなかった。** 前書きは「2,160 対 573」を根拠に縮約の必要を説いているのに、表明は件数と半減しか見ていない | `fits` を見るようにした。**実際には収まっていない**（③）ので、そこも数字で残してある |
+//  | `perMessageOverhead` の口を `fitRoundTrip` に直接当てていた。**出荷経路（`MLXEngine.compacted`）にはその口が無く**、渡されない引数の振る舞いを固定していた | `compacted` に口を開け、そちらから叩くようにした（`performChat` はまだ渡していない ── 【未確認】） |
+//  | 道具の `read(path:needle:)` が「実行役が通るのと同じ道」と書きながら `clip(_:path:)`（全文の入口）を通っていた。**実行役が通るのは `clip(windowed:)`** で、1手ずれていた | 読み手が返す窓の形を写して `clip(windowed:)` を通すようにした |
+//
+//  **「落ちないこと」ではなく「正しい値か」。緑は、測れていることを意味しない。**
 // =============================================================================
 
 final class TranscriptCompactionTests: XCTestCase {
@@ -130,18 +142,80 @@ final class TranscriptCompactionTests: XCTestCase {
         XCTAssertGreaterThan(fit.tokens, fit.budget)
     }
 
+    /// **落として高くつく項目は、落とさないこと**（①。縮約の目的は費用であって件数ではない）。
+    ///
+    /// 空のファイルの読み取りがその形である ──
+    ///
+    /// | | 概算 |
+    /// |---|--:|
+    /// | 生 `[ファイル placeholder.md / 空のファイル（0行 / 0バイト）]` | **19** |
+    /// | 栞＋断り書き | **24** |
+    ///
+    /// 落とせば**縮約が費用を増やす。** しかも `demotedReads` は件数を申告するので、
+    /// `[TOOL] compacted demoted=2` の行だけを見ていると成功したように見える。
+    ///
+    /// **数字は写していない** ── 実物どうしを比べている
+    /// （`ContextWindow.clip(windowed:)` → `ToolResult` → 実行役の戻り値）。
+    func testAnItemThatWouldCostMoreWhenDemotedKeepsItsContent() {
+        let outcome = Self.emptyRead(path: "placeholder.md")
+        let item = ContextTranscript.RoundTripItem.demotable(
+            raw: outcome.responseText, bookmark: outcome.summaryLine)
+        let counter = TokenCounter.estimate
+
+        // **前提: これは「落とすと高くつく」材料である。**
+        // 崩れていたら、この試験は別のものを測っている。
+        XCTAssertTrue(outcome.responseText.contains("空のファイル"), "前提が崩れている: 空の読み取りでない")
+        XCTAssertGreaterThan(
+            counter(outcome.summaryLine + "\n" + ContextTranscript.demotionNotice),
+            counter(outcome.responseText),
+            "前提が崩れている: 栞＋断り書きのほうが安い材料になっている")
+
+        XCTAssertEqual(
+            item.demotedText, item.rawText,
+            "落とす価値が無い項目は、落とした姿を生の姿へ潰すこと")
+
+        let items: [ContextTranscript.RoundTripItem] = [.fixed("2つとも空か見て"), item, item]
+        let untouched = ContextTranscript.fitRoundTrip(items, budget: .max)
+        let squeezed = ContextTranscript.fitRoundTrip(items, budget: 1)
+
+        XCTAssertEqual(untouched.demotedReads, 0, "前提が崩れている: 上限が無いのに落としている")
+        XCTAssertLessThanOrEqual(
+            squeezed.tokens, untouched.tokens,
+            """
+            縮約が費用を増やしている ── 通す前 \(untouched.tokens) / 通した後 \(squeezed.tokens)。
+            落とした件数は \(squeezed.demotedReads)。
+            """)
+        XCTAssertEqual(squeezed.texts, untouched.texts, "1トークンも減らないのに中身だけ消えている")
+    }
+
     /// **落としたことを、栞のあとに文として書くこと**（16.3節「切ったら必ず言う」）。
     ///
     /// 栞は `<tool_response>` の中に入る ── モデルから見れば
     /// 「`read_file` がこれだけ返してきた」ようにしか見えない。
     /// 第1段（`ReadOutcome.clipNotice`）が同じ判断を先にしている:
     /// **範囲の表記は数字であって主張ではない。**
+    ///
+    /// > **本文を大きくしてある**（2026-08-19）。元は `本文がここにある`（8文字）で、
+    /// > 栞＋断り書き（45文字・概算24）のほうが**3倍以上高かった** ──
+    /// > つまり元の材料は「落とすと費用が増える」当のもの（①）だった。
+    /// > いまは落として安くなるものだけが落ちるので、そのままでは1件も落ちない。
+    /// > **数え方も明示して渡す** ── 作るときと測るときで数え方が違うと、
+    /// > 「得になる」の判定と予算の判定が別々の物差しになる。
     func testTheDemotedTextSaysThatTheContentWasDropped() {
         let bookmark = "読んだ: notes.md（全412行のうち 1-80行）"
+        let body = String(repeating: "本文がここにある。", count: 10)
         let items: [ContextTranscript.RoundTripItem] = [
-            .demotable(raw: "本文がここにある", bookmark: bookmark),
-            .demotable(raw: "新しいほう", bookmark: "読んだ: b.md（全1行すべて）"),
+            .demotable(raw: body, bookmark: bookmark, counter: .oneCharacterOneToken),
+            .demotable(
+                raw: "新しいほう", bookmark: "読んだ: b.md（全1行すべて）",
+                counter: .oneCharacterOneToken),
         ]
+
+        // **前提: 落とせば安くなる材料であること。**
+        // 崩れていれば①の規則で1件も落ちず、下の表明は何も見ないまま緑になる。
+        XCTAssertGreaterThan(
+            body.count, (bookmark + "\n" + ContextTranscript.demotionNotice).count,
+            "前提が崩れている: 落としても安くならない材料である")
 
         let fit = ContextTranscript.fitRoundTrip(items, budget: 1, counter: .oneCharacterOneToken)
 
@@ -165,16 +239,30 @@ final class TranscriptCompactionTests: XCTestCase {
 
     /// テンプレートの固定分は**まだ測っていない**ので既定 0。
     /// 入れられる口があること自体を固定しておく（`fit` と同じ規律）。
-    func testPerMessageOverheadIsAccountedWhenProvided() {
-        let items: [ContextTranscript.RoundTripItem] = [.fixed("abc"), .fixed("de")]
+    ///
+    /// ## **叩く先を出荷経路へ移した**（2026-08-19。ここは何も測れていなかった）
+    ///
+    /// 元は `ContextTranscript.fitRoundTrip` を直接呼んでいた。ところが
+    /// **`MLXEngine.compacted` にはこの引数を渡す口が無く**、往復のループが通るのは
+    /// あくまで `compacted` である ── つまりこの試験は
+    /// **出荷経路が決して使わない引数の振る舞いを固定していた。**
+    /// 口を `compacted` にも開け、こちらから叩くようにした。
+    ///
+    /// > **【未確認】まだ届いていない一手。** `performChat` は `compacted` に
+    /// > `perMessageOverhead` を渡していない（既定 0 のまま）。
+    /// > 渡す値が無いからである ── テンプレートの固定分は
+    /// > 実トークナイザでしか測れない（第15章の宿題 / `TokenCounter.exact`）。
+    /// > **口が開いたことと、実際に払っている分を数えていることは、まだ別である。**
+    func testPerMessageOverheadIsAccountedThroughTheShippingEntryPoint() {
+        let transcript: [RoundTripMessage] = [.user("abc"), .assistant("de", toolCalls: [])]
 
-        let bare = ContextTranscript.fitRoundTrip(
-            items, budget: 1_000, counter: .oneCharacterOneToken)
-        let withOverhead = ContextTranscript.fitRoundTrip(
-            items, budget: 1_000, counter: .oneCharacterOneToken, perMessageOverhead: 5)
+        let bare = MLXEngine.compacted(
+            transcript, budget: 1_000, counter: .oneCharacterOneToken)
+        let withOverhead = MLXEngine.compacted(
+            transcript, budget: 1_000, counter: .oneCharacterOneToken, perMessageOverhead: 5)
 
-        XCTAssertEqual(bare.tokens, 5)
-        XCTAssertEqual(withOverhead.tokens, 5 + 5 * 2)
+        XCTAssertEqual(bare.fit.tokens, 5)
+        XCTAssertEqual(withOverhead.fit.tokens, 5 + 5 * 2, "1発言あたり5を、発言の数だけ足すこと")
     }
 
     // =========================================================================
@@ -221,6 +309,36 @@ final class TranscriptCompactionTests: XCTestCase {
             compacted.messages.count, transcript.count,
             "件数を変えないこと ── 減らすと `<tool_call>` と `<tool_response>` の対が崩れる")
 
+        // --- **収まったのか**（2026-08-19 に足した。ここを一度も見ていなかった）-------
+        //
+        // 章の前書きは「2,160 対 573」を根拠に縮約の必要を説いているのに、
+        // 表明は件数と半減しか見ていなかった。**件数は手段であって目的ではない。**
+        // 目的は予算に収めることで、それは `fits` にしか出ない。
+        //
+        // そして**いまは収まらない**（③ / 申し送り）。欠陥ではなく配分表の算数である ──
+        // 一番新しい読み取り（`InputBudget.singleRead` = 360・概算実測 353）と
+        // 自己認識（同 97）と栞5件（同 25 × 5）が、取り分 573 に同居できない。
+        // **この層はこれ以上減らせない** ── 超過は `contextLength`（8,192）まで素通りする。
+        XCTAssertGreaterThan(
+            compacted.fit.tokens, compacted.fit.budget,
+            "落とし切っても超えることが、この試験の測っている事実である")
+        XCTAssertFalse(
+            compacted.fit.fits,
+            """
+            収まるようになった（\(compacted.fit.tokens) / \(compacted.fit.budget)）。
+            配分表か断り書きの費用が動いたということである。
+            **③の申し送りを閉じ、この2行を「収まること」の表明へ反転させること。**
+            """)
+        // 収まらないと言っている以上、**どれだけ超えたかを数字で残す。**
+        // 「収まらない」だけでは、次に見る者が近いのか遠いのかを判断できない。
+        XCTAssertLessThan(
+            compacted.fit.tokens - compacted.fit.budget, Budget.singleRead,
+            """
+            超過が読み取り1回分（\(Budget.singleRead)）を超えている
+            ── \(compacted.fit.tokens) / \(compacted.fit.budget)。
+            これは「あと少し」ではなく、配分表そのものが破れている状態である。
+            """)
+
         let joined = compacted.messages.map(Self.text(of:)).joined(separator: "\n")
         XCTAssertTrue(joined.contains("NEEDLE-6"), "一番新しい読み取りの中身が消えている")
         for index in 1...5 {
@@ -237,6 +355,75 @@ final class TranscriptCompactionTests: XCTestCase {
         XCTAssertEqual(
             Self.text(of: compacted.messages[compacted.messages.count - 1]),
             outcomes[5].responseText)
+    }
+
+    /// **同じ周で頼まれた戻り値は、1件も落とさないこと**（②）。
+    ///
+    /// `performChat` は1周の呼び出しを**全部並べる**（`assistant` の `tool_calls` は
+    /// 何個でも入り、その後ろに戻り値が並ぶ）。守るのが「一番新しい1件」だけだと、
+    /// **残りはモデルが一度も見ないまま次の周の頭で栞になる。**
+    /// 往復の回数（`FolderToolRunner.callLimit`）は呼んだ時点で消費済みなので、
+    /// **読み直すこともできない。**
+    func testEveryReadOfTheCurrentRoundSurvivesWhenThreeWereCalledInOneRound() {
+        let budget = Budget.transcript(armed: true)
+        let a = Self.read(path: "a.log", needle: "NEEDLE-A")
+        let b = Self.read(path: "b.log", needle: "NEEDLE-B")
+        let c = Self.read(path: "c.log", needle: "NEEDLE-C")
+
+        // **1周で3つ。** assistant の発言は1つで、`tool_calls` が3つ入る。
+        let transcript: [RoundTripMessage] = [
+            .user("a.log と b.log と c.log を見比べて"),
+            .assistant("", toolCalls: [a, b, c].map { Self.call(id: $0.callID) }),
+            MLXEngine.transcriptEntry(for: a),
+            MLXEngine.transcriptEntry(for: b),
+            MLXEngine.transcriptEntry(for: c),
+        ]
+
+        // **前提: 3件は予算を超えている。** 超えていなければ縮約は何も試されない。
+        let raw = MLXEngine.compacted(transcript, budget: .max)
+        XCTAssertGreaterThan(
+            raw.fit.tokens, budget,
+            "前提が崩れている ── 1周3件（\(raw.fit.tokens)）が予算（\(budget)）に収まっている")
+
+        let compacted = MLXEngine.compacted(transcript, budget: budget)
+        let joined = compacted.messages.map(Self.text(of:)).joined(separator: "\n")
+
+        XCTAssertEqual(compacted.fit.demotedReads, 0, "この周の材料を落としている")
+        for needle in ["NEEDLE-A", "NEEDLE-B", "NEEDLE-C"] {
+            XCTAssertTrue(joined.contains(needle), "\(needle) が答える前に消えている")
+        }
+        // **守った結果、収まらない。** それは事実として返す（③）── 隠さない。
+        XCTAssertFalse(compacted.fit.fits, "収まっていないのに収まったと言っている")
+    }
+
+    /// **前の周の戻り値は落ちること。**
+    ///
+    /// 守るのは「まだ見ていないもの」であって「ツールの戻り値すべて」ではない ──
+    /// 前の周のぶんは既に一度プロンプトに載っており、
+    /// **モデルはそれを見たうえで次の呼び出しを書いている。**
+    /// ここが崩れると②の修正は「何も落とさない縮約」に化ける。
+    func testReadsFromEarlierRoundsStillFallWhileTheCurrentRoundIsKept() {
+        let old = Self.read(path: "old.log", needle: "NEEDLE-OLD")
+        let newA = Self.read(path: "a.log", needle: "NEEDLE-A")
+        let newB = Self.read(path: "b.log", needle: "NEEDLE-B")
+
+        let transcript: [RoundTripMessage] = [
+            .user("見て"),
+            .assistant("", toolCalls: [Self.call(id: old.callID)]),
+            MLXEngine.transcriptEntry(for: old),
+            .assistant("", toolCalls: [newA, newB].map { Self.call(id: $0.callID) }),
+            MLXEngine.transcriptEntry(for: newA),
+            MLXEngine.transcriptEntry(for: newB),
+        ]
+
+        let compacted = MLXEngine.compacted(transcript, budget: Budget.transcript(armed: true))
+        let joined = compacted.messages.map(Self.text(of:)).joined(separator: "\n")
+
+        XCTAssertEqual(compacted.fit.demotedReads, 1, "落ちるのは前の周の1件だけである")
+        XCTAssertFalse(joined.contains("NEEDLE-OLD"), "前の周の中身が残っている")
+        XCTAssertTrue(joined.contains(old.summaryLine), "栞が残っていない")
+        XCTAssertTrue(joined.contains("NEEDLE-A"), "この周の材料が消えている")
+        XCTAssertTrue(joined.contains("NEEDLE-B"), "この周の材料が消えている")
     }
 
     /// **失敗の文は落とさないこと**（16.8節）。
@@ -360,10 +547,49 @@ final class TranscriptCompactionTests: XCTestCase {
     ///
     /// `needle` は**1行目**に置く。窓は先頭から取られるので、
     /// 生のまま送られていれば必ず本文に含まれ、栞には含まれない。
+    ///
+    /// ## **入口は `clip(windowed:)` である**（2026-08-19 に直した。1手ずれていた）
+    ///
+    /// ここは `clip(_:path:)`（**ファイル全文**を受ける入口）を呼んでいた。
+    /// **実行役が通るのはそちらではない** ── `FolderToolExecution.read` は
+    /// `FolderReader.readText` が返した**窓**を `clip(windowed:)` へ渡す。
+    /// 2つは総行数の出所が違い（数え直す／読み手から受け取る）、
+    /// 近道の効き方も違う（`clip(windowed:)` の但し書き「近道は一度も効かなかった」）。
+    /// **「実行役が通るのと同じ道」と書いてある試験が、実際には別の入口を通っていた。**
+    ///
+    /// 下では読み手の振る舞いを写してある ──
+    /// 行数の窓は `FolderReadLimits.lineLimit`、本文は読めた行を `\n` で**連結**したもの、
+    /// 総行数と総バイト数は**ファイル全体**の値。
+    ///
+    /// > **【未確認】ここが通していないもの:** 封じ込め（16.5節）・実際のファイルI/O・
+    /// > CRLF の落とし方。それらを通すのは `AdversarialCompactionTests` の1章と3章
+    /// > （本物の `FolderToolRunner` に実ファイルを読ませている）。
     private static func read(path: String, needle: String) -> ToolExecutionOutcome {
-        let source = ([needle] + (2...2_000).map { "line \($0): padding padding padding" })
-            .joined(separator: "\n")
-        let outcome = ContextWindow.clip(source, path: path, budget: .singleRead)
+        let lines = [needle] + (2...2_000).map { "line \($0): padding padding padding" }
+        let source = lines.joined(separator: "\n")
+        let window = lines.prefix(FolderReadLimits.lineLimit).joined(separator: "\n")
+
+        let outcome = ContextWindow.clip(
+            windowed: window,
+            path: path,
+            firstLine: 1,
+            totalLines: lines.count,
+            totalBytes: source.utf8.count,
+            budget: .singleRead)
+        return ToolResult
+            .content(outcome, tool: "read_file", isListing: false)
+            .executionOutcome(callID: "call-\(path)")
+    }
+
+    /// **空のファイルを読んだ1回ぶん**（①が使う）。
+    ///
+    /// 架空の入力ではない ── `touch` したもの、置いただけの `__init__.py`、
+    /// まだ何も書かれていないログ。**モデルは中身が空だと知るために一度読む。**
+    /// 読み手（`FolderReader`）は本文 `""`・総行数 0・総バイト数 0 を返す。
+    private static func emptyRead(path: String) -> ToolExecutionOutcome {
+        let outcome = ContextWindow.clip(
+            windowed: "", path: path, firstLine: 1, totalLines: 0, totalBytes: 0,
+            budget: .singleRead)
         return ToolResult
             .content(outcome, tool: "read_file", isListing: false)
             .executionOutcome(callID: "call-\(path)")

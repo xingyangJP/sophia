@@ -1491,10 +1491,15 @@ actor MLXEngine: InferenceEngine {
     /// | | |
     /// |---|---|
     /// | 落とす | `.demotableToolResult` の**古いものから**、収まるまで |
-    /// | 落とさない | 利用者・system・assistant の発言、失敗の文（`.toolResult`）、**一番新しい読み取り** |
+    /// | 落とさない | 利用者・system・assistant の発言、失敗の文（`.toolResult`）、**この周の読み取り** |
+    /// | 落とさない | **落として高くつくもの**（空のファイルの読み取りなど。`RoundTripItem.demotable`） |
     ///
-    /// **一番新しい読み取りを残すのは、それが「いま答えさせようとしている材料」だから**である
+    /// **この周の読み取りを残すのは、それが「いま答えさせようとしている材料」だから**である
     /// （`ContextTranscript.fitRoundTrip` の但し書き）。
+    /// **「一番新しい1件」ではない** ── `performChat` は1周の呼び出しを全部並べるので、
+    /// 1件しか守らないと、同じ周で頼まれた残りが**モデルに一度も見られないまま**栞になる。
+    /// 周の境目は `.assistant(_, toolCalls:)` が空でないことで決まり、
+    /// それを `RoundTripItem.startsRound` に写しているのが下の `map` である。
     ///
     /// # 数え方は概算である（**過少に出る**）
     ///
@@ -1505,31 +1510,58 @@ actor MLXEngine: InferenceEngine {
     /// 実トークナイザは1行下（`container.prepare` の `lmInput.text.tokens.count`）で
     /// 手に入るので、差し替えるならそこを `TokenCounter.exact` に包むこと（第15章の宿題）。
     ///
+    /// # 落とし切っても収まらない周がある（③・**未解決**）
+    ///
+    /// 実ファイルを6件読んだターンは、落とせるものを落とし切っても収まらない ──
+    /// **概算 597 / 予算 573**（`TranscriptCompactionTests` の本命がその状況である）。
+    /// 上の 1.47倍を掛ければ実測相当は 714 で、テンプレートの固定分と
+    /// `tool_calls` の JSON は**そこにまだ入っていない。**
+    ///
+    /// **ここでは何もしない。** `fits == false` を事実として返し、`[TOOL] compacted` に出す。
+    /// 握り潰さず、エラーにもしない ──
+    /// 「入力を短くしてください」は利用者に実行不可能な助言であり（発見19 ③）、
+    /// この周ぶんまで落とすのは②で直したばかりの欠陥に戻ることだからである。
+    /// **収める手は2つとも外にある**（次の読み取りの窓を狭める／配分表を見直す）。
+    ///
     /// **`static` にしてあるのはテストのため**である（`chatMessages(for:)` と同じ理由）。
     /// モデルもトークナイザも要らないので、`TranscriptCompactionTests` が
     /// 4.6GB を読まずに「何が落ちて何が残るか」を固定できる。
+    ///
+    /// - Parameter perMessageOverhead: 1発言あたりのチャットテンプレートの固定分。
+    ///   **既定 0 は「まだ測っていない」という意味である。**
+    ///   `<|im_start|>…<|im_end|>` のぶんが実際には毎回かかる。
+    ///   **`performChat` はまだ渡していない**（実トークナイザを挿すまで測れない。第15章の宿題）──
+    ///   口だけが先に開いている状態であることを承知しておくこと。
     nonisolated static func compacted(
         _ transcript: [RoundTripMessage],
         budget: Int,
-        counter: TokenCounter = .estimate
+        counter: TokenCounter = .estimate,
+        perMessageOverhead: Int = 0
     ) -> (messages: [RoundTripMessage], fit: ContextTranscript.RoundTripFit) {
 
         let items = transcript.map { message -> ContextTranscript.RoundTripItem in
             switch message {
             case .system(let text), .user(let text):
                 return .fixed(text)
-            case .assistant(let text, _):
+            case .assistant(let text, let toolCalls):
                 // **`tool_calls` の JSON は数えていない。** 数えるなら
                 // テンプレートが描く綴りそのものを組む必要があり、それは実測の側の仕事である。
-                return .fixed(text)
+                //
+                // **ただし「呼んだかどうか」は運ぶ。** ツールを呼んだ発言が周の頭であり、
+                // その後ろに並ぶ戻り値が**この周の材料**＝モデルがまだ見ていないものである（②）。
+                return .fixed(text, startsRound: !toolCalls.isEmpty)
             case .toolResult(let text, _, _):
                 return .fixed(text)
             case .demotableToolResult(let text, let bookmark, _, _):
-                return .demotable(raw: text, bookmark: bookmark)
+                // **数え方を渡すこと**（①）。落として得になるかを、
+                // 予算を測るのと**同じ数え方**で見る。既定に任せると、
+                // 実トークナイザを挿した日に「得の判定だけ概算のまま」が残る。
+                return .demotable(raw: text, bookmark: bookmark, counter: counter)
             }
         }
 
-        let fit = ContextTranscript.fitRoundTrip(items, budget: budget, counter: counter)
+        let fit = ContextTranscript.fitRoundTrip(
+            items, budget: budget, counter: counter, perMessageOverhead: perMessageOverhead)
 
         // **送るのは、いま測った当の文字列である**（`fit.texts`）。
         // ここで栞を組み直すと、測った値と送る値が別物になる

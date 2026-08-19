@@ -382,6 +382,53 @@ final class UserTraitsStoreTests: StoreTestCase {
         XCTAssertEqual(waiting, 1, "14.15節『◯件が次の反映を待っています』の分子")
     }
 
+    /// **NUL を含む文は、黙って切らずに拒む。**
+    ///
+    /// GRDB は文字列を `sqlite3_bind_text(…, -1, …)` で束縛し、読むほうも
+    /// `String(cString:)` である。**長さを渡していないので、NUL 以降が消える。**
+    /// 黙って通すと `recordTrait` が返した記録と保存された行が食い違い、
+    /// **どちらが重みに焼かれたのかを後から言えなくなる**（NFR-12）。
+    ///
+    /// **拒む側に倒したのは、切られた文が重みへ入ると消せないからである**
+    /// （14.11節④で戻せるのは世代であって1件ではない）。
+    /// NUL は手では打てない ── **モデルの出力か、貼り付けたファイル片から来る。**
+    ///
+    /// > **【未確認】上流で落としているかは見ていない。**
+    /// > ここが表明しているのは「この層は黙って受け取らない」ことだけである。
+    func testAStatementContainingNULIsRefusedInsteadOfSilentlyTruncated() async throws {
+        let store = try makeInMemoryStore()
+        let withNUL = "前半\u{0000}後半"
+
+        await assertThrows({
+            _ = try await store.recordTrait(
+                kind: .style, category: "tone", statement: withNUL, source: .manual
+            )
+        }, "NUL を含む文が黙って保存されている（NUL 以降が消えたまま成功と返る）")
+
+        let rows = try await store.rawInt(sql: "SELECT COUNT(*) FROM user_traits")
+        XCTAssertEqual(rows, 0, "拒んだのに行が残っている")
+
+        // **入口は2つある。訂正の経路にも同じ関門があること。**
+        let trait = try await makeStyleTrait(in: store)
+        await assertThrows({
+            try await store.reviseTrait(id: trait.id, statement: withNUL, source: .correction)
+        }, "訂正では NUL が通ってしまっている")
+
+        let after = try await store.trait(id: trait.id)
+        let history = try await store.traitRevisions(of: trait.id)
+        XCTAssertEqual(after?.statement, Self.machineTrait, "拒んだのに文が変わっている")
+        XCTAssertEqual(history.count, 1, "拒んだのに版が積まれている")
+
+        // **拒むのは NUL だけである。** 他の制御文字も絵文字も1文字も変えずに通ること。
+        let fine = try await store.recordTrait(
+            kind: .style, category: "tone",
+            statement: "改行\nとタブ\tと絵文字 👩🏽‍🚀 と結合文字 é",
+            source: .manual
+        )
+        let stored = try await store.trait(id: fine.id)
+        XCTAssertEqual(stored?.statement, fine.statement, "NUL 以外まで拒んでいる／変えている")
+    }
+
     // MARK: - 消えないこと（第8.4節 / 14.11節④ / NFR-12）
 
     /// **訂正しても、訂正前の文は残る。**
@@ -467,6 +514,51 @@ final class UserTraitsStoreTests: StoreTestCase {
         XCTAssertEqual(raised, 1.0, "CHECK 制約で落とさず、頭打ちにすること")
     }
 
+    /// **有限でない歩幅では、確信度は1ミリも動かない。**
+    ///
+    /// `min(1.0, confidence + .nan)` は Swift では `y < x ? y : x` なので **`x`（＝1.0）を返す。**
+    /// 頭打ちのつもりの `min` が、NaN を**最大値へ昇格させる装置**になっていた ──
+    /// 1.0 は関門（0.7）の上なので、**質問由来の像（0.5）が一撃で学習データに入った。**
+    /// **14.13c節の決定（質問は事前分布であって証拠ではない）が、歩幅の異常値1つで壊れる形だった。**
+    ///
+    /// 歩幅は既定値つきの引数であって定数ではない ──
+    /// **計算（0除算・空集合の平均）で決めた瞬間に NaN は来る。**
+    func testANonFiniteStepDoesNotMoveTheConfidenceAtAll() async throws {
+        let store = try makeInMemoryStore()
+        let initial = TraitSource.onboarding.defaultConfidence
+
+        for step in [Double.nan, .infinity, -.infinity] {
+            let trait = try await makeStyleTrait(in: store, source: .onboarding)
+            let raised = try await store.reinforceTrait(id: trait.id, source: .manual, step: step)
+            let after = try await store.trait(id: trait.id)
+            let history = try await store.traitRevisions(of: trait.id)
+
+            XCTAssertEqual(raised, initial, "歩幅 \(step) で確信度が動いた")
+            XCTAssertEqual(after?.confidence, initial, "歩幅 \(step) で保存された確信度が動いた")
+            XCTAssertEqual(
+                history.map(\.confidence).max(), initial,
+                "履歴に嘘の確信度が残っている（NFR-12 で辿ると『なぜこの値か』に嘘が返る）"
+            )
+        }
+
+        // **関門を越えていないこと。** 14.13c節: 質問だけでは何も焼かれない。
+        let ready = try await store.traitsForTraining()
+        XCTAssertTrue(ready.isEmpty, "有限でない歩幅で関門を越えている（学習データに \(ready.count) 件）")
+    }
+
+    /// 歩幅が負でも 0 を下回らない。**`CHECK (confidence >= 0.0)` で落とさない**
+    /// （頭打ちと同じ理由 ── 強化のたびに落ちうる関数にしない）。
+    func testConfidenceIsFlooredAtZero() async throws {
+        let store = try makeInMemoryStore()
+        let trait = try await makeStyleTrait(in: store, confidence: 0.5)
+
+        let lowered = try await store.reinforceTrait(id: trait.id, source: .manual, step: -10)
+
+        XCTAssertEqual(lowered, 0.0)
+        let after = try await store.trait(id: trait.id)
+        XCTAssertEqual(after?.confidence, 0.0)
+    }
+
     /// **本命。焼いた後に訂正されても、重みの中の文を言える。**
     ///
     /// > **重みは記録ではなく、複製である。原本は DB に残す**（14.11節④）。
@@ -510,22 +602,77 @@ final class UserTraitsStoreTests: StoreTestCase {
 
     // MARK: - 消せること（FR-28 / NFR-01）
 
-    func testDeletingATraitTakesItsHistoryWithIt() async throws {
+    /// 消した像の履歴と焼き込み記録は道連れになる。**そして、それ以外は1行も減らない。**
+    ///
+    /// ## 像が1件しか無いと、このテストは何も測っていない
+    ///
+    /// `eraseTraits(matching:)` は述語を**文字列で組み立てて** `DELETE` へ埋めている
+    /// （`"id = ?"` / `"1 = 1"`）。**像が1件だけなら、述語が `1 = 1` に化けても結果は同じ**で、
+    /// 全部消す誤りが緑のまま通る。**だから必ずもう1件、残るべき像を置く。**
+    func testDeletingATraitTakesItsOwnHistoryAndNobodyElsesWithIt() async throws {
         let store = try makeInMemoryStore()
-        let trait = try await makeStyleTrait(in: store)
-        try await store.reviseTrait(id: trait.id, statement: "第2版", source: .correction)
+        let doomed = try await makeStyleTrait(in: store, statement: "消す像")
+        let survivor = try await makeStyleTrait(in: store, statement: "残す像")
+        try await store.reviseTrait(id: doomed.id, statement: "消す像 第2版", source: .correction)
+        try await store.reviseTrait(id: survivor.id, statement: "残す像 第2版", source: .correction)
+        try await store.recordAdapterGeneration(
+            modelID: "m", directory: "adapters/translator/v1",
+            traitIDs: [doomed.id, survivor.id], activate: true
+        )
 
-        let outcome = try await store.deleteTrait(id: trait.id)
+        let outcome = try await store.deleteTrait(id: doomed.id)
 
         XCTAssertEqual(outcome.deletedTraitCount, 1)
-        let remaining = try await store.rawInt(sql: "SELECT COUNT(*) FROM user_trait_revisions")
-        XCTAssertEqual(remaining, 0, "履歴が残っては FR-28『完全に消える』が破れる")
+
+        // 消した側 ── 3つの表すべてから消える（FR-28）。
+        let deleted = try await store.trait(id: doomed.id)
+        let deletedRevisions = try await store.traitRevisions(of: doomed.id)
+        let deletedBakes = try await store.bakes(ofTrait: doomed.id)
+        XCTAssertNil(deleted)
+        XCTAssertEqual(deletedRevisions.count, 0, "履歴が残っては FR-28『完全に消える』が破れる")
+        XCTAssertEqual(deletedBakes.count, 0, "焼き込み記録が残っては FR-28 が破れる")
+
+        // 残す側 ── **1行も欠けない。** 述語が `1 = 1` に化けたらここで落ちる。
+        let kept = try await store.trait(id: survivor.id)
+        let keptRevisions = try await store.traitRevisions(of: survivor.id)
+        let keptBakes = try await store.bakes(ofTrait: survivor.id)
+        XCTAssertEqual(kept?.statement, "残す像 第2版", "消していない像まで消えている")
+        XCTAssertEqual(
+            keptRevisions.map(\.statement), ["残す像", "残す像 第2版"],
+            "消していない像の履歴まで消えている"
+        )
+        XCTAssertEqual(keptBakes.count, 1, "消していない像の焼き込み記録まで消えている")
+
+        let revisions = try await store.rawInt(sql: "SELECT COUNT(*) FROM user_trait_revisions")
+        let bakes = try await store.rawInt(sql: "SELECT COUNT(*) FROM user_trait_bakes")
+        XCTAssertEqual(revisions, 2, "残した像の履歴2版だけが残ること")
+        XCTAssertEqual(bakes, 1, "残した像の焼き込み1件だけが残ること")
+
+        // 消した像は、まだ v1 の重みの中にいる（DB から消えても剥がせない）。
+        XCTAssertEqual(
+            outcome.generationsStillCarryingErasedTraits.map(\.directory),
+            ["adapters/translator/v1"],
+            "外すべきファイルを名指せること"
+        )
     }
 
-    /// **利用者が消したら、3つの表すべてから消える。**
+    /// **利用者が消したら、どの表のどの列にも残らない。**
     ///
     /// 「訂正では消えない」ことと矛盾しない ──
     /// **前者はシステムの都合による上書き、後者は利用者の明示的な意思**であり、別の操作である。
+    ///
+    /// ## "Anywhere" を3表の件数で確かめてはいけない
+    ///
+    /// 以前はここが `user_traits` / `user_trait_revisions` / `user_trait_bakes` の
+    /// **件数だけ**を見ていた。**表が増えた日に、緑のまま破れる形である** ──
+    /// 増える表（要約・埋め込み・学習データの控え）こそが危ない。
+    /// 14.16節⑤（消したはずの像で読み続ける）は、**記録が1か所残っていれば成立する。**
+    ///
+    /// **したがって表も列も `sqlite_master` から引いて全部走査する。**
+    /// 表を足した人が何もしなくても、このテストが先に落ちる。
+    ///
+    /// > **【未確認】これで捕まるのは「文字列がそのまま残っている」場合だけである。**
+    /// > 像を加工して持つ表（要約・ベクトル）が増えたら、この走査では見つからない。
     func testErasingEverythingLeavesNoUserTraitRowsAnywhere() async throws {
         let store = try makeInMemoryStore()
         let a = try await makeStyleTrait(in: store, statement: "像A")
@@ -536,20 +683,52 @@ final class UserTraitsStoreTests: StoreTestCase {
             traitIDs: [a.id, b.id], activate: true
         )
 
+        // **消す前に、確かにどこかに在ること。** 在らないものが消えても何も測っていない。
+        let needles = [a.id, b.id, "像A", "像B"]
+        let before = try await Self.placesMentioning(needles, in: store)
+        XCTAssertFalse(before.isEmpty, "前提が崩れている: 消す前から見つからない")
+
         let outcome = try await store.eraseAllUserTraits()
 
         XCTAssertEqual(outcome.deletedTraitCount, 2)
-        let traits = try await store.rawInt(sql: "SELECT COUNT(*) FROM user_traits")
-        let revisions = try await store.rawInt(sql: "SELECT COUNT(*) FROM user_trait_revisions")
-        let bakes = try await store.rawInt(sql: "SELECT COUNT(*) FROM user_trait_bakes")
-        XCTAssertEqual(traits, 0)
-        XCTAssertEqual(revisions, 0, "履歴が残っては FR-28 が破れる")
-        XCTAssertEqual(bakes, 0)
+        let after = try await Self.placesMentioning(needles, in: store)
+        XCTAssertEqual(
+            after, [],
+            """
+            消したはずの像が残っている: \(after.joined(separator: " / "))
+            （消す前に在った場所: \(before.joined(separator: " / "))）
+            """
+        )
 
         // **アダプタの記録は消えない。** 消すと、汚染されたファイルを名指す手段が失われる
         // （14.11節④が `fuse` を禁じている理由と同じ形を、こちらの手で作ることになる）。
         let generations = try await store.rawInt(sql: "SELECT COUNT(*) FROM adapter_generations")
         XCTAssertEqual(generations, 1)
+    }
+
+    /// その文字列を含む行が在る場所を `表.列` で返す。**表も列も `sqlite_master` から引く。**
+    ///
+    /// 列挙を書き写さないための形である ── **表を1つ足すだけで走査範囲が広がる。**
+    private static func placesMentioning(
+        _ needles: [String],
+        in store: Store
+    ) async throws -> [String] {
+        var found: [String] = []
+        for table in try await store.userTableNames() {
+            for column in try await store.columnNames(of: table) {
+                for needle in needles {
+                    let count = try await store.rawInt(
+                        sql: """
+                            SELECT COUNT(*) FROM "\(table)"
+                             WHERE CAST("\(column)" AS TEXT) LIKE ?
+                            """,
+                        arguments: ["%\(needle)%"]
+                    ) ?? 0
+                    if count > 0 { found.append("\(table).\(column) ← \(needle)（\(count)件）") }
+                }
+            }
+        }
+        return found.sorted()
     }
 
     /// **消しても、重みからは消えない。それが見えること。**
@@ -814,6 +993,42 @@ final class UserTraitsStoreTests: StoreTestCase {
         XCTAssertNotNil(base)
     }
 
+    /// **`translating` は「翻訳役の重みに入った」という意味である**（`TraitPlacement` の型コメント）。
+    ///
+    /// 本体（`base`）にだけ焼いた像は、翻訳役には1件も入っていない。
+    /// 導出をアダプタで絞らないと、その像が `translating` を名乗り、
+    /// **アダプタで絞っている `statementsInActiveAdapter(.translator)` と食い違う** ──
+    /// 14.15節の画面が「翻訳役には何も入っていないが、待っている像も0件」と言うことになる。
+    ///
+    /// `adapter_gen` も同じで、両アダプタを混ぜた `MAX(generation)` を入れると
+    /// **翻訳役 v1 の像が本体 v7 を指す**（翻訳役に v7 は存在しない）。
+    func testBakingIntoTheBaseAdapterDoesNotTouchTheTranslatorSideDerivation() async throws {
+        let store = try makeInMemoryStore()
+        let trait = try await makeStyleTrait(in: store)
+
+        try await store.recordAdapterGeneration(
+            adapter: .base, generation: 7, modelID: "mlx-community/Qwen3-8B-4bit",
+            directory: "adapters/base/v7", traitIDs: [trait.id], activate: true
+        )
+
+        let afterBase = try await store.trait(id: trait.id)
+        let inTranslator = try await store.statementsInActiveAdapter(.translator)
+        let waiting = try await store.storedTraitCount()
+        XCTAssertEqual(afterBase?.placement, .stored, "翻訳役に入っていない像が translating を名乗っている")
+        XCTAssertNil(afterBase?.adapterGen, "本体の世代番号が翻訳役の列に漏れている")
+        XCTAssertTrue(inTranslator.isEmpty)
+        XCTAssertEqual(waiting, 1, "翻訳役から見れば、この像はまだ反映を待っている")
+
+        // 翻訳役へ焼くと、こちらは v1 を指す（本体の v7 に引きずられない）。
+        try await store.recordAdapterGeneration(
+            adapter: .translator, modelID: "m", directory: "adapters/translator/v1",
+            traitIDs: [trait.id], activate: true
+        )
+        let afterTranslator = try await store.trait(id: trait.id)
+        XCTAssertEqual(afterTranslator?.placement, .translating)
+        XCTAssertEqual(afterTranslator?.adapterGen, 1, "本体 v7 の番号が翻訳役の列に入っている")
+    }
+
     /// `translating` は**事実であって意思ではない。** 手で書けないこと。
     ///
     /// 書けてしまうと、14.15節の「いま重みに入っている像の一覧」が嘘になる。
@@ -823,7 +1038,7 @@ final class UserTraitsStoreTests: StoreTestCase {
         let trait = try await makeStyleTrait(in: store)
 
         await assertThrows({
-            try await store.setTraitPlacement(id: trait.id, to: .translating)
+            _ = try await store.setTraitPlacement(id: trait.id, to: .translating)
         }, "導出値を手で書けてしまっている")
 
         let after = try await store.trait(id: trait.id)
@@ -831,22 +1046,73 @@ final class UserTraitsStoreTests: StoreTestCase {
     }
 
     /// `retrieved` は 14.3節が「枠だけ用意しておく」と決めている引く層である。
-    /// **焼き直しの再計算で勝手に潰れないこと。**
-    func testRetrievedPlacementSurvivesRecalculation() async throws {
+    ///
+    /// ## 気になるのは「無関係な焼き直し」ではなく、**その像自身が焼かれたとき**である
+    ///
+    /// 以前はここが**一度も焼かれない無関係な像**しか見ておらず、
+    /// `retrieved` が本当に危ない経路を1度も通っていなかった。**通す。**
+    ///
+    /// | 段 | 置き場所 | |
+    /// |---|--:|---|
+    /// | 1. 手で `retrieved` にする | `retrieved` | 引く層の枠（14.3節） |
+    /// | 2. **無関係な像を焼く** | `retrieved` のまま | 再計算が巻き添えにしないこと |
+    /// | 3. **その像自身を焼く** | **`translating`** | **重みが勝つ** |
+    /// | 4. 手で `stored` に落とそうとする | `translating` のまま | 導出値は手で書けない |
+    /// | 5. **世代を外す**（14.11節④第2段） | **`stored`** | ⚠ `retrieved` は戻ってこない |
+    ///
+    /// **5段目は既知の割り切りである。** `placement` は1本の列なので、
+    /// 「引く層に置く」という利用者の指定と「重みに入っている」という事実を同時には持てない
+    /// （**【未確認】両方に同時に置く設計はまだ無い**）。
+    /// **ここで固定しておかないと、割り切りが黙って変わる。**
+    func testRetrievedSurvivesAnUnrelatedBakeButIsLostOnceItIsBakedItself() async throws {
         let store = try makeInMemoryStore()
         let retrieved = try await store.recordTrait(
             kind: .content, category: "stack", statement: "引く層の枠", source: .manual
         )
-        let burned = try await makeStyleTrait(in: store)
-        try await store.setTraitPlacement(id: retrieved.id, to: .retrieved)
+        let unrelated = try await makeStyleTrait(in: store)
 
+        // 1. 焼かれていない像なら、指定はそのまま通る。
+        let requested = try await store.setTraitPlacement(id: retrieved.id, to: .retrieved)
+        XCTAssertEqual(requested, .retrieved, "焼かれていない像の置き場所が指定どおりにならない")
+
+        // 2. 無関係な像を焼いても、引く層の枠は潰れない。
         try await store.recordAdapterGeneration(
             modelID: "m", directory: "adapters/translator/v1",
-            traitIDs: [burned.id], activate: true
+            traitIDs: [unrelated.id], activate: true
         )
-
-        let after = try await store.trait(id: retrieved.id)
+        var after = try await store.trait(id: retrieved.id)
         XCTAssertEqual(after?.placement, .retrieved, "焼き直しが無関係な像の置き場所を潰している")
+        XCTAssertNil(after?.adapterGen)
+
+        // 3. その像自身を焼くと、重みが勝つ。
+        try await store.recordAdapterGeneration(
+            modelID: "m", directory: "adapters/translator/v2",
+            traitIDs: [retrieved.id], activate: true
+        )
+        after = try await store.trait(id: retrieved.id)
+        XCTAssertEqual(
+            after?.placement, .translating,
+            "焼いたのに retrieved のままである（14.15節の『いま重みに入っている像』と食い違う）"
+        )
+        XCTAssertEqual(after?.adapterGen, 2)
+
+        // 4. 焼かれている像は手で落とせない。**戻り値が実際の置き場所を言う。**
+        let effective = try await store.setTraitPlacement(id: retrieved.id, to: .stored)
+        XCTAssertEqual(effective, .translating, "重みに入っている像を手で『貯めているだけ』にできている")
+        after = try await store.trait(id: retrieved.id)
+        XCTAssertEqual(after?.placement, .translating)
+
+        // 5. 外すと `stored` に戻る。**`retrieved` の指定は残らない**（既知の割り切り）。
+        try await store.deactivateAdapter()
+        after = try await store.trait(id: retrieved.id)
+        XCTAssertEqual(
+            after?.placement, .stored,
+            """
+            ⚠ `.retrieved` が返ったなら、割り切りのほうが変わっている。
+            そのときはこのテストではなく `Store.setTraitPlacement` の型コメントを直すこと。
+            """
+        )
+        XCTAssertNil(after?.adapterGen)
     }
 
     /// 何も変わらない再計算では `updated_at` が動かないこと。
@@ -867,6 +1133,46 @@ final class UserTraitsStoreTests: StoreTestCase {
 
         let after = try await store.trait(id: untouched.id)
         XCTAssertEqual(after?.updatedAt, SophiaTimestamp.truncated(Date(timeIntervalSince1970: 1_000)))
+    }
+
+    /// **背後で壊された導出値が、次の再計算で直ること**（自己修復）。
+    ///
+    /// `setTraitPlacement` が塞いだので、**いまアプリの経路からはこの状態を作れない。**
+    /// 作れるのは生SQL ── 別の版のアプリ、手作業の DB 編集、これから足す誰かの UPDATE である。
+    /// 直せないと、矛盾は一時的な状態ではなく**その世代が有効なあいだ残り続ける。**
+    ///
+    /// ⚠ 壊し方が要点である。**`placement` だけを落とし、`adapter_gen` は正しいまま残す** ──
+    /// 以前の `WHERE`（`adapter_gen` の変化 / `translating` なのに焼かれていない行）は、
+    /// **この形をどちらの条件でも拾えなかった。**
+    func testRecalculationRepairsAPlacementThatWasCorruptedBehindItsBack() async throws {
+        let store = try makeInMemoryStore()
+        let trait = try await makeStyleTrait(in: store)
+        try await store.recordAdapterGeneration(
+            modelID: "m", directory: "adapters/translator/v1",
+            traitIDs: [trait.id], activate: true
+        )
+
+        try await store.executeRawForTesting(
+            sql: "UPDATE user_traits SET placement = 'stored' WHERE id = ?",
+            arguments: [trait.id]
+        )
+        let corrupted = try await store.trait(id: trait.id)
+        XCTAssertEqual(corrupted?.placement, .stored, "前提が崩れている: 生SQL で壊せていない")
+        XCTAssertEqual(corrupted?.adapterGen, 1, "前提が崩れている: 世代まで消えている")
+
+        // 有効な世代を変えない形で再計算を通す（焼く経路はどれも最後にこれを通る）。
+        try await store.recordAdapterGeneration(
+            modelID: "m", directory: "adapters/translator/v2", traitIDs: []
+        )
+
+        let after = try await store.trait(id: trait.id)
+        let waiting = try await store.storedTraitCount()
+        XCTAssertEqual(
+            after?.placement, .translating,
+            "重みに入っている像が『貯めているだけ』のまま残っている（NFR-12）"
+        )
+        XCTAssertEqual(after?.adapterGen, 1)
+        XCTAssertEqual(waiting, 0, "14.15節の『反映を待っている件数』に、待っていない像が混ざっている")
     }
 
     // MARK: - 重みへ移す関門（14.14節 / 判断2）
@@ -979,32 +1285,80 @@ final class UserTraitsStoreTests: StoreTestCase {
     ///
     /// 判定は SQL（`traitsForTraining`）と Swift（`UserTraitRecord.qualifiesForTraining`）の
     /// 両方にある。**同じ規則を2か所に書いたら、いつか食い違う。**
-    /// 期限の境界・確信度の境界をまたぐ像を並べて、**両者が同じ集合を返すこと**を確かめる。
-    func testTheSwiftGateAndTheSQLGateAgree() async throws {
+    ///
+    /// ## 「両者が一致すること」だけを見てはいけない
+    ///
+    /// 以前はここが**2つの集合が等しいこと**しか見ていなかった。それでは
+    /// **両方が同時に `>=` から `>` へ変わっても緑のまま**で、
+    /// 2か所が仲良く間違っている状態を検出できない。
+    /// **したがって、期待する集合を先に書き下ろし、両者をそれぞれ突き合わせる。**
+    ///
+    /// | 値 | 期待 | なぜ |
+    /// |---|---|---|
+    /// | 確信度 = 閾値ちょうど | **通る** | 閾値は「以上」（`confidence >= ?`） |
+    /// | 確信度 = 閾値の1つ下 | 落ちる | |
+    /// | 期限 = いまちょうど | **落ちる** | 期限は「より後」（`expires_at > ?`）＝ その瞬間に切れる |
+    /// | 期限 = 1ミリ秒あと | 通る | |
+    ///
+    /// **閾値そのものは書かない。** 0.7 は【未確認】の仮置きであり（14.13c節）、
+    /// 意味を持つのは値ではなく**境界がどちら側にあるか**である。
+    func testTheSwiftGateAndTheSQLGateAgreeOnTheDocumentedBoundary() async throws {
         let store = try makeInMemoryStore()
         let now = Date(timeIntervalSince1970: 5_000)
-        // 確信度と期限の境界をまたぐように並べる
-        for (index, confidence) in [0.0, 0.5, 0.69, 0.7, 0.71, 1.0].enumerated() {
-            try await store.recordTrait(
-                kind: .style, category: "tone", statement: "様式 \(index)",
-                source: .manual, confidence: confidence
-            )
-        }
-        for (index, expiry) in [4_999.0, 5_000.0, 5_001.0].enumerated() {
-            try await store.recordTrait(
-                kind: .content, category: "stack", statement: "内容 \(index)",
-                source: .manual, confidence: 1.0,
-                expiresAt: Date(timeIntervalSince1970: expiry)
-            )
-        }
+        let threshold = UserTraitDefaults.trainingConfidenceThreshold
 
+        // 確信度の境界（様式。期限を持てない）
+        let onTheLine = try await store.recordTrait(
+            kind: .style, category: "tone", statement: "閾値ちょうど",
+            source: .manual, confidence: threshold
+        )
+        let justUnder = try await store.recordTrait(
+            kind: .style, category: "tone", statement: "閾値の1つ下",
+            source: .manual, confidence: threshold.nextDown
+        )
+        let justOver = try await store.recordTrait(
+            kind: .style, category: "tone", statement: "閾値の1つ上",
+            source: .manual, confidence: threshold.nextUp
+        )
+        let farUnder = try await store.recordTrait(
+            kind: .style, category: "tone", statement: "関門から遠い下",
+            source: .manual, confidence: 0.0
+        )
+        // 期限の境界（内容。確信度は全部 1.0 にして、落ちる理由を期限だけにする）
+        let expiredAlready = try await store.recordTrait(
+            kind: .content, category: "stack", statement: "1ミリ秒前に切れた",
+            source: .manual, confidence: 1.0, expiresAt: now.addingTimeInterval(-0.001)
+        )
+        let expiringNow = try await store.recordTrait(
+            kind: .content, category: "stack", statement: "いま切れる",
+            source: .manual, confidence: 1.0, expiresAt: now
+        )
+        let expiringLater = try await store.recordTrait(
+            kind: .content, category: "stack", statement: "1ミリ秒あとに切れる",
+            source: .manual, confidence: 1.0, expiresAt: now.addingTimeInterval(0.001)
+        )
+
+        // **期待する集合を先に書き下ろす。** 両者の一致だけでは、揃って間違ったことに気づけない。
+        let expected = [onTheLine.id, justOver.id, expiringLater.id].sorted()
         let fromSQL = try await store.traitsForTraining(now: now).map(\.id).sorted()
         let fromSwift = try await store.allTraits()
             .filter { $0.qualifiesForTraining(now: now) }
             .map(\.id).sorted()
 
+        XCTAssertEqual(
+            fromSQL, expected,
+            "SQL 側の関門が境界からずれている（閾値は『以上』、期限は『より後』）"
+        )
+        XCTAssertEqual(fromSwift, expected, "Swift 側の関門が境界からずれている")
         XCTAssertEqual(fromSQL, fromSwift, "SQL 側と Swift 側で関門の判定がずれている")
-        XCTAssertFalse(fromSQL.isEmpty, "両方とも空なら、一致していても何も測っていない")
+
+        // 落ちた側も名指しておく（`expected` を作り間違えたときに、これが先に落ちる）。
+        for excluded in [justUnder, farUnder, expiredAlready, expiringNow] {
+            XCTAssertFalse(
+                fromSQL.contains(excluded.id),
+                "関門を通ってはいけない像が通っている: \(excluded.statement)"
+            )
+        }
     }
 
     // MARK: - 件数に上限を置かないこと（14.16節⑦ の未決に対する備え）

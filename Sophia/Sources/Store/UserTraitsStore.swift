@@ -64,6 +64,7 @@ extension Store {
     ///   - confidence: 省略すると `source.defaultConfidence`。
     ///     **出所によって確からしさが違う**（14.5節 / 14.8節 / 14.14節）。
     ///   - expiresAt: **内容にだけ入れられる。** 様式に入れると CHECK 制約で落ちる。
+    /// - Throws: 文に NUL が入っていれば `StoreFailure.textContainsNUL`（下記 `rejectNUL`）。
     @discardableResult
     func recordTrait(
         kind: TraitKind,
@@ -75,6 +76,8 @@ extension Store {
         id: String = UUID().uuidString,
         now: Date = Date()
     ) throws -> UserTraitRecord {
+        try Self.rejectNUL(statement, field: "statement")
+        try Self.rejectNUL(category, field: "category")
         let record = UserTraitRecord(
             id: id,
             kind: kind,
@@ -131,6 +134,7 @@ extension Store {
         confidence: Double? = nil,
         now: Date = Date()
     ) throws {
+        try Self.rejectNUL(statement, field: "statement")
         let stamp = SophiaTimestamp.truncated(now)
         try write { db in
             guard let current = try UserTraitRecord.fetchOne(
@@ -170,7 +174,11 @@ extension Store {
     /// 文が変わらなくても `user_trait_revisions` に1行積む。
     /// **「なぜこの像の確信度が 0.9 なのか」を後から辿れるのは、この履歴だけである**（NFR-12）。
     ///
-    /// - Returns: 強化後の確信度。1.0 で頭打ちになる。
+    /// - Parameter step: **有限でない歩幅（NaN / ±∞）は歩幅として扱わない。**
+    ///   確信度は1ミリも動かない（`UserTraitDefaults.reinforced(_:by:)`）。
+    ///   歩幅は既定値つきの引数であって定数ではなく、**計算で決めた瞬間に NaN が来る**
+    ///   （0除算・空集合の平均）。関門（14.14節）を素通りさせないため、ここで落とす。
+    /// - Returns: 強化後の確信度。**0.0…1.0 に収まる。** 1.0 で頭打ちになる。
     @discardableResult
     func reinforceTrait(
         id: String,
@@ -185,9 +193,15 @@ extension Store {
             ) else {
                 throw StoreFailure.traitNotFound(id: id)
             }
-            // CHECK (confidence <= 1.0) があるので、頭打ちはここで行う。
+            // CHECK (confidence BETWEEN 0 AND 1) があるので、頭打ちはここで行う。
             // 制約で落として例外にすると、**強化のたびに落ちうる関数**になる。
-            let raised = min(1.0, current.confidence + step)
+            //
+            // ⚠ `min(1.0, current.confidence + step)` と書いてはいけない。
+            // Swift の `min` は `y < x ? y : x` であり、**NaN との比較は必ず false** なので
+            // `x`（＝1.0）が返る。**頭打ちのつもりの min が、NaN を最大値へ昇格させる。**
+            // 1.0 は関門（0.7）の上なので、その像はそのまま学習データに入り、
+            // 履歴にも「確信度 1.0」の版が残って NFR-12 が嘘をつく。
+            let raised = UserTraitDefaults.reinforced(current.confidence, by: step)
             try Self.appendRevision(
                 db,
                 traitID: id,
@@ -204,11 +218,32 @@ extension Store {
         }
     }
 
-    /// 置き場所を手で変える。**`translating` は指定できない。**
+    /// 置き場所を手で変える。**`translating` は書けない。消すこともできない。**
     ///
     /// `stored` ⇄ `retrieved` の出し入れだけを許す。
     /// `translating` は焼いた事実からの導出値であり、手で書くと
     /// 14.15節の「いま重みに入っている像の一覧」が嘘になる（`StoreFailure.placementIsDerived`）。
+    ///
+    /// ## 禁じているのは「導出値を手で書くこと」であって、値の向きではない
+    ///
+    /// 以前はここが **`translating` を書くことだけ**を拒んでいた。
+    /// **落とすほうは通っていた** ── 焼き込み済みの像を手で `stored` にできた。
+    /// そうすると DB が2つの矛盾したことを同時に言う:
+    ///
+    /// | 訊き方 | 答え |
+    /// |---|---|
+    /// | `statementsInActiveAdapter()` | **重みに入っている**（焼き込み記録が根拠） |
+    /// | `trait.placement` | **貯めているだけ**（手で書いた値） |
+    ///
+    /// **重みは剥がせない。** 剥がせないものを「貯めているだけ」と表示するのは
+    /// NFR-12（なぜそう振る舞うのかを説明できる）を壊すし、
+    /// 14.15節の「◯件が反映を待っています」に**待っていない像が混ざる。**
+    ///
+    /// **したがって、有効な世代に焼かれている像の置き場所は動かない。**
+    /// 要求は捨てられ、**戻り値には実際にそうなった置き場所が返る**
+    /// （`.translating` が返ったなら、それは要求が通らなかったということである）。
+    /// 例外にしていないのは、これが呼び出し側の誤りではなく
+    /// **「重みが勝つ」という設計そのもの**だからである。
     ///
     /// > **【14.3節】引く層は初版では空でよい。**
     /// > 内容は初回に訊かないので、引く対象がほとんど存在しない。
@@ -216,19 +251,53 @@ extension Store {
     ///
     /// **`retrieved` はその「枠」である。** 引き金そのものは推論側の仕事（別担当）。
     ///
-    /// ⚠ `retrieved` の像がのちに焼かれると `translating` が勝つ。
+    /// ⚠ `retrieved` の像がのちに焼かれると `translating` が勝ち、
+    /// **世代を外したあとは `retrieved` ではなく `stored` に戻る**（`retrieved` の指定は残らない）。
     /// **両方に同時に置く設計はまだ無い**【未確認】。
-    func setTraitPlacement(id: String, to placement: TraitPlacement, now: Date = Date()) throws {
+    ///
+    /// - Returns: **保存された行の置き場所。** 要求した値とは限らない。
+    /// - Throws: 像が無ければ `StoreFailure.traitNotFound`
+    ///   （`reviseTrait` / `reinforceTrait` と揃えてある。**0行に当たっただけを成功と呼ばない**）。
+    @discardableResult
+    func setTraitPlacement(
+        id: String,
+        to placement: TraitPlacement,
+        now: Date = Date()
+    ) throws -> TraitPlacement {
         guard placement != .translating else {
             throw StoreFailure.placementIsDerived(id: id)
         }
-        try write { db in
+        let stamp = SophiaTimestamp.truncated(now)
+        return try write { db in
+            guard try UserTraitRecord.fetchOne(
+                db, sql: "SELECT * FROM user_traits WHERE id = ?", arguments: [id]
+            ) != nil else {
+                throw StoreFailure.traitNotFound(id: id)
+            }
+            // **焼かれている行には当たらない。** 条件は `recalculateTraitPlacements` と同じ形
+            // （翻訳役の有効な世代に焼かれているか）にしてある ── 別々に書くと、いつか食い違う。
             try db.execute(
-                sql: "UPDATE user_traits SET placement = ?, updated_at = ? WHERE id = ?",
+                sql: """
+                    UPDATE user_traits
+                       SET placement = :placement, updated_at = :now
+                     WHERE id = :id
+                       AND NOT EXISTS (\(Self.activeBakeExistsSQL))
+                    """,
                 arguments: [
-                    placement.rawValue, SophiaTimestamp.milliseconds(from: now), id,
+                    "placement": placement.rawValue,
+                    "now": SophiaTimestamp.milliseconds(from: stamp),
+                    "id": id,
+                    "adapter": AdapterKind.translator.rawValue,
                 ]
             )
+            // 手で書いた値と焼いた事実がずれていれば、ここで必ず直る（自己修復）。
+            try Self.recalculateTraitPlacements(db, at: stamp)
+
+            let saved = try UserTraitRecord.fetchOne(
+                db, sql: "SELECT * FROM user_traits WHERE id = ?", arguments: [id]
+            )
+            // **読み直した行を返す。** 「要求した値」を返すと、通らなかったことが呼び出し側から消える。
+            return saved?.placement ?? placement
         }
     }
 
@@ -370,6 +439,11 @@ extension Store {
         id: String = UUID().uuidString,
         now: Date = Date()
     ) throws -> AdapterGenerationRecord {
+        // **同じ NUL の罠が、こちらでは外すべきファイルの取り違えになる。**
+        // `directory` が途中で切れると、名指した先と実在するアダプタがずれる
+        // （`TraitErasureOutcome` が名指すのはこの文字列である）。
+        try Self.rejectNUL(modelID, field: "model_id")
+        try Self.rejectNUL(directory, field: "directory")
         let stamp = SophiaTimestamp.truncated(now)
         return try write { db in
             let next: Int
@@ -680,9 +754,22 @@ extension Store {
         )
     }
 
+    /// **その像が、いま有効な翻訳役の世代に焼かれているか。**
+    ///
+    /// `:adapter` を束縛して使う相関副問い合わせ。`user_traits` を更新する文の中でだけ意味を持つ。
+    /// **`setTraitPlacement` と `recalculateTraitPlacements` が同じものを見るためにここに1つ置いてある。**
+    private static let activeBakeExistsSQL = """
+        SELECT 1
+          FROM user_trait_bakes b
+          JOIN adapter_generations g ON g.id = b.adapter_generation_id
+         WHERE b.trait_id = user_traits.id
+           AND g.adapter = :adapter
+           AND g.is_active = 1
+        """
+
     /// **`placement` と `adapter_gen` を、焼いた事実から計算し直す。**
     ///
-    /// この2列を書くのは（`retrieved` の出し入れを除いて）**ここだけである。**
+    /// この2列を書くのは**ここだけである**（`setTraitPlacement` も最後にこれを通す）。
     /// 焼く・世代を切り替える・外す、のどの経路からも最後にこれを通す。
     /// 書く場所が散ると、**重みの中身と DB の言い分がずれる**（14.15節が嘘になる）。
     ///
@@ -690,11 +777,29 @@ extension Store {
     ///
     /// | 状態 | `placement` | `adapter_gen` |
     /// |---|---|---|
-    /// | **有効な**世代に焼かれている | `translating` | その世代番号（複数なら最大） |
+    /// | **有効な翻訳役の**世代に焼かれている | `translating` | その世代番号（複数なら最大） |
     /// | 焼かれていない／世代が無効 | `stored` | NULL |
     /// | `retrieved` で、焼かれていない | **`retrieved` のまま** | NULL |
     ///
-    /// `WHERE` 節が「実際に変わる行」だけに絞ってあるので、
+    /// ## アダプタで絞ること（**`translating` は「翻訳役の重みに入った」という意味である**）
+    ///
+    /// `AdapterKind` には `base`（本体 8B）もある（14.13a節で 16GB でも回ることは実測済み）。
+    /// 絞らないと2つ壊れる:
+    ///
+    /// 1. **本体アダプタにしか入っていない像が `translating` を名乗る。**
+    ///    アダプタで絞っている `statementsInActiveAdapter(.translator)` は空なので、
+    ///    14.15節の画面が「翻訳役には何も入っていないが、待っている像も0件」と言う
+    /// 2. **`adapter_gen` が両アダプタを混ぜた `MAX(generation)` になる。**
+    ///    翻訳役 v1 の像が本体 v7 を指し、存在しない世代を画面に出す
+    ///
+    /// ## `WHERE` は「導出値と食い違っている行」を全部拾う
+    ///
+    /// 以前はここが `adapter_gen` の変化と「`translating` なのに焼かれていない行」しか
+    /// 見ていなかったので、**手で `stored` に落とされた焼き込み済みの像が素通りした**
+    /// ── 矛盾が一時的な状態ではなく、その世代が有効なあいだ残り続けた。
+    /// **いまは `placement` を導出値そのものと突き合わせるので、どちら向きのずれも直る。**
+    ///
+    /// それでも `WHERE` が「実際に変わる行」だけに絞られていることは変わらないので、
     /// **何も変わらないときは `updated_at` も動かない。**
     /// 動くと、変わっていない像が設定画面の先頭に来てしまう。
     private static func recalculateTraitPlacements(_ db: Database, at date: Date) throws {
@@ -702,28 +807,57 @@ extension Store {
             SELECT MAX(g.generation)
               FROM user_trait_bakes b
               JOIN adapter_generations g ON g.id = b.adapter_generation_id
-             WHERE b.trait_id = user_traits.id AND g.is_active = 1
+             WHERE b.trait_id = user_traits.id
+               AND g.adapter = :adapter
+               AND g.is_active = 1
             """
-        let hasActiveBake = """
-            SELECT 1
-              FROM user_trait_bakes b
-              JOIN adapter_generations g ON g.id = b.adapter_generation_id
-             WHERE b.trait_id = user_traits.id AND g.is_active = 1
+        // **導出値の定義そのもの。** SET と WHERE の両方がこれを使う ──
+        // 2か所に書き分けると、片方だけ直したときに「直らない行」がまた生まれる。
+        let derivedPlacement = """
+            CASE
+              WHEN EXISTS (\(activeBakeExistsSQL)) THEN 'translating'
+              WHEN placement = 'translating'       THEN 'stored'
+              ELSE placement
+            END
             """
         try db.execute(
             sql: """
                 UPDATE user_traits
                    SET adapter_gen = (\(activeGeneration)),
-                       placement   = CASE
-                                       WHEN EXISTS (\(hasActiveBake)) THEN 'translating'
-                                       WHEN placement = 'translating'  THEN 'stored'
-                                       ELSE placement
-                                     END,
-                       updated_at  = ?
+                       placement   = \(derivedPlacement),
+                       updated_at  = :now
                  WHERE adapter_gen IS NOT (\(activeGeneration))
-                    OR (placement = 'translating' AND NOT EXISTS (\(hasActiveBake)))
+                    OR placement   IS NOT (\(derivedPlacement))
                 """,
-            arguments: [SophiaTimestamp.milliseconds(from: date)]
+            arguments: [
+                "adapter": AdapterKind.translator.rawValue,
+                "now": SophiaTimestamp.milliseconds(from: date),
+            ]
         )
+    }
+
+    /// **NUL を含む文字列を DB へ書かせない。**
+    ///
+    /// GRDB は文字列を `sqlite3_bind_text(…, -1, …)` で束縛する（`StandardLibrary.swift`）。
+    /// **長さを渡していないので、SQLite は最初の NUL までしか保存しない。**
+    /// 読むほうも `String(cString: sqlite3_column_text(…))` なので、**同じ場所で切れる。**
+    /// つまり黙って通すと:
+    ///
+    /// 1. **`recordTrait` が返した記録と、保存された行が食い違う。** 呼び出し側は成功したと見る
+    /// 2. 学習データを DB から作れば切れた文が、返り値から作れば全文が入る ──
+    ///    **どちらが重みに入ったのかを後から言えない**（NFR-12）
+    /// 3. 消したことの確認（全表走査）も、切れた文しか探せない
+    ///
+    /// **黙って変えるより、書かせないほうがよい。**
+    /// 切って保存すると「言語化された文」（14.14節）が**利用者の知らないところで別物になり、
+    /// しかもそれが重みへ焼かれると消せない**（14.11節④で戻せるのは世代であって1件ではない）。
+    /// 拒めば、上流（モデルの出力・貼り付けたファイル片）に NUL が混ざったことが
+    /// **その場で見える。**
+    ///
+    /// > **【未確認】上流で NUL を落としているかは見ていない。**
+    /// > ここが表明しているのは「**この層は黙って受け取らない**」ことだけである。
+    private static func rejectNUL(_ text: String, field: String) throws {
+        guard text.utf8.contains(0) else { return }
+        throw StoreFailure.textContainsNUL(field: field)
     }
 }
