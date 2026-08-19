@@ -666,6 +666,21 @@ actor MLXEngine: InferenceEngine {
         // **actor の外から書かれる**ので、ここでは受け皿を用意するだけ。
         let prefillProbe = PrefillMemoryProbe(enabled: Self.memoryProbeRecords)
 
+        // 周をまたいで KVキャッシュと「そこへ払い済みのトークン列」を持ち回る箱
+        // （詳細はファイル末尾「プリフィルの再利用」）。**このターンの中だけ生きる。**
+        //
+        // engine のプロパティにしていないのは、KVキャッシュを次のターンまで
+        // 抱えたままにしないためである ── 16GB機で 100MB 台を黙って握るのは高い。
+        // ターンをまたぐ再利用は、この中での効果を実測してから考えること。
+        let prefillLedger = PrefillCacheLedger()
+        let prefillReuseEnabled = Self.prefillReuseEnabled
+        // 正常終了・中断・失敗のどれで抜けても KVキャッシュを手放す。
+        //
+        // **`defer` は逆順に走る**ので、これは上の `finishMemoryMeasurement()` より先に動く。
+        // つまり `generate_end` の点は「キャッシュを手放したあと」で取られる ──
+        // 再利用を入れる前と同じ状態を測っていることになり、A/B がそのまま並べられる。
+        defer { prefillLedger.clear() }
+
         // --- 往復をまたいで足し合わせる計測値（FR-14 / 16章）---------------------
         //
         // **ツールの往復は「1回の生成」ではなく「複数回の生成」である。**
@@ -809,22 +824,34 @@ actor MLXEngine: InferenceEngine {
             //  **いま分かっている範囲で答えさせる**ためである（16.8節）。
             //  ここで打ち切ると、利用者には**読んだきり黙って終わった**ように見える。
             //
-            //  ## 毎周プリフィルし直している（**承知の上の代償**）
+            //  ## 周ごとのプリフィル ── いくら払っているかは `[PREFILL]` 行に出る
             //
-            //  周ごとに `prepare` からやり直すので、**会話全体を毎回プリフィルする。**
-            //  KVキャッシュの再利用（`PromptCacheReusePolicy`）は入れていない ──
-            //  書き戻した `<tool_call>` の綴りがモデルの出力と1文字でも違えば
-            //  接頭辞が一致せず、**再利用が黙って壊れた結果を作る**ほうが怖い。
-            //  費用は `.done` の `inputTokens`（周ごとの合計）に必ず載るので、
-            //  **測ってから手を入れること。**
+            //  周ごとに `prepare` からやり直すので、**描画されるのは毎回会話全体**である。
+            //  払う量をそこから減らすのが `startPrefillRound` の仕事で、
+            //  台帳と突き合わせて一致した接頭辞ぶんだけキャッシュから持ち越す
+            //  （**既定は無効。** 詳細はファイル末尾「プリフィルの再利用」）。
             //
-            //  **だからこそ、周の頭で第2段の縮約を通している**（16.3節 / `compacted`）。
-            //  払い直すのが避けられないなら、せめて**払い直す量を減らす**しかない ──
-            //  古い読み取りは栞1行に落ち、次の周からはその1行ぶんだけを払う。
+            //  再利用が効かない周・効かせない設定では、**従来どおり全部払う。**
+            //  どちらだったかは周ごとに1行残る:
+            //
+            //      [PREFILL] round=2 prompt=1271 fed=812 reused=459 ... decision=trim_append
+            //      [PREFILL] round=2 prompt=1271 fed=1271 reused=0 ... decision=rebuild reason=off
+            //
+            //  費用は `.done` の `inputTokens`（周ごとの**描画量**の合計）に必ず載る。
+            //  **実際に払った量は `[PREFILL] fed=` のほうである** ── 2つは別物なので
+            //  混ぜないこと（再利用が無効なら常に同値になる）。
+            //
+            //  **周の頭で第2段の縮約を通している**のは変わらない（16.3節 / `compacted`）。
+            //  再利用は「同じ接頭辞を2度払わない」だけで、**描画量そのものは減らさない。**
+            //  古い読み取りを栞1行に落とすのは今でも縮約の仕事である。
             // =====================================================================
             rounds: while true {
                 round += 1
                 try Task.checkCancellation()
+
+                // **`[MEM]` の点に周番号を載せる。** これが無いと `prefill_end` が
+                // 2行並んだとき、どちらがどの周か後から復元できない（2026-08-18 に実際に困った）。
+                prefillProbe.beginRound(round)
 
                 // クロージャへ渡すので不変にする（`toolSpecs` は var である）。
                 let roundTools = toolSpecs
@@ -908,14 +935,24 @@ actor MLXEngine: InferenceEngine {
                 // そのまま `.toolCall` として通る**（`?? true` に落ちる）。
                 // 渡してあれば、モデルが名前を捏造したとき `.rejectedToolCall(.undeclaredTool)`
                 // として弾かれる ── 16.8節「ツール名が一致しない」の第一の防壁である。
-                let stream = try await container.perform(nonSendable: lmInput) { context, input in
-                    try MLXLMCommon.generate(
-                        input: input,
-                        parameters: parameters,
+                //
+                // **`generate` の呼び出しは `startPrefillRound` の中へ移してある。**
+                // `[KVCache]` も `ModelContext` も `Sendable` ではないので、
+                // 台帳との突き合わせも巻き戻しも `perform` の内側でやるしかない
+                // （ファイル末尾「プリフィルの再利用」）。
+                // **再利用が無効なら、あの中は `generate` を1回呼ぶだけに潰れる。**
+                let started = try await container.perform(nonSendable: lmInput) { context, input in
+                    try Self.startPrefillRound(
                         context: context,
+                        preparedInput: input,
+                        promptTokens: promptTokens,
+                        ledger: prefillLedger,
+                        reuseEnabled: prefillReuseEnabled,
+                        parameters: parameters,
                         components: components,
                         tools: roundTools)
                 }
+                let stream = started.stream
 
                 // --- プリフィル完了の1点を回収する -------------------------------
                 //
@@ -952,7 +989,7 @@ actor MLXEngine: InferenceEngine {
                         // 往復しても**1回だけ**取る（2周目は「最初の」ではない）。
                         if !sawFirstChunk {
                             sawFirstChunk = true
-                            recordMemory(.firstToken)
+                            recordMemory(.firstToken, round: round)
                         }
                         for segment in separator.process(text) {
                             // **思考は溜めない。** 書き戻さないものを持たない
@@ -1003,9 +1040,18 @@ actor MLXEngine: InferenceEngine {
                 }
 
                 // --- この周の計測を足す -------------------------------------------
+                //
+                // **2つの数を混ぜないこと。**
+                //   `promptTokenTotal` … その周に**描画した**プロンプト全体。
+                //                        モデルが条件付けした量で、`.done` の `inputTokens`
+                //                        ＝ `[STATS] in=` の意味はこちらである
+                //   `timedPromptTokens` … その周に**実際に払った**量（`info.promptTokenCount`）。
+                //                        速度の分子。**分母（`promptTime`）と出所を揃える**
+                //
+                // 再利用が無効なら2つは常に同値で、行の意味は入れる前と1トークンも変わらない。
                 if let info {
                     sawCompletionInfo = true
-                    promptTokenTotal += info.promptTokenCount
+                    promptTokenTotal += promptTokens.count
                     timedPromptTokens += info.promptTokenCount
                     outputTokenTotal += info.generationTokenCount
                     prefillSecondsTotal += info.promptTime
@@ -1014,6 +1060,25 @@ actor MLXEngine: InferenceEngine {
                     // 中断などで `.info` が届かなかった周。**入力ぶんだけは実測値がある。**
                     promptTokenTotal += pendingPromptTokens
                 }
+
+                // --- この周のプリフィルを1行残す（**周ごとに必ず出る**）--------------
+                //
+                // これが「直す前・直したあと」を並べるための一次資料である。
+                //   `prompt` … 描画したトークン数
+                //   `fed`    … **実際に払った**トークン数。**prompt との差が効いた量**
+                //   `s`      … その周のプリフィル秒（`.info` が来なかった周は `-`）
+                writePrefillLine([
+                    ("round", "\(round)"),
+                    ("prompt", "\(promptTokens.count)"),
+                    ("fed", "\(started.fedTokens)"),
+                    ("reused", "\(started.decision.reusedTokens)"),
+                    ("trimmed", "\(started.decision.trimmedTokens)"),
+                    ("decision", started.decision.logName),
+                    ("reason", started.decision.logReason),
+                    ("s", info.map { String(format: "%.2f", $0.promptTime) } ?? "-"),
+                    ("tools", roundTools == nil ? "0" : "\(roundTools?.count ?? 0)"),
+                ])
+
                 // **周ごとに上書きする**（nil も含めて）。前の周の値を残さない。
                 lastStopReason = info.map { Self.stopReason(from: $0, cancelled: false) }
                 pendingPromptTokens = 0
@@ -1628,10 +1693,11 @@ actor MLXEngine: InferenceEngine {
     @discardableResult
     private func recordMemory(
         _ stage: MLXMemoryReading.Stage,
-        prefill: (processed: Int, total: Int)? = nil
+        prefill: (processed: Int, total: Int)? = nil,
+        round: Int? = nil
     ) -> MLXMemoryReading? {
         guard Self.memoryProbeRecords else { return nil }
-        return appendMemory(captureMLXMemory(stage: stage, prefill: prefill))
+        return appendMemory(captureMLXMemory(stage: stage, prefill: prefill, round: round))
     }
 
     /// 外（MLX の計算スレッド）で取った1点を積む。通し番号はここで振る。
@@ -1819,8 +1885,19 @@ struct MLXMemoryReading: Sendable, Equatable {
     var peakMemory: Int
     /// `prefillEnd` のときだけ入る。**どこまで進んだ時点の値なのか。**
     var prefillProcessed: Int? = nil
-    /// 同上、入力トークンの総数。`prefillProcessed == prefillTotal` でなければ途中の値である。
+    /// 同上、**その周で実際に払うトークンの総数。**
+    /// `prefillProcessed == prefillTotal` でなければ途中の値である。
+    ///
+    /// **描画したプロンプト全体とは限らない。** 再利用が効いた周は継ぎ足すぶんだけになる
+    /// ── 描画量と実払い量を並べたいときは `[PREFILL]` 行の `prompt=` / `fed=` を見ること。
     var prefillTotal: Int? = nil
+    /// **何周目の点か**（ツール往復の周番号。1 始まり）。
+    ///
+    /// これが無いと `prefill_end` が2行並んだとき、
+    /// **どちらがどの周なのかログから復元できない**（2026-08-18 の実測で実際に困った。
+    /// `seq=3` と `seq=5` の間隔から推測するしかなかった）。
+    /// 往復しない会話では常に 1 で、周番号の意味は変わらない。
+    var round: Int? = nil
 
     /// MLX が確保している総量。**MLX の解説どおり active + cache。**
     /// 4.62GB という重みのサイズと直接並べられるのはこの値である。
@@ -1838,6 +1915,8 @@ struct MLXMemoryReading: Sendable, Equatable {
             "total_mb=\(Self.megabytes(totalMemory))",
             "peak_mb=\(Self.megabytes(peakMemory))",
         ]
+        // **周番号は分かっているときだけ。** ロードや unload の点には周が無い。
+        if let round { fields.append("round=\(round)") }
         // プリフィル以外の段階では出さない。**無意味なキーを毎行並べない。**
         if let prefillProcessed, let prefillTotal {
             fields.append("prefill_processed=\(prefillProcessed)")
@@ -1874,7 +1953,8 @@ struct MLXMemoryReading: Sendable, Equatable {
 /// プリフィル中に個別に読むと、読んでいる間に確保が進んで内訳が食い違う。
 private func captureMLXMemory(
     stage: MLXMemoryReading.Stage,
-    prefill: (processed: Int, total: Int)? = nil
+    prefill: (processed: Int, total: Int)? = nil,
+    round: Int? = nil
 ) -> MLXMemoryReading {
     let snapshot = MLX.Memory.snapshot()
     return MLXMemoryReading(
@@ -1883,7 +1963,8 @@ private func captureMLXMemory(
         cacheMemory: snapshot.cacheMemory,
         peakMemory: snapshot.peakMemory,
         prefillProcessed: prefill?.processed,
-        prefillTotal: prefill?.total)
+        prefillTotal: prefill?.total,
+        round: round)
 }
 
 /// プリフィルの進捗コールバックから届いた**最後の1点**だけを持つ箱。
@@ -1915,9 +1996,21 @@ private final class PrefillMemoryProbe: @unchecked Sendable {
     private let enabled: Bool
     private let lock = NSLock()
     private var latest: MLXMemoryReading?
+    /// いま何周目か。**周の頭で actor 側が入れる。**
+    ///
+    /// 進捗コールバックは MLX の計算スレッドから鳴るので、そちらからは周が分からない。
+    /// 「入れるのは actor・読むのは外」で、`latest` とまったく同じ鍵の下に置く。
+    private var round: Int?
 
     init(enabled: Bool) {
         self.enabled = enabled
+    }
+
+    /// 周の頭で actor 側から呼ぶ。**無効でも入れる**（安いし、入れ忘れの分岐を作らない）。
+    func beginRound(_ round: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.round = round
     }
 
     /// 進捗コールバックから呼ぶ。**無効なら `snapshot()` すら呼ばない。**
@@ -1925,10 +2018,14 @@ private final class PrefillMemoryProbe: @unchecked Sendable {
     /// 計測用の処理がプリフィルの実測時間に混ざらないようにするためでもある。
     func record(processed: Int, total: Int) {
         guard enabled else { return }
-        let reading = captureMLXMemory(
+        // **`snapshot()` を鍵の外で取る。** 鍵の中で取ると、待たされた時間が
+        // そのままプリフィルの実測時間に乗る（この箱を作った理由そのもの）。
+        // 周番号だけは鍵の中で読み直して差し替える。
+        var reading = captureMLXMemory(
             stage: .prefillEnd, prefill: (processed: processed, total: total))
         lock.lock()
         defer { lock.unlock() }
+        reading.round = round
         latest = reading
     }
 
@@ -2366,6 +2463,404 @@ extension SophiaError {
 }
 
 // =============================================================================
+//  プリフィルの再利用（往復のたびに全部払い直すのをやめる）
+// -----------------------------------------------------------------------------
+//  ## 何が起きていたか（2026-08-18 21:50 の実測）
+//
+//      [MEM] stage=prefill_end  prefill_total=459   ← 1周目
+//      [MEM] stage=prefill_end  prefill_total=1271  ← 2周目。**459 を払い直している**
+//      [STATS] in=1730 ttfr_s=57.58 prefill_s=21.50 total_s=79.67
+//
+//  往復が増えるほど二乗で効く。
+//
+//  ## 前任者が残した懸念と、それへの答え
+//
+//  > 書き戻した `<tool_call>` の綴りがモデルの出力と1文字でも違えば接頭辞が一致せず、
+//  > **黙って壊れた再利用になるほうが怖い**
+//
+//  **懸念は正当である。** 綴りは実際にずれる ── テンプレートが描き直す
+//  `<tool_call>` の空白や改行がモデルの出力と一致する保証はどこにも無いし、
+//  トークン化の境目（`assistant\n` の直後）は文字が1つ変われば動く。
+//
+//  **だが「怖い」と「確かめようがない」は違う。**
+//  ここは**トークン列そのものを比べている。**
+//
+//   1. キャッシュへ払ったトークン列を**そのまま台帳に持つ**（`PrefillCacheLedger`）
+//   2. 次の周は、台帳と新しいプロンプトの**最長共通接頭辞**を取る
+//   3. 一致した長さまでだけ再利用し、**その先はキャッシュを巻き戻して捨てる**
+//
+//  綴りがずれていれば共通接頭辞がそこで止まるだけで、**ずれた中身を使うことは無い。**
+//  ずれが先頭近くまで来れば `short_prefix` で作り直す ＝ **従来と同じ経路**である。
+//  「一致しなければ黙って全部やり直す」を、判断の既定にしてある。
+//
+//  ## 台帳が嘘をつかないための約束（**ここが要**）
+//
+//  キャッシュに1バイトでも触る前に `ledger.clear()` を呼ぶ。
+//  途中で throw しても、残るのは「中身の分からないキャッシュ」ではなく
+//  **「台帳の無いキャッシュ」＝ 次の周は必ず作り直し**になる。
+//  逆順（触ってから消す）にすると、失敗した周のキャッシュが古い台帳と組み合わさり、
+//  **まさに前任者が恐れた「黙って壊れた再利用」**が起きる。
+//
+//  ## 既定は無効（`SOPHIA_PREFILL_REUSE=1` で有効）
+//
+//  **この実装はまだ実機で1度も走っていない。** 往復は実機で動いており、
+//  壊さないことが最優先である。同じバイナリで A/B が取れる形にしてあるので、
+//  2周目の出力が正気であることを確かめてから
+//  `prefillReuseEnabledByDefault` を `true` にすること。
+// =============================================================================
+
+/// 1周ぶんのプリフィルをどう払うか。**MLX を一切知らない純粋な判断。**
+///
+/// 型で持っているのは、`PrefillReuseTests` が**実装と同じ関数**を呼んで
+/// 値まで確かめられるようにするためである（テストの中に仮の定義を置かない）。
+enum PrefillReuseDecision: Equatable, Sendable {
+
+    /// キャッシュを捨てて全部払い直す。**従来とまったく同じ経路。**
+    /// 付いている文字列は「なぜ捨てたか」で、`[PREFILL]` 行にそのまま出る。
+    case rebuild(String)
+
+    /// 先頭 `reuse` トークンはキャッシュにある。`prompt[reuse...]` だけ払う。
+    case append(reuse: Int)
+
+    /// キャッシュを `trim` トークンだけ巻き戻してから `prompt[reuse...]` を払う。
+    ///
+    /// 巻き戻す中身は2つある ── **前の周が生成したトークン**と、
+    /// **台帳のうち今回のプロンプトと食い違った末尾**である。
+    case trimThenAppend(reuse: Int, trim: Int)
+
+    /// キャッシュから持ち越した長さ。**払わずに済んだトークン数。**
+    var reusedTokens: Int {
+        switch self {
+        case .rebuild: 0
+        case .append(let reuse): reuse
+        case .trimThenAppend(let reuse, _): reuse
+        }
+    }
+
+    /// 巻き戻して捨てた長さ。
+    var trimmedTokens: Int {
+        switch self {
+        case .rebuild, .append: 0
+        case .trimThenAppend(_, let trim): trim
+        }
+    }
+
+    /// `[PREFILL] decision=` に出る名前。**意味を変えないこと**（過去のログが読めなくなる）。
+    var logName: String {
+        switch self {
+        case .rebuild: "rebuild"
+        case .append: "append"
+        case .trimThenAppend: "trim_append"
+        }
+    }
+
+    /// `rebuild` のときだけ入る理由。それ以外は `-`。
+    var logReason: String {
+        switch self {
+        case .rebuild(let reason): reason
+        case .append, .trimThenAppend: "-"
+        }
+    }
+}
+
+extension MLXEngine {
+
+    /// これ未満しか一致しなかったら再利用しない。
+    ///
+    /// **端数を持ち越しても得が無い**からである。巻き戻しと台帳の比較には
+    /// それ自体の費用があり、数十トークンのために壊れる余地を開けるのは割に合わない。
+    /// 実測の相手は「1周目の459トークン」のような塊であって、端数ではない。
+    static let prefillReuseMinimumTokens = 128
+
+    /// 再利用を有効にするか。**既定は無効**（このファイル冒頭の解説を読むこと）。
+    ///
+    /// | 環境変数 | 効果 |
+    /// |---|---|
+    /// | `SOPHIA_PREFILL_REUSE=1` | 再利用する |
+    /// | 無指定 / `=0` | **従来どおり毎周全部払う** |
+    ///
+    /// `let` なのでプロセス起動時の値で固定される ── 途中で条件が動くと計測にならない。
+    /// 実機で確かめたら、この既定を `true` にすること（変えるのはこの1語だけで済む）。
+    static let prefillReuseEnabledByDefault = false
+
+    /// （`Self` ではなく型名で書いてある。ストアドプロパティの既定値式で `Self` を
+    ///   参照すると Swift のバージョンによって弾かれるため ──
+    ///   `clearsCacheAfterGeneration` と同じ事情である）
+    static let prefillReuseEnabled: Bool = {
+        switch ProcessInfo.processInfo.environment["SOPHIA_PREFILL_REUSE"] {
+        case "1": return true
+        case "0": return false
+        default: return MLXEngine.prefillReuseEnabledByDefault
+        }
+    }()
+
+    /// **この周のプリフィルをどう払うか決める。** 副作用を持たない。
+    ///
+    /// - Parameters:
+    ///   - cachedTokens: キャッシュへ払い済みのトークン列（台帳）。空 ＝ 冷えている
+    ///   - promptTokens: この周に描画されたプロンプト全体
+    ///   - cacheOffset: キャッシュが実際に進んでいる位置。
+    ///     **nil はエントリ間でオフセットが揃っていない**（＝信用できない）
+    ///   - cacheIsTrimmable: 全エントリが巻き戻せるか
+    static func prefillReuseDecision(
+        enabled: Bool,
+        cachedTokens: [Int],
+        promptTokens: [Int],
+        cacheOffset: Int?,
+        cacheIsTrimmable: Bool,
+        minimumReuse: Int = MLXEngine.prefillReuseMinimumTokens
+    ) -> PrefillReuseDecision {
+
+        guard enabled else { return .rebuild("off") }
+        guard !cachedTokens.isEmpty else { return .rebuild("cold") }
+        guard !promptTokens.isEmpty else { return .rebuild("empty_prompt") }
+
+        // オフセットが取れない／揃っていない。**層ごとに違う位置に居るキャッシュ**は
+        // どこまで正しいか言えないので触らない。
+        guard let cacheOffset else { return .rebuild("no_offset") }
+
+        // **台帳より短いキャッシュ。** 中断や失敗で払い切れていない。
+        // 台帳の後半が本当に載っているかを言えないので信用しない。
+        guard cacheOffset >= cachedTokens.count else { return .rebuild("short_cache") }
+
+        let common = Self.commonPrefixLength(cachedTokens, promptTokens)
+
+        // **全部一致してしまった。** 払うトークンが1つも残らず、
+        // 最初のフォワード（次トークンのロジット）が打てない。素直に作り直す。
+        guard common < promptTokens.count else { return .rebuild("no_new_tokens") }
+
+        // 端数しか一致しなかった。上の `prefillReuseMinimumTokens` の解説を読むこと。
+        guard common >= minimumReuse else { return .rebuild("short_prefix") }
+
+        // **ここまでで「先頭 common トークンはキャッシュに載っている」が確定している。**
+        // キャッシュを common の位置まで戻せば、その先を継ぎ足せる。
+        // 戻す量は台帳の食い違いぶん＋前の周が生成したぶんの合計になる。
+        let trim = cacheOffset - common
+        if trim == 0 { return .append(reuse: common) }
+
+        guard cacheIsTrimmable else { return .rebuild("not_trimmable") }
+        return .trimThenAppend(reuse: common, trim: trim)
+    }
+
+    /// 2つのトークン列が先頭から何個一致しているか。
+    ///
+    /// **文字列ではなくトークン ID を比べている。** これが「接頭辞が一致しているか」の
+    /// 確かめ方そのものである ── 綴りの違いはトークン化の結果に必ず出る。
+    static func commonPrefixLength(_ lhs: [Int], _ rhs: [Int]) -> Int {
+        var index = 0
+        let limit = min(lhs.count, rhs.count)
+        while index < limit, lhs[index] == rhs[index] { index += 1 }
+        return index
+    }
+}
+
+/// キャッシュと、**そこへ払い済みのトークン列**を組にして持つ箱。
+///
+/// ## なぜ組で持つのか
+///
+/// キャッシュ単体は「何トークン載っているか」しか言えない（`offset`）。
+/// **何が載っているか**は言えない。台帳が無ければ接頭辞の比較ができず、
+/// 「一致しているはず」で使うことになる ── それが黙って壊れる再利用である。
+///
+/// ## `@unchecked Sendable` にしている理由
+///
+/// `PrefillMemoryProbe` とまったく同じ事情である（`NSLock` で囲ってあるが
+/// コンパイラには見えない。`Mutex` は macOS 15 以上でこのアプリの下限は 14）。
+/// 加えて `[KVCache]` は `Sendable` ではないので、`ModelContainer.perform` の
+/// `@Sendable` クロージャへ渡すには箱に入れるしかない。
+///
+/// **中身に触るのは `perform` の内側だけ**である（`ModelContainer` は直列アクセスを
+/// 保証する）。生成自体も `MLXEngine.isGenerating` で直列化されている。
+final class PrefillCacheLedger: @unchecked Sendable {
+
+    private let lock = NSLock()
+    private var cache: [KVCache] = []
+    private var tokens: [Int] = []
+
+    init() {}
+
+    func read() -> (cache: [KVCache], tokens: [Int]) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (cache, tokens)
+    }
+
+    /// **払い終えてから**書く。書いた時点で「キャッシュはこの列を表す」が真になる。
+    func store(cache: [KVCache], tokens: [Int]) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.cache = cache
+        self.tokens = tokens
+    }
+
+    /// **キャッシュに触る前に呼ぶ。** 空にした状態で throw すれば、
+    /// 次の周は必ず `cold` で作り直しになる（壊れた再利用より遅いほうが遥かにまし）。
+    ///
+    /// ターンの終わりでも呼ぶ ── KVキャッシュを次のターンまで抱えたままにしない
+    /// （16GB機では 1,000トークンで 100MB 台を握る。**そこは黙って払う額ではない**）。
+    func clear() {
+        lock.lock()
+        defer { lock.unlock() }
+        cache = []
+        tokens = []
+    }
+}
+
+/// 1周ぶんの生成を始めた結果。`[PREFILL]` 行に出す材料も一緒に返す。
+struct PrefillRound: Sendable {
+    let stream: AsyncStream<Generation>
+    let decision: PrefillReuseDecision
+    /// **実際に払ったトークン数。** `promptTokens.count - decision.reusedTokens` と一致する。
+    let fedTokens: Int
+}
+
+extension MLXEngine {
+
+    /// 1周ぶんの生成を開始する。**`ModelContainer.perform` の内側でだけ呼ぶこと。**
+    ///
+    /// `context.model` も `[KVCache]` も `Sendable` ではないので、
+    /// 触ってよいのは直列アクセスが保証されているこの内側だけである。
+    /// 返すのは `Sendable` なものだけ（`AsyncStream<Generation>` と数値）。
+    ///
+    /// **プリフィルはこの関数が返る前に終わっている。**
+    /// `MLXLMCommon.generate` は `TokenIterator` を先に組み立ててから
+    /// ストリームを返し、プリフィルはその `init` の中で同期的に走る
+    /// （`Evaluate.swift` の `TokenIterator.prepare(input:prefill:)`）。
+    /// だから「払い終えてから台帳を書く」がこの並びで成立する。
+    static func startPrefillRound(
+        context: ModelContext,
+        preparedInput: LMInput,
+        promptTokens: [Int],
+        ledger: PrefillCacheLedger,
+        reuseEnabled: Bool,
+        parameters: GenerateParameters,
+        components: GenerationComponents,
+        tools: [[String: any Sendable]]?
+    ) throws -> PrefillRound {
+
+        let stored = ledger.read()
+
+        // **入力の形が想定と違ったら降りる。**
+        // 画像・動画・音声・明示マスクが載った入力は、位置がキャッシュのオフセットだけでは
+        // 決まらない（MLXLMCommon の `PromptCacheTurn` が `carriesPreparedMedia` /
+        // `carriesAttentionMask` として同じ判断をしている）。
+        // Sophia は文字だけを送っているので通常はここを通る ── **通らなくなったら
+        // それは新しい機能が入った報せ**であり、再利用は自動的に止まる。
+        let inputIsPlainText =
+            preparedInput.image == nil
+            && preparedInput.video == nil
+            && preparedInput.audio == nil
+            && preparedInput.text.mask == nil
+
+        /// **この周でキャッシュを持ち回すか。**
+        /// 偽なら台帳へ1バイトも残さない ── KVキャッシュの寿命が入れる前と変わらない。
+        let reuseActive = reuseEnabled && inputIsPlainText
+
+        // 層ごとのキャッシュのオフセットが揃っているか。揃っていなければ nil を渡す。
+        // （`\.offset` ではなくクロージャで書いているのは、`any KVCache` の
+        //   キーパスを避けるためだけである。意味は同じ）
+        let offsets = stored.cache.map { $0.offset }
+        let alignedOffset: Int? =
+            offsets.isEmpty || !offsets.allSatisfy({ $0 == offsets[0] }) ? nil : offsets[0]
+        let cacheIsTrimmable =
+            !stored.cache.isEmpty && stored.cache.allSatisfy { $0.isTrimmable }
+
+        var decision = Self.prefillReuseDecision(
+            enabled: reuseActive,
+            cachedTokens: stored.tokens,
+            promptTokens: promptTokens,
+            cacheOffset: alignedOffset,
+            cacheIsTrimmable: cacheIsTrimmable)
+
+        // 有効にしてあるのに入力の形で降りた。**理由を分けて残す**
+        // ── 設定で切ったのとは別の事情であり、混ぜるとログから区別できない。
+        if reuseEnabled, !inputIsPlainText { decision = .rebuild("input_shape") }
+
+        // =====================================================================
+        //  **ここから先はキャッシュに触る。だから先に台帳を空にする。**
+        //  この1行を下へ動かさないこと（このファイルの解説「台帳が嘘をつかないための約束」）。
+        // =====================================================================
+        ledger.clear()
+
+        var cache = stored.cache
+        var fedTokens: [Int]
+
+        switch decision {
+        case .rebuild:
+            // **切ってある周は空のままにする。** 下で `cache: nil` として渡り、
+            // `TokenIterator.init` の `cache ?? (try model.newCache(...))` が
+            // 自前で作る ── **入れる前とまったく同じ経路**である。
+            // 持ち回る周だけ、次の周のためにここで作って握る。
+            //
+            // （三項演算子で書かないこと。`try` は式の先頭にしか置けない ──
+            //   `cond ? try f() : x` は "'try' cannot appear to the right of a
+            //   non-assignment operator" で弾かれる）
+            if reuseActive {
+                cache = try context.model.newCache(parameters: parameters)
+            } else {
+                cache = []
+            }
+            fedTokens = promptTokens
+
+        case .append(let reuse):
+            fedTokens = Array(promptTokens[reuse...])
+
+        case .trimThenAppend(let reuse, let trim):
+            // **巻き戻した結果を必ず見る。** 戻り値（何個戻せたか）と、
+            // 戻したあとのオフセット（どこに着地したか）の両方である。
+            // 片方でも合わなければキャッシュはもう説明できない ── 作り直して全部払う。
+            let removed = cache.map { $0.trim(trim) }
+            let landed = cache.map { $0.offset }
+            if removed.allSatisfy({ $0 == trim }), landed.allSatisfy({ $0 == reuse }) {
+                fedTokens = Array(promptTokens[reuse...])
+            } else {
+                decision = .rebuild("trim_failed")
+                cache = try context.model.newCache(parameters: parameters)
+                fedTokens = promptTokens
+            }
+        }
+
+        // **再利用しない周は、用意済みの入力をそのまま渡す。**
+        // 組み直すと、テンプレート側が付けたものを落とす危険がある。
+        // 従来経路を1バイトも動かさないための分岐である
+        // （`LLMUserInputProcessor` も `LMInput(tokens: MLXArray(promptTokens))` を
+        //   作っているので、再利用する周の組み直しは形として同じものになる）。
+        let input =
+            decision.reusedTokens == 0 ? preparedInput : LMInput(tokens: MLXArray(fedTokens))
+
+        let stream = try MLXLMCommon.generate(
+            input: input,
+            cache: cache.isEmpty ? nil : cache,
+            parameters: parameters,
+            context: context,
+            components: components,
+            tools: tools)
+
+        // **払い終えた。** いまキャッシュが表しているのは描画したプロンプト全体である。
+        // このあと生成が乗るとオフセットは先へ進むが、台帳は動かさない ──
+        // 次の周は `cacheOffset - common` を巻き戻すので、生成ぶんも一緒に落ちる。
+        //
+        // **持ち回らない周は書かない。** 書くと KVキャッシュがターンの終わりまで
+        // 生き残り、切ってあるはずの経路でメモリの挙動だけが変わる（A/B が濁る）。
+        if reuseActive { ledger.store(cache: cache, tokens: promptTokens) }
+
+        return PrefillRound(stream: stream, decision: decision, fedTokens: fedTokens.count)
+    }
+}
+
+/// `[PREFILL]` 行を stderr へ1行で吐く。**周ごとに必ず1行出る。**
+///
+/// **`print` を使わない。** `[MEM]` / `[STATS]` / `[TOOL]` と同じ経路（生の `write(2)`）・
+/// 同じ `key=value` 形式に揃えてあり、`2> ログ` でそのまま拾える。
+///
+/// この行だけで「何周目に、何トークン描画して、そのうち何トークン払ったか」が読める。
+/// **`prompt` と `fed` の差が、再利用が実際に効いた量である。**
+private func writePrefillLine(_ fields: [(key: String, value: String)]) {
+    let line = fields.map { "\($0.key)=\($0.value)" }.joined(separator: " ")
+    FileHandle.standardError.write(Data("[PREFILL] \(line)\n".utf8))
+}
+
+// =============================================================================
 //  実機で確かめること（このファイルは実行していない）
 // -----------------------------------------------------------------------------
 //  1. **トークンが実際に流れるか。** `.chunk` が届き、日本語が化けないこと
@@ -2446,7 +2941,30 @@ extension SophiaError {
 //  22. **思考ONで往復すること（16.9節 項目3の続き）。** 思考が
 //      `<tool_call>` を巻き込まないこと ── 巻き込むと `visibleText` が汚れ、
 //      書き戻す assistant の本文に思考が混ざる
-//  23. **往復の代金を測ること。** `.done` の `inputTokens` は**周ごとの合計**である。
-//      1往復で何トークン払ったのかを BENCH に残すこと ──
-//      毎周プリフィルし直している（承知の上の代償）ので、ここがいちばん高い
+//  23. **往復の代金を測ること。** `.done` の `inputTokens` は**周ごとの描画量の合計**である。
+//      実際に払った量は `[PREFILL] fed=` のほう。1往復で何トークン払ったのかを
+//      BENCH に残すこと ── 往復のある会話ではここがいちばん高い
+//
+//  ## プリフィルの再利用について確かめること（2026-08-19 追加）
+//
+//  **判断は `PrefillReuseTests` がモデル無しで固定している**（接頭辞の突き合わせ・
+//  巻き戻し量・作り直しへの落ち方）。実機でしか分からないのは、
+//  **巻き戻したキャッシュに継ぎ足したとき、モデルの出力が正気かどうか**である。
+//  これが確かめられるまで既定は無効（`prefillReuseEnabledByDefault = false`）。
+//
+//  24. **まず無効のまま1往復して基準を取る。** `make prefill-off`。
+//      `[PREFILL]` が周ごとに出て、`fed` が `prompt` と**常に等しい**こと
+//      （等しくなければ、無効にしたつもりが効いていない）
+//  25. **有効にして同じ問いを繰り返す。** `make prefill-on`。
+//      2周目の `[PREFILL]` で `fed < prompt` になり、`decision=append` か
+//      `trim_append` が出ること。**`decision=rebuild reason=short_prefix` ばかりなら、
+//      テンプレートの再描画が先頭近くから食い違っている** ── 効果は出ないが
+//      壊れてもいない（従来経路である）
+//  26. **本丸: 2周目の答えが正気であること。** ここだけは目で読むしかない。
+//      読んだ内容に基づく答えが返り、**日本語が壊れていない**こと。
+//      壊れていたら `SOPHIA_PREFILL_REUSE=0` に戻すこと ── それだけで元に戻る
+//  27. **同じ問いに同じ答えが返ること。** 24 と 25 を `temperature=0` で並べ、
+//      本文が一致するか見る。**一致しなければ再利用が計算を変えている**
+//  28. **`decision=trim_failed` が出ないこと。** 出たら巻き戻しが効いていない
+//      （そのとき既に作り直しへ落ちているので壊れてはいないが、前提が違う）
 // =============================================================================

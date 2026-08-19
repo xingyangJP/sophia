@@ -578,3 +578,89 @@ lorasize:
 	@echo "  4. [LORASIZE-COND]  各 n の loss_moved=1 / trusted=1 を確認してから pass_rate を読む"
 	@echo "  5. [LORASIZE-CURVE] **結論。** rises_at が答え。confounded= も必ず見ること"
 	@echo "  疑わしいときは [LORASIZE-OUT-BEGIN]〜[LORASIZE-OUT-END] の全文を読むこと"
+
+# --- プリフィルの再利用を測る（往復のたびに全部払い直していた件）-------------
+# **測るのが先。効果を断定しない。**
+#
+# 2026-08-18 21:50 の実測では、1周目に 459 トークン払ったあと、
+# 2周目でそれを含む 1271 トークンを**丸ごと払い直していた**
+# （[STATS] in=1730 ttfr_s=57.58 prefill_s=21.50）。
+#
+# エンジン側は、キャッシュへ払い済みのトークン列を台帳に持ち、
+# 次の周のプロンプトとの**最長共通接頭辞**だけを持ち越す。
+# 綴りがずれれば共通接頭辞がそこで止まり、その先は捨てる ＝ 従来経路に落ちる。
+# **既定は無効**（MLXEngine.swift 末尾「プリフィルの再利用」を読むこと）。
+#
+# 使い方 ── **同じ問いを2回**して並べる:
+#
+#   make prefill-off NOTE="基準"     ← 従来どおり全部払う
+#   （アプリで往復する問いを1つ投げて、終わったら閉じる）
+#   make prefill-on  NOTE="再利用"   ← 再利用する
+#   （**同じ問いを投げる。** 答えが正気かどうかを目で読むこと）
+#   make prefill-report              ← 2つを並べて数字にする
+#
+# **読む順は prefill-report の出力の下に書いてある。**
+PREFILL_REUSE ?= 1
+
+.PHONY: prefill-on prefill-off prefill-run prefill-report prefill-tail
+
+# 再利用を有効にして起動する。
+prefill-on:
+	@$(MAKE) --no-print-directory prefill-run PREFILL_REUSE=1 NOTE="$(NOTE)"
+
+# 再利用を無効にして起動する。**これが基準**（入れる前とまったく同じ経路）。
+prefill-off:
+	@$(MAKE) --no-print-directory prefill-run PREFILL_REUSE=0 NOTE="$(NOTE)"
+
+# app-stats と同じ経路。違いは SOPHIA_PREFILL_REUSE を渡すことだけ。
+# LOG_MEM を必ず立てるのは、[MEM] の prefill_end に round= が付くようになったため
+# ── どの周の点なのかがログから復元できる。
+prefill-run:
+	@mkdir -p logs
+	@printf '=== %s note=%s reuse=%s ===\n' "$$(date '+%F %T')" "$(NOTE)" "$(PREFILL_REUSE)" \
+		>> $(STATS_LOG)
+	@sysctl -n vm.swapusage >> $(STATS_LOG)
+	@open -n --env SOPHIA_LOG_STATS=1 --env SOPHIA_LOG_MEM=1 \
+		--env SOPHIA_PREFILL_REUSE=$(PREFILL_REUSE) \
+		$(if $(SYSTEM_PROMPT),--env SOPHIA_SYSTEM_PROMPT=$(SYSTEM_PROMPT),) \
+		--stderr "$(CURDIR)/$(STATS_LOG)" "$(APP_DEBUG)"
+	@echo "reuse=$(PREFILL_REUSE) で起動した。計測ログ: $(STATS_LOG)"
+	@echo "  別窓で make prefill-tail、終わったら make prefill-report"
+
+# 走らせながら周ごとの実測を眺める。
+prefill-tail:
+	@tail -f $(STATS_LOG) | grep --line-buffered -E '^\[PREFILL\]|^\[STATS\]'
+
+# 記録された [PREFILL] 行を起動ごとにまとめる。**これが答えを出すコマンド。**
+prefill-report:
+	@if [ ! -f $(STATS_LOG) ]; then \
+		echo "$(STATS_LOG) が無い。先に make prefill-off / make prefill-on"; exit 1; \
+	fi
+	@awk '/^=== / { if (n > 0) summarize(); hdr = $$0; n = 0; prompt = 0; fed = 0; secs = 0; delete kinds; printf "\n%s\n", hdr; next } \
+	     /^\[PREFILL\]/ { delete f; for (i = 2; i <= NF; i++) { split($$i, kv, "="); f[kv[1]] = kv[2] } \
+	       n++; prompt += f["prompt"]; fed += f["fed"]; if (f["s"] != "-") secs += f["s"]; \
+	       label = f["decision"]; if (f["reason"] != "-") label = label "(" f["reason"] ")"; kinds[label]++; \
+	       printf "  round=%-3s prompt=%-6s fed=%-6s reused=%-6s trimmed=%-5s s=%-7s %s\n", f["round"], f["prompt"], f["fed"], f["reused"], f["trimmed"], f["s"], label; next } \
+	     /^\[STATS\]/ { stats = $$0 } \
+	     END { if (n > 0) summarize(); if (rounds == 0) { print "  [PREFILL] 行が1行も無い。古いバイナリで測っていないか確認すること（make app のあとに測る）"; exit 1 } } \
+	     function summarize(   k, saved) { saved = prompt - fed; rounds += n; \
+	       printf "  --------------------------------------------------------\n"; \
+	       printf "  周の数          %d\n", n; \
+	       printf "  描画 合計       %d トークン  <- [STATS] in= と一致するはず\n", prompt; \
+	       printf "  実払い 合計     %d トークン  <- 実際に払った量\n", fed; \
+	       printf "  払わずに済んだ  %d トークン (%.1f%%)\n", saved, (prompt ? saved * 100 / prompt : 0); \
+	       printf "  プリフィル秒    %.2f  <- [STATS] prefill_s= と一致するはず\n", secs; \
+	       printf "  判断の内訳:\n"; for (k in kinds) printf "    %-26s %d\n", k, kinds[k]; \
+	       if (stats != "") printf "  %s\n", stats; stats = "" }' $(STATS_LOG)
+	@echo ""
+	@echo "読む順:"
+	@echo "  1. **器が対象を測っているか。** 各ブロックの「描画 合計」が [STATS] in= と、"
+	@echo "     「プリフィル秒」が prefill_s= と一致していること。**ずれていたら以降は読まない**"
+	@echo "  2. reuse=0 のブロックで『払わずに済んだ』が 0 であること（基準になっている）"
+	@echo "  3. reuse=1 のブロックの『払わずに済んだ』と『プリフィル秒』を 2 と比べる"
+	@echo "  4. 判断の内訳。**rebuild(short_prefix) ばかりなら効いていない** ──"
+	@echo "     テンプレートの再描画が先頭近くから食い違っている（壊れてはいない）"
+	@echo "  5. rebuild(trim_failed) が出ていたら報告すること。前提が違う"
+	@echo ""
+	@echo "**答えの中身も必ず読むこと。** 速くなっても内容が壊れていたら意味が無い"
+	@echo "（SOPHIA_PREFILL_REUSE=0 に戻すだけで元に戻る）"

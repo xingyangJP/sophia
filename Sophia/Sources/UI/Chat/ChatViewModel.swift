@@ -158,6 +158,18 @@ final class ChatViewModel {
     /// 会話履歴の保存先。開けなかった場合は nil のまま**会話は続行する。**
     /// 保存できないことは不便だが、話せないことより軽い。
     @ObservationIgnored private var store: Store?
+
+    /// 利用者像の画面（`UserTraitsSheet` / DESIGN.md 第14章）へ渡すためだけの窓。
+    ///
+    /// **同じ `Store` を使い回すために置いてある。** あちらで `Store.open()` を
+    /// もう一度呼ぶと、**同じファイルに対する `DatabaseQueue` が2本**できる。
+    /// 壊れはしないが、書き込みが互いを待つ形になり、**理由の分からない
+    /// 引っかかりの出所を1つ増やす。**
+    ///
+    /// nil なのは `prepare()` の前か、DB を開けなかったときである。
+    /// **どちらでも画面は開く**（保存できないことだけを出す）── NFR-11。
+    var traitStore: Store? { store }
+
     /// いま書き込んでいる会話。最初の送信で作る。
     @ObservationIgnored private var conversationID: String?
 

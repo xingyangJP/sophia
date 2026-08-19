@@ -10,6 +10,15 @@ struct ChatScreen: View {
     @State private var model: ChatViewModel
     @State private var sidebarVisibility: NavigationSplitViewVisibility = .all
 
+    /// 利用者像の質問（第14章 / FR-24）。**起動時に自動では開かない。**
+    ///
+    /// > 初回起動 | **3〜5問。**スキップ可（FR-24） |
+    /// > **信頼が最も薄い瞬間に手間を要求しない** ── 14.9節
+    ///
+    /// 割り込むかどうかは、この1つの `false` で決まっている。
+    /// **押されなければ費用は 0 である**（訊くこと自体が利用者のエネルギー ── 14.9節）。
+    @State private var showingTraits = false
+
     init(engine: any InferenceEngine) {
         _model = State(initialValue: ChatViewModel(engine: engine))
     }
@@ -36,6 +45,23 @@ struct ChatScreen: View {
                 .keyboardShortcut("n", modifiers: .command)
                 .help("新しい会話を始めます（⌘N）")
             }
+
+            // **主張しない**（`FolderBar` の `idleButton` と同じ扱い）。
+            // 何も出さないと機能があること自体に気づけないが、
+            // 割り込むと「信頼が最も薄い瞬間に手間を要求する」ことになる（14.9節）。
+            ToolbarItem(placement: .automatic) {
+                Button {
+                    showingTraits = true
+                } label: {
+                    Image(systemName: "person.crop.circle.badge.questionmark")
+                }
+                .help("いくつかの二択に答えると、Sophia の説明の仕方が決まります。"
+                      + "答えた内容は端末の中だけに置かれ、毎ターンの送信には載りません（0 トークン）")
+            }
+        }
+        .sheet(isPresented: $showingTraits) {
+            // **開くときに `Store` を読む。** `prepare()` が済んでいれば入っている。
+            UserTraitsSheet(store: model.traitStore)
         }
         .task { await model.prepare() }
     }
