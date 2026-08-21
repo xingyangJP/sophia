@@ -953,3 +953,35 @@ Foundation の辞書ではない。**そして意味は逆で、`ToolCall` が�
 > **気づけたのは「全12回とも false」という一様さのおかげである。**
 > 量子化の劣化なら**間欠的**になるはずで、**全部というのは検査側を疑う合図**だった。
 > **数字が綺麗すぎるときは、測り方を疑うこと。**
+
+---
+
+## 2026-08-19 **印付きで残っている既知の欠陥 —— 6件**
+
+**`XCTExpectFailure("既知の欠陥: …")` の印が付いており、いまは緑で通る。
+直すと「失敗しなかった」で落ちるので、直した人が必ず気づく。**
+
+**この一覧を消さないこと。** 印はコードの中にあるが、**なぜ直さなかったかはここにしか無い。**
+
+数え方の訂正: コミット `891c15e` のメッセージに「9件のうち7件を直した」と書いたが、
+**実際に直したのは6件で、残っているのは6件である**（印を数えたのが地の真実）。
+
+| # | テスト | 何が破れているか | なぜ直さなかったか |
+|---|---|---|---|
+| 1 | `AdversarialCompactionTests.testSixRealFileReadsStillOverrunTheBudgetAfterCompaction` | **6件読んだターンは落とし切っても予算に収まらない**（概算 590 / 573） | **数字の設計に関わる。** `SophiaDefaults.InputBudget` を変える判断が要る。提案は4案あり、最も効くのは **system の二重計上をやめる**（590 → 493） |
+| 2 | 同 `testWhatTheCompactionCallsFittingIsUnverifiedByAFactorOfOneAndAHalf` | **`fits == true` は概算に依っており、実測比 1.47倍甘い**（486 → 714 / 予算 573） | **実トークナイザを挿すまで確かめられない。** 挿す場所は `prepare` の直後（`lmInput.text.tokens.count`）。第15章の宿題 |
+| 3 | 同 `testTheCrossTurnStageDropsTheContentWithoutSayingSo` | ターンをまたぐ側（`engineMessages`）だけ**断り書きが無い。** 同じ第2段で判断が割れている | **判断は出た**（置く側が正しい ── 栞は user ターンに入るのでモデルには「これだけ返ってきた」にしか見えない）。**実装には `ContextWindowTests` 3件の同時変更が要る**（栞1行そのものを等値で固定している） |
+| 4 | `AdversarialContextTests.testAFileNameCanForgeTheDelimitersAndTheHeader` | ファイル名で囲いと見出しを偽造できる（`Context/` は自衛していない） | **意図的。** 守っているのは呼び手（`ToolText.singleLine`）である。**層の責務としてどちらに置くかの判断が未決** |
+| 5 | `AdversarialRoundTripTests.testWholeNumberDoublesDoNotSurviveTheRoundTrip` | `ModelToolCall` ↔ `ToolCall` が値を保存しない（`.double(80.0)` → `.int(80)`） | **直すには自前の JSON 符号化器が要り、ライブラリと同じ判断が2か所になる。** 上流（MLX の parser）で既に同じ正規化が起きており実害は小さい。**小数を取る4つ目のツールを足した日に効き始める** |
+| 6 | `AdversarialTraitsStoreTests.testAStatementMadeOfNothingButWhitespaceReachesTheTrainingSet` | 空白だけの文が学習データに入る | **上流に検査があるかが【未確認】。** 質問の UI 側（`OnboardingViewModel`）で弾いているかを確かめてから決める |
+
+### 直した6件（記録）
+
+| | 何が破れていたか |
+|---|---|
+| 縮約が費用を**増やす** | 空ファイルは 生19 対 栞＋断り書き24。**得になるか見る行がどこにも無かった**。**300件の規模テストの材料自体がこれを踏んでおり、3,600 → 6,291 に増えていたのに費用を見ていないので緑だった** |
+| 同じ周の並列呼び出しが消える | 守るのが最後の1件だけで、3つ同時の周では**2つがモデルに一度も見られないまま栞になった**。往復回数は消費済み |
+| 焼き込み済みの像を手で落とせる | **2か所必要だった**。`recalculateTraitPlacements` の WHERE が当たらず永久に直らなかった |
+| `base` アダプタが翻訳役の導出値を汚す | 副問い合わせに `g.adapter` の条件が無かった |
+| NaN の歩幅で確信度が 1.0 | **Swift の `min` は `y < x ? y : x`** なので NaN のとき `x` を返す |
+| NUL 入りの文が黙って切られる | **GRDB は書き込みだけでなく読み出しでも切る**（`String(cString:)`）ので「長さを渡す」は成立しない。拒否にした |
