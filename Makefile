@@ -1,5 +1,5 @@
 .PHONY: help up down restart status logs models bench bench-save pull clean-models icons \
-        app app-release app-run app-test app-clean app-setup app-stats app-watch stats-tail
+        app app-release app-run app-test test-audit app-clean app-setup app-stats app-watch stats-tail
 
 SHELL := /bin/bash
 NOTE ?=
@@ -28,7 +28,8 @@ help:
 	@echo "  make app-release Release 構成でビルド"
 	@echo "  make app-clean   ビルド成果物を削除（再ビルドに5分半かかる。慎重に）"
 	@echo "  make app-setup   初回だけ必要な Metal ツールチェーンを導入"
-	@echo "  make app-test    永続化層(DB)の単体テスト。GPUもモデルも使わない"
+	@echo "  make app-test    全テスト＋実行漏れの監査。GPUもモデルも使わない"
+	@echo "  make test-audit  宣言したテストが実際に実行されたかを名前で突き合わせる"
 	@echo "  make app-stats   実測ログ付きで起動（[STATS] を logs/mlx-stats.log へ）"
 	@echo "  make app-watch   普段使いしながら遅い往復を捕まえる（[STATS] + [MEM]）"
 	@echo "  make stats-tail  その実測ログを追尾"
@@ -142,15 +143,29 @@ stats-tail:
 	@tail -f $(STATS_LOG) | grep --line-buffered '^\[STATS\]'
 
 # Xcode のテストターゲット（SophiaTests）。永続化層 = DB のテストがここに入る。
-# **GPU もモデルも使わない**ので、他の作業と並行して回して安全（全体で1秒未満）。
+# **GPU もモデルも使わない**ので、他の作業と並行して回して安全（496件・約5秒）。
 # ホストアプリを一瞬起動して、その中でテストバンドルを走らせる仕組みなので、
 # 画面に Sophia のウィンドウが出て消える。異常ではない。
 app-test:
 	@$(XCODEBUILD) -configuration Debug test
+	@$(MAKE) --no-print-directory test-audit
+
+# 宣言されたテストが本当に実行されたかを、名前で突き合わせる（R9 / DESIGN 15.8節）。
+#
+# **`app-test` の後ろに繋いであるのは意図的である。** 別targetにすると
+# 「打った人にしか走らない検査」になり、まさにこの器が防ごうとしている形
+# （既定で走らない仕掛けが、正しさを守る唯一の守りになっている）を自分で作ることになる。
+#
+# 落ちる条件は「宣言されているのに実行時に現れない」だけ。
+# skip は落とさないが**毎回実名で出す** ── `totalTestCount` は skip を
+# 「走った」に数えるので、数の突き合わせでは中身が走っていないことを見抜けない。
+# 名前が目に入れば人が気づける（例: `testToolDefinitionTokenCost` = 322 の唯一の裏取り）。
+test-audit:
+	@python3 scripts/audit-tests.py
 
 # --- プリフィル崩れの切り分け計測 ------------------------------------------
 # **これは重い。** 4.6GB のモデルを読み込んで実際に推論を回すので、
-# `app-test`（全80件・1秒未満）とはまったく性格が違う。
+# `app-test`（496件・約5秒。モデルもGPUも使わない）とはまったく性格が違う。
 #
 # 切り分けたいのは「アイドル中に重みが compressor へ退避され、
 # 次のプリフィルが伸長とページフォルトの代金を払う」という現象
