@@ -3400,7 +3400,7 @@ FR-21 は「気をつけて実装する」種類の約束ではなく、**引数
 |---|:--:|---|
 | `com.apple.security.app-sandbox` | true | 前提 |
 | `com.apple.security.files.user-selected.read-write` | **true** | **FR-19 の入口は開いている。2026-08-23 に `read-only` から変更** |
-| `com.apple.security.network.client` | true | モデル取得と、**FR-30 の検索語送信**（NFR-01 改定） |
+| `com.apple.security.network.client` | true | **いまはモデル取得のみ。** FR-30（検索）実装後は検索語の送信が加わる（NFR-01 改定済み・**実装は未着手**） |
 
 > **⚠ かつてここには「`read-only` であることが FR-20 を OS のレベルで止めている」と書いてあり、
 > その記述には【確認済】の印が付いていた。印が付いたまま、実ファイルと食い違っていた。**
@@ -3413,9 +3413,21 @@ FR-21 は「気をつけて実装する」種類の約束ではなく、**引数
 `NSOpenPanel`（`canChooseDirectories = true` / `canChooseFiles = false`）
 または SwiftUI の `.fileImporter`。
 
-**現状 `Sophia/Sources/` にこの経路は1本も無い**
-（`NSOpenPanel` / `fileImporter` / `bookmarkData` / `startAccessingSecurityScopedResource`
-のいずれも該当なし）。**新規である。**
+> **⚠ ここには 2026-08-16 まで「現状 `Sophia/Sources/` にこの経路は1本も無い。新規である」と書いてあった。
+> 実装された日に偽になり、7日間、誰も追わなかった。**
+>
+> **実態**（2026-08-23 に実測。`Sophia/Sources/Files/` が丸ごとこの経路）:
+>
+> | 符号 | 実在 |
+> |---|---|
+> | `NSOpenPanel` | `FolderPicker.swift` / `SecurityScopedFolder.swift` |
+> | `bookmarkData` | `SecurityScopedFolder.swift` |
+> | `startAccessingSecurityScopedResource` | `SecurityScopedFolder.swift` / `FolderAccessError.swift` |
+> | `fileImporter` | **無し**（`NSOpenPanel` を採った） |
+>
+> **教訓: 「1本も無い」は最も壊れやすい断定である ── 1本入れば偽になる。**
+> **設計書に「現状のソースはこうである」と書くなら、書いた瞬間から腐り始めることを承知で書くこと。**
+> **符号名を挙げて「無い」と断定するのは、特に避けること。**
 
 #### 権限の保持 — セキュリティスコープ付きブックマーク
 
