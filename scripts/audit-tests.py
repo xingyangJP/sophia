@@ -213,6 +213,19 @@ def main() -> int:
         print(f"\n⚠ 器の欠陥: xcresult は {reported} 件と申告しているのに "
               f"{len(cases)} 件しか取れていない。どこかで潰している。", file=sys.stderr)
         return 2
+    # **潰れを防ぐ検算が、潰れうる側を見ていなかった。**
+    #
+    # 上は `len(cases)`（リスト）を見ているが、表示にも差分にも使うのは `ran`（集合）である。
+    # 同じ `クラス.メソッド` が2回現れると、上は通り、表示だけが1件少なくなる。
+    # 別クラスの同名では起きないが、**同じテストが2回現れる経路では起きる** ──
+    # `-retry-tests-on-failure`、繰り返し実行、宛先を2つ指定した実行。
+    # **今日直したのと同じ形が、1階層下に残っていた。**
+    if len(cases) != len(ran):
+        print(f"\n⚠ 器の欠陥: 同じ名前が2回以上現れている"
+              f"（{len(cases)} 件中 {len(ran)} 種）。"
+              "再試行か繰り返し実行が有効になっていないか。", file=sys.stderr)
+        return 2
+
     if reported is not None and reported != len(declarations):
         print(f"\n⚠ 宣言 {len(declarations)} と xcresult の申告 {reported} が食い違う。"
               "下の差分を見ること。", file=sys.stderr)
