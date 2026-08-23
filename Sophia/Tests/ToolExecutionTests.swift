@@ -874,6 +874,32 @@ final class ToolExecutionTests: XCTestCase {
                 "search_files.path": "Where to start. Empty string for the whole bound folder",
                 "search_files.query": "Word contained in the file name",
             ])
+
+        // --- 文言と数字を同じ関数の中に置く（R10）------------------------------
+        //
+        // **別のテストに分けないこと。** 分けた瞬間、この錠は効かなくなる。
+        //
+        // 322 は「この説明文をこの語順で送ったときの実測」であって、
+        // 定数そのものに意味は無い。ところが**その実測を突き合わせている試験
+        // （`EngineToolWiringTests.testToolDefinitionTokenCost`）は既定で skip される**
+        // ── モデルが要るので `make tooltokens` を打った人にしか走らない。
+        //
+        // つまり守りは上の錠1枚しかなく、そこには穴がある。
+        // **赤を見た人は、期待値の文言を書き換えれば緑に戻せてしまう。**
+        // そのとき 322 はどこにも現れないので、**文言だけが新しくなり、
+        // それを根拠にした予算配分（`InputBudget.transcript` の 1000 − 105 − 322）は
+        // 古いまま残る。** 文言は守られているのに、文言と数字の結び付きは誰も守っていない。
+        //
+        // だから同じ関数の中へ置く。**上を書き換える人の目に、必ずこれが入る。**
+        XCTAssertEqual(
+            SophiaDefaults.toolDefinitionTokens, 322,
+            """
+            ツール定義の費用が 322 から変わっている。
+            **上の説明文を書き換えたなら、この数字は既に古い。**
+            `make tooltokens` で測り直し、`make toolbreakdown` で内訳を出してから直すこと。
+            この数字は InputBudget.transcript（1000 − 105 − 322 = 573）を通じて
+            縮約が「収まった」と判断する境界そのものになっている。
+            """)
     }
 
     // MARK: - 補助
