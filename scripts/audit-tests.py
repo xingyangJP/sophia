@@ -51,41 +51,101 @@ DECLARATION = re.compile(
 )
 ANYWHERE = re.compile(r"\bfunc[ \t]+(test[A-Za-z0-9_]*)[ \t]*\(")
 COMMENT_LIKE = re.compile(r"^[ \t]*(///|//|\*|/\*)")
+# 型の宣言。持ち主を決めるために字下げごと拾う。
+TYPE_DECLARATION = re.compile(
+    r"^[ \t]*(?:@[A-Za-z_][A-Za-z0-9_]*(?:\([^)]*\))?[ \t]+)*"
+    r"(?:(?:public|internal|fileprivate|private|final|open)[ \t]+)*"
+    r"(?:class|actor|struct|extension|enum)[ \t]+([A-Za-z_][A-Za-z0-9_]*)"
+)
 
 
 def declared(tests_directory: Path) -> tuple[dict[str, str], list[str]]:
-    """宣言されているテスト名 → 出所。第2要素は器の欠陥（説明できない行）。"""
+    """宣言されているテスト `クラス.メソッド` → 出所。第2要素は器の欠陥。
+
+    **キーにクラス名を含めるのは必須である。** メソッド名だけを鍵にすると、
+    別クラスの同名テストが1件に潰れる。2026-08-23、実際に2組が潰れて
+    xcresult の 545 に対し器は 543 と数え、しかも**両側が同じように潰れるので
+    「一致」と報告していた。**
+
+    潰れると、この器が存在する理由そのものが消える ──
+    同名の片方が `XCTestCase` の外へ出て走らなくなっても、
+    もう一方が名前を残すので差分は空のままになる。
+    **`private actor` の中の2本を救うために作った器が、同名衝突しているテストについては
+    まさにその失敗を検出できない。**
+
+    クラスは**字下げ**で決める。`func test` の字下げが N なら、
+    それより浅い直近の型宣言が持ち主である ── 入れ子の型（テスト内の補助クラス）を
+    正しく飛ばせる唯一の軽い規則で、波括弧を数えずに済む
+    （波括弧を数える道は、文字列リテラルで同期を失う。初版がそれで7本を落とした）。
+    """
     found: dict[str, str] = {}
     unexplained: list[str] = []
     for path in sorted(tests_directory.rglob("*.swift")):
+        # (字下げ, 型名) の積み上げ。浅いものから深いものへ。
+        scopes: list[tuple[int, str]] = []
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            indent = len(line) - len(line.lstrip(" \t"))
+
+            type_declaration = TYPE_DECLARATION.match(line)
+            if type_declaration:
+                while scopes and scopes[-1][0] >= indent:
+                    scopes.pop()
+                scopes.append((indent, type_declaration.group(1)))
+                continue
+
             anchored = DECLARATION.match(line)
             if anchored:
-                found.setdefault(anchored.group(1), f"{path.name}:{number}")
+                owner = next(
+                    (name for depth, name in reversed(scopes) if depth < indent), "?")
+                found[f"{owner}.{anchored.group(1)}"] = f"{path.name}:{number}"
             elif ANYWHERE.search(line) and not COMMENT_LIKE.match(line):
                 unexplained.append(f"{path.name}:{number}: {line.strip()}")
     return found, unexplained
 
 
 def executed(xcresult: Path) -> list[tuple[str, str]]:
-    """xcresult に現れたテスト（名前, 結果）。**grep で拾おうとしないこと。**"""
+    """xcresult に現れたテスト（`クラス.メソッド`, 結果）。
+
+    **クラス名は親の Test Suite から取る。** 名前だけを集めると同名テストが潰れ、
+    静的側と同じように潰れるので**差が出ないまま「一致」になる**。
+
+    **grep で拾おうとしないこと。** 出力は整形済み JSON で `"nodeType"` と `"name"` が
+    別の行にあるため、行単位の grep は**黙って0件を返す。**
+    """
     raw = subprocess.run(
         ["xcrun", "xcresulttool", "get", "test-results", "tests", "--path", str(xcresult)],
         capture_output=True, text=True, check=True).stdout
     cases: list[tuple[str, str]] = []
 
-    def walk(node) -> None:
+    def walk(node, suite: str) -> None:
         if isinstance(node, dict):
+            if node.get("nodeType") == "Test Suite":
+                suite = node.get("name", suite)
             if node.get("nodeType") == "Test Case":
-                cases.append((node.get("name", "").split("(")[0], node.get("result", "?")))
+                cases.append(
+                    (f"{suite}.{node.get('name', '').split('(')[0]}",
+                     node.get("result", "?")))
             for value in node.values():
-                walk(value)
+                walk(value, suite)
         elif isinstance(node, list):
             for value in node:
-                walk(value)
+                walk(value, suite)
 
-    walk(json.loads(raw))
+    walk(json.loads(raw), "?")
     return cases
+
+
+def total_test_count(xcresult: Path) -> int | None:
+    """xcresult 自身が申告する総数。**器の検算に使う**（R8）。
+
+    宣言と実行が一致していても、この数と食い違えば
+    **器がどこかで潰している**という合図になる。
+    2026-08-23、同名衝突で 545 を 543 と数えたとき、この1行があれば即座に出ていた。
+    """
+    raw = subprocess.run(
+        ["xcrun", "xcresulttool", "get", "test-results", "summary", "--path", str(xcresult)],
+        capture_output=True, text=True, check=True).stdout
+    return json.loads(raw).get("totalTestCount")
 
 
 def newest_xcresult(root: Path) -> Path | None:
@@ -100,6 +160,26 @@ def main() -> int:
     xcresult = newest_xcresult(logs)
     if xcresult is None:
         print(f"⚠ {logs} に xcresult がない。先に `make app-test` を回すこと。", file=sys.stderr)
+        return 2
+
+    # **その xcresult が、いまのソースを実行した結果か。**
+    #
+    # ここを確かめないと、**ソースを直した直後に `make test-audit` だけを叩いたとき、
+    # 古い実行結果と新しい宣言を突き合わせて嘘の差分を出す。**
+    # 実際 2026-08-23、コミットより前の xcresult を掴んだまま 543/543 と報告した
+    # （たまたま一致していたのは、利用者がコミット前にテストを回していたからで、
+    #  器が保証したものではない）。**器が自分で選んだ入力を、器が検算する。**
+    measured_at = xcresult.stat().st_mtime
+    newer = [
+        path for path in tests_directory.rglob("*.swift")
+        if path.stat().st_mtime > measured_at
+    ]
+    if newer:
+        print("⚠ 器の欠陥: xcresult がソースより古い。この比較は意味を持たない。"
+              "`make app-test` を回し直すこと。", file=sys.stderr)
+        print(f"    xcresult: {xcresult.name}", file=sys.stderr)
+        for path in sorted(newer)[:10]:
+            print(f"    より新しい: {path.name}", file=sys.stderr)
         return 2
 
     declarations, unexplained = declared(tests_directory)
@@ -126,6 +206,16 @@ def main() -> int:
 
     print(f"宣言 {len(declarations)} / 実行 {len(ran)} / skip {len(skipped)}"
           f"  （{xcresult.name}）")
+
+    # **器の検算（R8）。** 潰していないことを、xcresult 自身の申告と突き合わせる。
+    reported = total_test_count(xcresult)
+    if reported is not None and reported != len(cases):
+        print(f"\n⚠ 器の欠陥: xcresult は {reported} 件と申告しているのに "
+              f"{len(cases)} 件しか取れていない。どこかで潰している。", file=sys.stderr)
+        return 2
+    if reported is not None and reported != len(declarations):
+        print(f"\n⚠ 宣言 {len(declarations)} と xcresult の申告 {reported} が食い違う。"
+              "下の差分を見ること。", file=sys.stderr)
 
     # skip は落とさない。**ただし毎回、実名で出す。**
     # 「6件」では誰も気づかないが、名前が目に入れば
