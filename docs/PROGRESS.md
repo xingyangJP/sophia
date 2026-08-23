@@ -1311,3 +1311,66 @@ static let asciiCharactersToTokens    = 0.25
   AI再レビューではpush阻害要因なしと判定した。
 - 最新修正を含む`make app-release`は`BUILD SUCCEEDED`。Releaseアプリの署名、バージョン0.1.2、
   `com.apple.security.files.user-selected.read-write = true`を再確認した。
+
+---
+
+## 2026-08-23 発見21: **表明の本数は、守りの強さではない**
+
+**検証役が錠を鳴らして測った。** 今朝見つけた「恒真の表明」と同じ根の別の顔であり、
+**2つ並べると規則になる**ので、まとめてここに置く。
+
+### 実験 ── 定数を1つ動かして、何本落ちるかを数えた
+
+`SophiaDefaults.InputBudget.generationPromptOverhead` を **7 → 8** に変え、
+`BudgetReconciliationTests` だけを走らせた（実行後に `git checkout --` で戻し、
+`git diff --stat Sophia/` が空であることを確認済み）。
+
+```
+BudgetReconciliationTests.swift:164: error: XCTAssertEqual failed: ("8") is not equal to ("7")
+  - テンプレート末尾の生成開始ぶんが 7 から変わっている。
+Executed 13 tests, with 1 failure (0 unexpected)
+```
+
+**13本中、落ちたのは1本だけだった。**
+
+### 落ちなかった側を数える ── **この定数に言及している表明は3本ある**
+
+| 行 | 表明 | 落ちたか |
+|---|---|:--:|
+| :126 | `Budget.transcript(armed: false) == Budget.total − Budget.generationPromptOverhead` | **落ちない** |
+| :129 | `Budget.transcript(armed: true) == Budget.total − generationPromptOverhead − toolDefinitions` | **落ちない** |
+| :165 | `Budget.generationPromptOverhead == 7` | **落ちた** |
+
+**:126 と :129 は `transcript(armed:)` の定義そのものを書き写している。**
+定数がいくつであっても両辺が同じだけ動くので、**構造上、落ちようがない。**
+
+> **言及は3本、守りは1本。** 数えて安心できるのは後者だけである。
+
+### 同じ根の、今朝の顔
+
+`BudgetReconciliationTests:107` にも恒真の表明がある ──
+`Budget.toolDefinitions == SophiaDefaults.toolDefinitionTokens`。
+前者は後者を参照しているだけなので、これも落ちようがない。
+
+**ただしこちらは、書いた人が自白している:**
+
+> **この1本だけは「形の錠」であって計測ではない。**
+> `toolDefinitions` は `toolDefinitionTokens` を参照しているので、いまは自明に通る。
+> 値そのものの正しさを見ているのは `EngineToolWiringTests`（`SOPHIA_TOOLTOKENS=1`）の
+> 実トークナイザ計測のほうで、**こちらは代わりにならない。**
+
+**気づいていた。それでも、代わりになるものは既定で走らない場所に置かれた。**
+**注意力では防げなかったことの証拠**であり、R10 がなぜ要るかの実例である。
+
+### 規則として
+
+**R6**（表明は「落ちないこと」ではなく「正しい値か」に置く）の、最も強い実例として記録する。
+
+> **恒真の表明が何本あっても、値は1ミリも守られない。**
+> **守りの強さは表明の本数ではなく、「その表明が落ちうるか」で数える。**
+> 定義を書き写した表明は、**形が壊れたことは捕まえるが、値が古くなったことは捕まえない。**
+> 両方が要るなら、**両方を別々に置くこと。** 片方をもう片方の代わりにしないこと。
+
+**この実験の形はそのまま再利用できる** ── **錠を信じる前に、定数を1つ動かして何本落ちるかを数える。**
+落ちた本数が0なら、その値は誰にも守られていない。
+**「錠は、鳴ることを確かめるまで錠ではない。」**
