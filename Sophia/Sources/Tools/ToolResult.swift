@@ -282,7 +282,22 @@ enum ToolText {
     /// > **縛っているのは「返す文字列」であって「入力の大きさ」ではない。**
     /// > 10万スカラーの入力は一度そのまま走査する（呼ばれた時点で既にメモリに載っている）。
     /// > ここが守っているのは、その先（文脈・プロンプト・画面）が払う費用である。
-    static func singleLine(_ text: String, limit: Int) -> String {
+    /// 書式文字（Cf。U+202E 等）も落とすか。**既定は落とさない。**
+    ///
+    /// ここが既定で false なのは、この関数の宛先が**モデルへ渡す文**だからである
+    /// ── 落とすと「何かが取り除かれた」ことがモデルに見えない形で本文が変わる。
+    ///
+    /// **`true` にするのはウェブ由来の文字列である**（FR-30）。
+    /// 抜粋は**攻撃者が自由に書ける文字列**で、しかも画面にもそのまま出る。
+    /// U+202E は行の見た目を反転できるので、**利用者が読んでいる文と
+    /// モデルが読んでいる文が食い違う**状態を作れてしまう。
+    ///
+    /// > **`ToolLogValue.sanitized` を使わないこと。** あちらは `key=value` のログ行向けで、
+    /// > **空白を `_` に潰す** ── 抜粋に掛けると文が読めなくなる。
+    /// > 落とすものが違うのであって、実装が2つあるのではない（R1）。
+    static func singleLine(
+        _ text: String, limit: Int, strippingFormatCharacters: Bool = false
+    ) -> String {
         var flattened = ""
         flattened.reserveCapacity(text.unicodeScalars.count)
         var lastWasSpace = false
@@ -298,6 +313,12 @@ enum ToolText {
                     flattened.unicodeScalars.append(" ")
                     lastWasSpace = true
                 }
+                continue
+            }
+            if strippingFormatCharacters,
+                scalar.properties.generalCategory == .format {
+                // **消さずに落とす**（空白へ潰さない）── ゼロ幅文字は元から幅を持たないので、
+                // 空白に置き換えると無かったはずの隙間が生まれる。
                 continue
             }
             flattened.unicodeScalars.append(scalar)
