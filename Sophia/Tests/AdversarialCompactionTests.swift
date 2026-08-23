@@ -12,7 +12,6 @@ import XCTest
 //  | 印 | 意味 |
 //  |---|---|
 //  | `XCTExpectFailure` を含む | **いま実際に破れている。** 直すと「失敗しなかった」で落ちるので、直した人が必ず気づく |
-//  | `options:` に非厳格を渡してあるもの | **破れているはずだが、実測の余裕が小さい。** 直っていても落ちない（本文にその旨を書いてある） |
 //  | 印が無いもの | **破ろうとして破れなかった** ＝ 防御が効いていることの確認 |
 //
 //  # `TranscriptCompactionTests`（12件）との住み分け
@@ -59,7 +58,7 @@ final class AdversarialCompactionTests: XCTestCase {
             at: root.appendingPathComponent("log", isDirectory: true),
             withIntermediateDirectories: true)
 
-        // 1件で読み取りの上限（`InputBudget.singleRead` = 360）を埋めきる大きさにする。
+        // 1件で読み取りの上限（`InputBudget.singleRead` = 183）を埋めきる大きさにする。
         // 400行 × 約31文字の ASCII ＝ 概算で 3,000トークン相当あり、
         // 行数上限（200）でもトークン上限でも必ず切られる。
         for index in 1...6 {
@@ -249,15 +248,14 @@ final class AdversarialCompactionTests: XCTestCase {
     //  **実ファイル・本物の実行役（`FolderToolRunner`）・本物の予算。**
     // =========================================================================
 
-    /// **実ファイルを6件読んだターンは、落とせるだけ落としても予算に収まらない。**
+    /// **実ファイルを6件読んだターンが、モデル無しの概算では収まって見えること。**
     ///
     /// 通っているのは `FolderToolRunner.execute` → `transcriptEntry(for:)` →
     /// `compacted` で、`performChat` が通るのと同じ道である（ループ本体だけが無い）。
     ///
-    /// > **この印は非厳格にしてある。** 概算での余裕が数十トークンしかなく、
-    /// > 実ファイルの中身や `systemPrompt` の文言が1行変われば向きが変わる。
-    /// > **収まるようになったらこの試験は黙って通る** ── 数字は下の失敗文に出る。
-    func testSixRealFileReadsStillOverrunTheBudgetAfterCompaction() async throws {
+    /// 実トークナイザの出荷条件は `EngineToolWiringTests` が測り、718 / 671 で収まらない。
+    /// ここはモデル無しの境界として、概算と実測を混同しないことを固定する。
+    func testSixRealFileReadsFitOnlyUnderTheModelFreeEstimate() async throws {
         let runner = FolderToolRunner(folder: folder)
         let budget = Budget.transcript(armed: true)
 
@@ -283,40 +281,17 @@ final class AdversarialCompactionTests: XCTestCase {
             compacted.fit.demotedReads, runner.callLimit - 1,
             "前提が崩れている: 一番新しい1件を除いて落ちるはずである")
 
-        XCTExpectFailure(
-            """
-            既知の欠陥（余裕が小さいため非厳格）: 落とせるものを落とし切っても、
-            送信列の取り分に収まらない。栞（1件あたり概算25前後）× 5 と
-            自己認識（同97）が、一番新しい読み取り（同360）と同居できない。
-            """,
-            options: Self.nonStrict
-        ) {
-            XCTAssertTrue(
-                compacted.fit.fits,
-                """
-                縮約後も予算を超えている ── \(compacted.fit.tokens) / \(compacted.fit.budget)。
-                この層はこれ以上減らせないので、超過は `contextLength`（8,192）まで素通りする。
-                """)
-        }
+        XCTAssertTrue(compacted.fit.tokensAreEstimated)
+        XCTAssertTrue(
+            compacted.fit.fits,
+            "概算の段階でも収まらないなら、実測との差を分けて観察できない")
     }
 
-    /// **「収まった」は、収まったことを意味しない。**
+    /// **補正係数を掛けず、注入した数え方そのもので判定すること。**
     ///
-    /// 数えているのは `TokenCounter.estimate`（文字種別の概算）で、
-    /// **発見19 の実測では実トークナイザに対して 1.47倍 甘い**（概算 8,296 / 実測 12,234）。
-    /// さらに `compacted` はチャットテンプレートの固定分も `tool_calls` の JSON も
-    /// 数えていない（`perMessageOverhead` を渡す口すら開いていない）。**すべて過少側。**
-    ///
-    /// ここでは**概算では確かに収まっている**ターンを作り、
-    /// 同じ数字に実測相当の係数を掛けると収まらないことを見る。
-    /// 直す道は分かっている ── `container.prepare` の `lmInput.text.tokens.count` を
-    /// `TokenCounter.exact` で包んで挿すこと（第15章の宿題）。
-    func testWhatTheCompactionCallsFittingIsUnverifiedByAFactorOfOneAndAHalf() {
-        // 発見19 の実測比（PROGRESS.md）。**概算はこれだけ甘い。**
-        let measuredEstimateGap = 1.47
-
-        // **2件にしてあるのは、概算がちょうど予算の内側に収まる大きさだからである。**
-        // 収まらない量にすると「収まっていないものが収まっていない」を言うだけになる。
+    /// 旧テストは、廃止済みの `content.count × 0.5` に対する誤差1.47を
+    /// 現行概算へもう一度掛けていた。ここでは倍率を持たず、数え方を差し替える契約だけを見る。
+    func testCompactionUsesTheInjectedCounterWithoutAStaleCorrectionFactor() {
         var transcript: [RoundTripMessage] = [
             .system(SophiaDefaults.systemPrompt),
             .user("2つ見て"),
@@ -328,32 +303,19 @@ final class AdversarialCompactionTests: XCTestCase {
             transcript.append(MLXEngine.transcriptEntry(for: outcome))
         }
 
-        let compacted = MLXEngine.compacted(
+        let estimated = MLXEngine.compacted(
             transcript, budget: Budget.transcript(armed: true))
+        let injected = TokenCounter.exact(name: "テスト用UTF-8バイト数") { $0.utf8.count }
+        let recounted = MLXEngine.compacted(
+            transcript,
+            budget: Budget.transcript(armed: true),
+            counter: injected,
+            perMessageOverhead: Budget.perMessageTemplateOverhead)
 
-        // **前提: 概算では収まっている。** ここが崩れていたら、下は
-        // 「収まっていないものが収まっていない」と言っているだけで、何も表明していない。
-        XCTAssertTrue(
-            compacted.fit.fits,
-            "前提が崩れている: 概算でも収まっていない（\(compacted.fit.tokens) / \(compacted.fit.budget)）")
-        XCTAssertTrue(compacted.fit.tokensAreEstimated, "前提が崩れている: 概算で数えていない")
-
-        let corrected = Int((Double(compacted.fit.tokens) * measuredEstimateGap).rounded())
-
-        XCTExpectFailure(
-            """
-            既知の欠陥: `fits == true` は概算での話である。実測相当（発見19 の 1.47倍）に
-            直すと超える。テンプレートの固定分と `tool_calls` の JSON はそもそも数えていないので、
-            実際の差はこれより大きい。**「予算に収まった」は【未確認】のままである。**
-            """
-        ) {
-            XCTAssertLessThanOrEqual(
-                corrected, compacted.fit.budget,
-                """
-                概算 \(compacted.fit.tokens) は収まっているが、
-                実測相当 \(corrected) は予算 \(compacted.fit.budget) を超える。
-                """)
-        }
+        XCTAssertTrue(estimated.fit.tokensAreEstimated)
+        XCTAssertFalse(recounted.fit.tokensAreEstimated)
+        XCTAssertGreaterThan(recounted.fit.tokens, estimated.fit.tokens)
+        XCTAssertFalse(recounted.fit.fits, "注入した数え方では超える前提である")
     }
 
     // =========================================================================
@@ -532,16 +494,5 @@ final class AdversarialCompactionTests: XCTestCase {
         case .demotableToolResult(let text, _, _, _):
             return text
         }
-    }
-
-    /// **印を非厳格にする**（`isStrict = false`）。
-    ///
-    /// 使うのは「破れているはずだが、実測の余裕が小さくて言い切れない」ものだけである。
-    /// 厳格な印は、直った日に「失敗しなかった」で落ちて気づかせる仕掛けだが、
-    /// **言い切れないものに厳格な印を付けると、直っていないのに落ちる**（逆の嘘になる）。
-    private static var nonStrict: XCTExpectedFailure.Options {
-        let options = XCTExpectedFailure.Options()
-        options.isStrict = false
-        return options
     }
 }

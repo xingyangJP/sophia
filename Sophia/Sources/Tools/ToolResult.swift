@@ -7,7 +7,7 @@ import Foundation
 /// 混ぜると、モデルへの返答が「次に何を試せるか」を言えなくなる。
 enum ToolRejection: Sendable, Equatable {
 
-    /// 3つのどれでもない名前だった（16.8節「ツール名が一致しない」）。
+    /// 定義済み4ツールのどれでもない名前だった（16.8節「ツール名が一致しない」）。
     case unknownTool(String)
 
     /// 必須の引数が無い、または型が違って読めなかった。
@@ -24,7 +24,7 @@ enum ToolRejection: Sendable, Equatable {
         switch self {
         case .unknownTool(let name):
             "失敗: \(ToolText.toolName(name)) というツールはありません。"
-                + "使えるのは list_directory / read_file / search_files の3つだけです。"
+                + "使えるのは list_directory / read_file / search_files / workspace_change です。"
 
         case .missingArgument(let tool, let name):
             "失敗: \(tool) には \(name) が要ります。"

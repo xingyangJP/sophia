@@ -173,17 +173,20 @@ eventsource 1.4.2 / yyjson 0.12.0
 
 ### 1.5 Entitlements（macOSアプリ）
 
-**[確認済]** 公式サンプル `LLMEval.entitlements` の内容そのまま。
+**[確認済]** 公式サンプル `LLMEval.entitlements` は読み取り専用だが、Sophia 0.1.2 は
+利用者が選んだワークスペースで承認付き変更を行うため `read-write` を使う。
 
 ```xml
 <key>com.apple.security.app-sandbox</key><true/>
 <key>com.apple.security.network.client</key><true/>   <!-- モデル取得に必要 -->
 <key>com.apple.developer.kernel.increased-memory-limit</key><true/>
-<key>com.apple.security.files.user-selected.read-only</key><true/>
+<key>com.apple.security.files.user-selected.read-write</key><true/>
 ```
 
 NFR-01（会話を外部に出さない）との関係で、
 `network.client` は**モデル取得のためだけに必要**である点を明記しておくこと。
+`read-write` は任意パスへの許可ではない。利用者が選択した1フォルダ内に限定し、
+変更はアプリ内の確認、再検証、監査ログを通る（DESIGN 第17章）。
 
 ---
 

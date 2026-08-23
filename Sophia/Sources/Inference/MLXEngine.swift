@@ -731,6 +731,8 @@ actor MLXEngine: InferenceEngine {
             let additionalContext = try strategy.additionalContext(
                 forThinkingEnabled: options.thinking)
 
+            let tokenizer = await container.tokenizer
+
             // --- ツール定義（FR-19 / FR-21。DESIGN.md 第16.2節）--------------------
             //
             // **FR-21 はこの1行に還元されている。** テンプレートの `{%- if tools %}` が
@@ -859,19 +861,21 @@ actor MLXEngine: InferenceEngine {
                 // --- 第2段の縮約（DESIGN.md 第16.3節）-----------------------------
                 //
                 // **ここが「生の戻り値を落として栞1行に置き換える」の実行点である。**
-                // 1回の読み取りは 360トークンまで、往復は6回まで ＝ **1ターンで 2,160。**
+                // 1回の読み取りは183トークンまで、往復は6回まで ＝ **1ターンで1,098。**
                 // 入力予算は 1,000 で、しかも**周ごとに会話全体をプリフィルし直す**
                 // （上の但し書き）。落とさなければ、積み上がった中身を毎周払い直すことになる。
                 //
-                // 上限を `roundTools` から出しているのは、**門が閉じた周は
-                // ツール定義を1文字も送らない**からである（FR-21）。
-                // 送らない周にツール定義ぶん（322）を引くと、その周だけ不当に厳しくなる。
+                // `roundTools` と thinking context を全体計数にも渡す。**門が閉じた周は
+                // ツール定義を1文字も描画しない**ため（FR-21）、同じ送信条件で候補を測る必要がある。
                 //
                 // **落とすのは送信列だけで、`transcript` は生のまま置いておく。**
                 // 毎周ここから組み直すので、この層に状態は要らない（`ContextTranscript` の但し書き）。
                 let compaction = Self.compacted(
                     transcript,
-                    budget: SophiaDefaults.InputBudget.transcript(armed: roundTools != nil))
+                    budget: SophiaDefaults.InputBudget.total,
+                    tokenizer: tokenizer,
+                    tools: roundTools,
+                    additionalContext: additionalContext)
 
                 // **落としたら必ず言う**（16.3節）。宛先は2つあり、両方へ出している ──
                 //   モデルへ … 栞の次の行（`ContextTranscript.demotionNotice`）
@@ -899,6 +903,16 @@ actor MLXEngine: InferenceEngine {
 
                 let promptTokens = lmInput.text.tokens.asArray(Int.self)
                 pendingPromptTokens = promptTokens.count
+
+                if !compaction.fit.tokensAreEstimated,
+                   compaction.fit.tokens != promptTokens.count
+                {
+                    writeToolLine("compaction_count_mismatch", fields: [
+                        ("round", "\(round)"),
+                        ("compacted", "\(compaction.fit.tokens)"),
+                        ("prepared", "\(promptTokens.count)"),
+                    ])
+                }
 
                 guard promptTokens.count < options.contextLength else {
                     // **2周目以降は文言を変える。** 「入力を短くしてください」と言われても、
@@ -1475,7 +1489,7 @@ actor MLXEngine: InferenceEngine {
     ///
     /// | | |
     /// |---|--:|
-    /// | 1回の読み取りの上限（`InputBudget.singleRead`） | 360 |
+    /// | 1回の読み取りの上限（`InputBudget.singleRead`） | 183 |
     /// | 1ターンの往復の上限（`FolderToolRunner.callLimit`） | × 6 |
     /// | **1ターンの中で積み上がりうる量** | **2,160** |
     /// | 入力予算（`InputBudget.total`） | **1,000** |
@@ -1501,21 +1515,17 @@ actor MLXEngine: InferenceEngine {
     /// 周の境目は `.assistant(_, toolCalls:)` が空でないことで決まり、
     /// それを `RoundTripItem.startsRound` に写しているのが下の `map` である。
     ///
-    /// # 数え方は概算である（**過少に出る**）
+    /// # 数え方は呼び手が決める
     ///
-    /// `counter` の既定は `TokenCounter.estimate` で、発見19 の実測では
-    /// **概算は実測に対して 1.47倍 甘い。** さらにここは
-    /// チャットテンプレートの固定分も `tool_calls` の JSON も数えていない。
-    /// **したがって「収まった」は【未確認】であり、過少の側へ倒れている。**
-    /// 実トークナイザは1行下（`container.prepare` の `lmInput.text.tokens.count`）で
-    /// 手に入るので、差し替えるならそこを `TokenCounter.exact` に包むこと（第15章の宿題）。
+    /// モデルを持たない単体テストでは既定の `TokenCounter.estimate` を使える。
+    /// 出荷経路は別オーバーロードで、各候補を実トークナイザのチャットテンプレートへ通す。
+    /// そのため本文だけでなく role、`tool_calls`、`tool_response`、tools、生成開始まで総額で数える。
     ///
     /// # 落とし切っても収まらない周がある（③・**未解決**）
     ///
-    /// 実ファイルを6件読んだターンは、落とせるものを落とし切っても収まらない ──
-    /// **概算 597 / 予算 573**（`TranscriptCompactionTests` の本命がその状況である）。
-    /// 上の 1.47倍を掛ければ実測相当は 714 で、テンプレートの固定分と
-    /// `tool_calls` の JSON は**そこにまだ入っていない。**
+    /// 2026-08-23 の実トークナイザ計測では、実ファイル相当を6件読んだターンは
+    /// 簡易計数では **718 / 予算671**、完全プロンプトでは **1,155 / 総額1,000**だった。
+    /// 現在は後者を `fit.tokens` として返すため、超過自体を正確に観測できる。
     ///
     /// **ここでは何もしない。** `fits == false` を事実として返し、`[TOOL] compacted` に出す。
     /// 握り潰さず、エラーにもしない ──
@@ -1527,16 +1537,15 @@ actor MLXEngine: InferenceEngine {
     /// モデルもトークナイザも要らないので、`TranscriptCompactionTests` が
     /// 4.6GB を読まずに「何が落ちて何が残るか」を固定できる。
     ///
-    /// - Parameter perMessageOverhead: 1発言あたりのチャットテンプレートの固定分。
-    ///   **既定 0 は「まだ測っていない」という意味である。**
-    ///   `<|im_start|>…<|im_end|>` のぶんが実際には毎回かかる。
-    ///   **`performChat` はまだ渡していない**（実トークナイザを挿すまで測れない。第15章の宿題）──
-    ///   口だけが先に開いている状態であることを承知しておくこと。
+    /// - Parameters:
+    ///   - perMessageOverhead: 1発言あたりの簡易な固定分。モデル無しの試験用。
+    ///   - totalCounter: 全プロンプトの総額を返す数え方。指定時はこちらを優先する。
     nonisolated static func compacted(
         _ transcript: [RoundTripMessage],
         budget: Int,
         counter: TokenCounter = .estimate,
-        perMessageOverhead: Int = 0
+        perMessageOverhead: Int = 0,
+        totalCounter: (@Sendable ([String]) -> Int)? = nil
     ) -> (messages: [RoundTripMessage], fit: ContextTranscript.RoundTripFit) {
 
         let items = transcript.map { message -> ContextTranscript.RoundTripItem in
@@ -1561,21 +1570,57 @@ actor MLXEngine: InferenceEngine {
         }
 
         let fit = ContextTranscript.fitRoundTrip(
-            items, budget: budget, counter: counter, perMessageOverhead: perMessageOverhead)
+            items,
+            budget: budget,
+            counter: counter,
+            perMessageOverhead: perMessageOverhead,
+            totalCounter: totalCounter)
 
-        // **送るのは、いま測った当の文字列である**（`fit.texts`）。
-        // ここで栞を組み直すと、測った値と送る値が別物になる
-        // （`ReadOutcome.contextText` が名指しで禁じている食い違い）。
+        let messages = messages(replacingWith: fit.texts, in: transcript)
+        return (messages, fit)
+    }
+
+    /// 出荷用の全プロンプト計測。本文、role、tool metadata、tools、生成開始まで
+    /// 実際のチャットテンプレートへ通し、総額と同じ単位で縮約を判定する。
+    nonisolated static func compacted(
+        _ transcript: [RoundTripMessage],
+        budget: Int,
+        tokenizer: any MLXLMCommon.Tokenizer,
+        tools: [ToolSpec]?,
+        additionalContext: [String: any Sendable]?
+    ) -> (messages: [RoundTripMessage], fit: ContextTranscript.RoundTripFit) {
+        let contentCounter = TokenCounter.exact { text in
+            tokenizer.encode(text: text, addSpecialTokens: false).count
+        }
+        let totalCounter: @Sendable ([String]) -> Int = { texts in
+            let candidate = Self.messages(replacingWith: texts, in: transcript)
+            let rawMessages = DefaultMessageGenerator().generate(
+                messages: Self.chatMessages(for: candidate))
+            return (try? tokenizer.applyChatTemplate(
+                messages: rawMessages,
+                tools: tools,
+                additionalContext: additionalContext).count) ?? .max
+        }
+        return Self.compacted(
+            transcript,
+            budget: budget,
+            counter: contentCounter,
+            totalCounter: totalCounter)
+    }
+
+    /// `texts` は縮約時に数えた当の文字列。tool metadata を保ったまま送信列へ戻す。
+    private nonisolated static func messages(
+        replacingWith texts: [String],
+        in transcript: [RoundTripMessage]
+    ) -> [RoundTripMessage] {
         var messages = transcript
-        for (index, text) in fit.texts.enumerated() where index < messages.count {
+        for (index, text) in texts.enumerated() where index < messages.count {
             guard case .demotableToolResult(_, _, let id, let name) = messages[index] else {
                 continue
             }
-            // **`role=tool` のまま、id と name も持ったまま**送る。
-            // 落ちたのは中身だけで、`<tool_call>` との対応づけは切れていない。
             messages[index] = .toolResult(text: text, id: id, name: name)
         }
-        return (messages, fit)
+        return messages
     }
 
     /// 生成ストリームの1項目の行き先を決める。**思考分離（FR-17）との交点である。**

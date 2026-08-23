@@ -14,7 +14,7 @@ import XCTest
 //
 //  | 何を | なぜ |
 //  |---|---|
-//  | **`idle` で `ChatOptions.tools` が空**（実際に送られた options を捕まえる） | FR-21 の実体。ここが割れたら毎ターン 322トークンの漏れになる |
+//  | **`idle` で `ChatOptions.tools` が空**（実際に送られた options を捕まえる） | FR-21 の実体。ここが割れたら毎ターン499トークンの漏れになる |
 //  | **`armed` で送られるのが `FolderTool.definitions` そのもの** | 写しを送っていたら、実測の裏付けが実装に届いていない |
 //  | `.toolCall` / `.toolResult` が画面の状態になる | 往復の最中の無言を潰しているか（16.7節） |
 //  | `folderUnavailable` / `folderAccessDenied` で外れる | 16.8節。**そして文言が別であること** |
@@ -98,7 +98,7 @@ final class FolderUITests: XCTestCase {
         XCTAssertEqual(
             options.tools, FolderTool.definitions,
             "**送られた定義が `FolderTool.definitions` と違う。** 出所が2本に割れている")
-        XCTAssertEqual(options.tools.count, 3, "**4つ目を足さないこと**（16.4節）")
+        XCTAssertEqual(options.tools.count, 4)
     }
 
     /// **外したら、次のターンから 0 に戻る**（16.2節「往復が終わったら `idle` へ戻す」の利用者側）。
@@ -143,7 +143,7 @@ final class FolderUITests: XCTestCase {
 
     /// **入力欄の見積もりにツール定義ぶんが乗っていること。**
     ///
-    /// 乗せないと、`armed` の会話では**画面の数字が実送信より 322 少ない嘘**になる。
+    /// 乗せないと、`armed` の会話では**画面の数字が実送信より499少ない嘘**になる。
     /// VISION の測定原則（無駄が痛みとして見えないと誰も減らさない）を
     /// 最初に破るのがこの形である。
     func testTheInputEstimateIncludesWhatTheUserDidNotType() async throws {

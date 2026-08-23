@@ -6,12 +6,9 @@ import Foundation
 ///
 /// # サンドボックスの中で、なぜフォルダを読めるのか
 ///
-/// `Sophia.entitlements` は `com.apple.security.files.user-selected.read-only` を持つ。
-/// **「利用者が選んだもの」だけが読める**という許可で、入口は既に開いている（16.5節）。
-///
-/// そして `read-only` であることが **FR-20（書き込み・コマンド実行）を OS のレベルで
-/// 止めている**（16.0節）。**この層に書き込みの口を作らないこと。**
-/// 設計の約束ではなく OS の制約が境界を守っている、という状態を壊してはいけない。
+/// `Sophia.entitlements` は `com.apple.security.files.user-selected.read-write` を持つ。
+/// **「利用者が選んだもの」だけが読み書きできる**許可で、入口はここに限られる。
+/// 書き込みはこの型では行わず、承認とfd基準の再検証を持つ`WorkspaceFileSystem`だけが担当する。
 ///
 /// # 3つの段階（16.5節の表）
 ///
@@ -173,8 +170,7 @@ struct SecurityScopedFolder: Sendable, Equatable {
     /// - `ContainedPath` を閉包から出せない型にする（`~Escapable`）。
     ///   **ただしツール層は検索の frontier で配列に貯めるので、そのままでは載らない**
     ///
-    /// 読み取り専用のいまは、最悪でも「別のファイルを読む」で済む。
-    /// **FR-20（書き込み）を足すときは、上の4行がそのまま「別のファイルを壊す」になる。**
+    /// 変更系はこの検証後もfd基準で再検証する。文字列パスだけで書き込んではならない。
     ///
     /// なお、**渡される `AccessedFolder` も持ち出さないこと。**
     /// 持ち出したときに `resolve` が失敗するかは**測っていない**
@@ -200,6 +196,21 @@ struct SecurityScopedFolder: Sendable, Equatable {
             }
             return try body(AccessedFolder(folder: self))
         }
+    }
+
+    /// Keeps the security-scoped extension active while an async child process runs.
+    func withAccess<T>(_ body: (AccessedFolder) async throws -> T) async throws -> T {
+        let started = url.startAccessingSecurityScopedResource()
+        defer { if started { url.stopAccessingSecurityScopedResource() } }
+
+        if !started, !FileManager.default.isReadableFile(atPath: url.path) {
+            throw FolderAccessError.accessDenied("start=false かつ読み取り不可")
+        }
+        let current = try FolderContainment.canonicalRootPath(of: url)
+        guard current == canonicalRootPath else {
+            throw FolderAccessError.rootMoved(expected: canonicalRootPath, actual: current)
+        }
+        return try await body(AccessedFolder(folder: self))
     }
 
     // MARK: - 開始と終了の対（機能4の実体）

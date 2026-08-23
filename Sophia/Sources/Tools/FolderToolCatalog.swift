@@ -1,17 +1,17 @@
 import Foundation
 
-/// **モデルへ渡す3つのツール**（DESIGN.md 第16.4節）。
+/// **モデルへ渡す読み取り3ツールと、承認付きのワークスペース操作1ツール**。
 ///
 /// ---
 ///
-/// # 4つ目を足さないこと
+/// # 5つ目を足さないこと
 ///
-/// > 4つ目を足したくなったら、まず3つで足りなかった実例を出すこと。
+/// > 5つ目を足す前に、現在の4つで足りなかった実例と追加費用を測ること。
 /// > **定義1つが、そのまま `armed` の間の毎ターンの費用になる**（16.4節 / 16.2節）
 ///
 /// Open WebUI は32個・約4,550トークンを毎ターン注入し、「こんにちは」への応答を34秒にしていた
 /// （2.2節）。**同じ構造を自分で作れば、VISION 第1因子を自分で潰す。**
-/// だから定義は3つに固定し、説明文も短く書いてある ── 読みやすさのために1文足すと、
+/// だから定義は4つに固定し、説明文も短く書いてある ── 読みやすさのために1文足すと、
 /// **その1文を会話のターン数だけ払う。**
 ///
 /// # 説明文を英語で書く理由（**2026-08-18 実測。日本語へ戻す前に読むこと**）
@@ -58,6 +58,9 @@ enum FolderTool: String, Sendable, Equatable, CaseIterable {
     /// 名前で探す（16.4節の3つ目。名前は実測に合わせてある）。
     case searchFiles = "search_files"
 
+    /// Files and directories. Every operation pauses for human approval.
+    case workspaceChange = "workspace_change"
+
     // MARK: - 引数の名前
 
     /// **モデルが書いてくる鍵の綴り。** 実装側で散らさないこと ──
@@ -67,6 +70,12 @@ enum FolderTool: String, Sendable, Equatable, CaseIterable {
         static let offset = "offset"
         static let limit = "limit"
         static let query = "query"
+        static let operation = "operation"
+        static let content = "content"
+        static let oldText = "old_text"
+        static let newText = "new_text"
+        static let destination = "destination"
+        static let branch = "branch"
         /// `query` の別名。**モデルは同じ意味を別の名前で書いてくることがある。**
         /// 受ける側が緩いぶんには害が無い（封じ込めは名前ではなく値に効く）。
         static let queryAliases = ["query", "pattern", "name", "keyword"]
@@ -146,6 +155,21 @@ enum FolderTool: String, Sendable, Equatable, CaseIterable {
                         Argument.path, .string,
                         "Where to start. Empty string for the whole bound folder"),
                     required(Argument.query, .string, "Word contained in the file name"),
+                ]
+            ),
+            ToolDefinition(
+                name: FolderTool.workspaceChange.rawValue,
+                description: "Change a file or folder after the user approves the exact change",
+                parameters: [
+                    required(
+                        Argument.operation, .string,
+                        "One of create_file, replace_text, copy_file, move_path, delete_path, create_directory, git_status, git_list_branches, git_create_branch, git_switch_branch"),
+                    optional(Argument.path, .string, "Path relative to the bound folder for file operations"),
+                    optional(Argument.content, .string, "UTF-8 content for create_file"),
+                    optional(Argument.oldText, .string, "Exact text to replace once"),
+                    optional(Argument.newText, .string, "Replacement text"),
+                    optional(Argument.destination, .string, "Relative destination for copy or move"),
+                    optional(Argument.branch, .string, "Local branch name for create or switch"),
                 ]
             ),
         ]

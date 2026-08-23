@@ -40,11 +40,12 @@ import XCTest
 /// | `fixedPreamble` / `toolDefinitions` | **実トークナイザ**（`make tooltokens`） |
 /// | `singleRead` / `bookmarks` を守る側 | **`TokenCounter`。既定は概算** |
 ///
-/// 概算は実測に対して **1.47倍 甘かった**（発見19）。
-/// **したがって本ファイルが全部緑でも「実機の armed の1ターンが 1,000 に収まる」は
-/// 【未確認】のままである。** ここが表明できるのは
+/// 発見19の1.47倍は旧概算に対する値で、現行概算の補正には使えない。
+/// 出荷時の縮約は実トークナイザを使うが、配分表の `singleRead` / `bookmarks` は概算由来である。
+/// **したがって本ファイルが全部緑でも、armed の実入力が1,000に収まる証明にはならない。**
+/// ここが表明できるのは
 /// 「**同じ単位どうしの比較が破れていないこと**」と「**配分表が閉じていること**」の2つだけで、
-/// 実機の確定には `TokenCounter.exact` を挿した計測が要る（第15章の宿題）。
+/// 実機の確定は `make tooltokens` の最終 `prepare` で行う。
 final class BudgetReconciliationTests: XCTestCase {
 
     private typealias Budget = SophiaDefaults.InputBudget
@@ -117,6 +118,18 @@ final class BudgetReconciliationTests: XCTestCase {
             Budget.transcript(armed: true) - Budget.transcript(armed: false),
             -Budget.toolDefinitions,
             "armed にすると、送信列に使える分がちょうど定義ぶん減ること")
+    }
+
+    /// 縮約側で数える system 本文と発言枠を、上限から先に二重で引かないこと。
+    func testTranscriptBudgetOnlyPreSubtractsWhatCompactionCannotCount() {
+        XCTAssertEqual(
+            Budget.transcript(armed: false), Budget.total - Budget.generationPromptOverhead)
+        XCTAssertEqual(
+            Budget.transcript(armed: true),
+            Budget.total - Budget.generationPromptOverhead - Budget.toolDefinitions)
+        XCTAssertGreaterThan(
+            Budget.transcript(armed: true), Budget.total - Budget.fixedCost(armed: true),
+            "system本文と発言枠を送信列でも数えるため、その分は上限へ戻っていること")
     }
 
     // =========================================================================

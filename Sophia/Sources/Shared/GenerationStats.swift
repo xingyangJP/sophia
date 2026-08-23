@@ -182,9 +182,9 @@ struct GenerationClock: Sendable {
             if firstOutputAt == nil { firstOutputAt = now }
             if firstContentAt == nil { firstContentAt = now }
             contentCharacterCount += text.count
-        case .prefill, .done, .toolCall:
-            // `.toolCall` を文字数に数えないこと。**あれは本文でも思考でもない**
-            // （FR-19 / 16章）。数えると TTFT の起点と出力トークンの概算が両方ずれる。
+        case .prefill, .done, .toolCall, .toolResult:
+            // ツールの開始・完了通知を文字数に数えないこと。**本文でも思考でもない**
+            // （FR-19 / 16章）。数えるとTTFTの起点と出力トークン概算が両方ずれる。
             break
         @unknown default:
             // **2026-08-18 追加。** ここは `Chunk.swift` が「網羅 switch を書かないこと」と

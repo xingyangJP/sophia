@@ -117,6 +117,10 @@ enum FolderToolExecution {
                     query, from: requested, accessed: accessed, call: call,
                     limits: limits, budget: budget, counter: counter)
             }
+
+        case .workspaceChange:
+            // These operations require async preparation/approval and are handled by FolderToolRunner.
+            return .rejected(.unknownTool(call.name), tool: call.name, counter: counter)
         }
     }
 

@@ -63,6 +63,21 @@ struct ChatScreen: View {
             // **開くときに `Store` を読む。** `prepare()` が済んでいれば入っている。
             UserTraitsSheet(store: model.traitStore)
         }
+        .sheet(
+            isPresented: Binding(
+                get: { model.pendingToolApproval != nil },
+                set: { if !$0 { model.rejectPendingToolChange() } }
+            )
+        ) {
+            if let request = model.pendingToolApproval {
+                ToolApprovalView(
+                    request: request,
+                    approve: { model.approveToolChange(request.id) },
+                    reject: { model.rejectToolChange(request.id) }
+                )
+                .interactiveDismissDisabled()
+            }
+        }
         .task { await model.prepare() }
     }
 

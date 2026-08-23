@@ -216,7 +216,7 @@ enum ContextTranscript {
 //  ＝ `ReadOutcome` を値として持っている層（`ChatViewModel`）からしか作れない。
 //
 //  ところが**費用が実際に積み上がるのは1つのターンの中**である ──
-//  `FolderToolRunner.callLimit` は 6、1回の読み取りは `InputBudget.singleRead`（360）まで。
+//  `FolderToolRunner.callLimit` は6、1回の読み取りは`InputBudget.singleRead`（183）まで。
 //  **6回で 2,160トークンが、入力予算 1,000 の中に積み上がる。**
 //  しかも往復のたびに全部プリフィルし直す（KV再利用なし）。
 //  つまり**積み上がった生の戻り値を、周回のたびに払い直している。**
@@ -417,7 +417,7 @@ extension ContextTranscript {
         /// ここから先（窓を狭めて読み直す）は、この層にはできない。
         ///
         /// > **落とし切っても false になる周が実在する**（③）──
-        /// > 実ファイルを6件読んだターンは概算 597 で、送信列の取り分は 573 である。
+        /// > 6件読んだターンの出荷実測は本文＋発言枠718、送信列の取り分は671である。
         /// > **この層はこれ以上減らせない。** 超過は `contextLength`（8,192）まで素通りする。
         var fits: Bool { tokens <= budget }
     }
@@ -458,14 +458,17 @@ extension ContextTranscript {
     /// **この層で「この周ぶんも落とす」に倒すと、②で直したばかりの欠陥が戻る。**
     ///
     /// - Parameters:
-    ///   - perMessageOverhead: 1発言あたりのチャットテンプレートの固定分。
+    ///   - perMessageOverhead: 1発言あたりのチャットテンプレートの簡易な固定分。
     ///     **既定 0 は「まだ測っていない」という意味である**（`fit` と同じ）。
-    ///     さらにここでは `tool_calls` の JSON も数えていない ── どちらも**過少**に出る。
+    ///     `totalCounter` が無い場合、`tool_calls` の JSON は数えないため過少になりうる。
+    ///   - totalCounter: 候補の全メッセージを実テンプレートへ通した総トークン数。
+    ///     指定時は本文の合計と `perMessageOverhead` よりこちらを優先する。
     static func fitRoundTrip(
         _ items: [RoundTripItem],
         budget: Int,
         counter: TokenCounter = .estimate,
-        perMessageOverhead: Int = 0
+        perMessageOverhead: Int = 0,
+        totalCounter: (@Sendable ([String]) -> Int)? = nil
     ) -> RoundTripFit {
 
         // 落とせる位置を、**古い順**に並べたもの。
@@ -487,7 +490,8 @@ extension ContextTranscript {
                 }
                 return text
             }
-            let tokens = texts.reduce(0) { $0 + counter($1) + perMessageOverhead }
+            let tokens = totalCounter?(texts)
+                ?? texts.reduce(0) { $0 + counter($1) + perMessageOverhead }
 
             // 収まった、あるいはこれ以上落とせない。
             // **落とせるものが無い状態を「収まった」と偽らない**（`fit` と同じ）。
@@ -502,7 +506,7 @@ extension ContextTranscript {
                     demotedIndices: demoted,
                     tokens: tokens,
                     budget: budget,
-                    tokensAreEstimated: counter.isEstimate
+                    tokensAreEstimated: totalCounter == nil && counter.isEstimate
                 )
             }
 

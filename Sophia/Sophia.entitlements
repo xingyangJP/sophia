@@ -14,8 +14,8 @@
 	<key>com.apple.security.network.client</key>
 	<true/>
 
-	<!-- 利用者が自分でモデルディレクトリを選ぶ経路（A3のモデル管理）で必要になる。 -->
-	<key>com.apple.security.files.user-selected.read-only</key>
+	<!-- 利用者が明示的に選んだワークスペースだけを読み書きする。変更はアプリ内で毎回承認する。 -->
+	<key>com.apple.security.files.user-selected.read-write</key>
 	<true/>
 </dict>
 </plist>

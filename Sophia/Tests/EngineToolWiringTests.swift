@@ -197,7 +197,7 @@ final class EngineToolWiringTests: XCTestCase {
     /// `ToolDefinition.Parameter.ValueType` が表せず宣言の側で止まる（16.4節が入れ子を避けている理由）。
     func testTheShippedCatalogRendersTheSchemaShapeThatWasMeasured() throws {
         let specs = FolderTool.definitions.map(MLXEngine.toolSpec(for:))
-        XCTAssertEqual(specs.count, 3, "**4つ目を足さないこと**（16.4節）")
+        XCTAssertEqual(specs.count, 4)
 
         for (definition, spec) in zip(FolderTool.definitions, specs) {
             XCTAssertEqual(spec["type"] as? String, "function")
@@ -472,10 +472,53 @@ final class EngineToolWiringTests: XCTestCase {
         }
         let context: [String: any Sendable] = ["enable_thinking": false]
 
+        // `fixedPreamble = 105` を、**同じ prepare の差分**で分解する。
+        // 生の本文だけを別に encode して引くと、テンプレート境界で BPE の切れ方が変わりうる。
+        // 空の本文から1要素ずつ足せば、単位も描画経路も揃ったまま差を取れる。
+        let userEmpty = try await container.prepare(
+            input: UserInput(chat: [.user("")], additionalContext: context))
+        let userShort = try await container.prepare(
+            input: UserInput(chat: [.user("こんにちは")], additionalContext: context))
+        let systemEmptyUserEmpty = try await container.prepare(
+            input: UserInput(chat: [.system(""), .user("")], additionalContext: context))
+        let systemFullUserEmpty = try await container.prepare(
+            input: UserInput(
+                chat: [.system(SophiaDefaults.systemPrompt), .user("")],
+                additionalContext: context))
+
+        let userEmptyCount = userEmpty.text.tokens.asArray(Int.self).count
+        let userShortCount = userShort.text.tokens.asArray(Int.self).count
+        let systemEmptyUserEmptyCount = systemEmptyUserEmpty.text.tokens.asArray(Int.self).count
+        let systemFullUserEmptyCount = systemFullUserEmpty.text.tokens.asArray(Int.self).count
+
         // ① tools 引数を書かなかった場合（ツールという概念が無かった頃）
         let baseline = try await container.prepare(
             input: UserInput(chat: chat(), additionalContext: context))
         let baselineTokens = baseline.text.tokens.asArray(Int.self)
+
+        let userBodyWithoutSystem = userShortCount - userEmptyCount
+        let emptySystemMessage = systemEmptyUserEmptyCount - userEmptyCount
+        let systemBody = systemFullUserEmptyCount - systemEmptyUserEmptyCount
+        let userBodyAfterSystem = baselineTokens.count - systemFullUserEmptyCount
+        let tokenizer = await container.tokenizer
+        let encodedSystemBody = tokenizer.encode(
+            text: SophiaDefaults.systemPrompt, addSpecialTokens: false
+        ).count
+        let encodedUserBody = tokenizer.encode(
+            text: "こんにちは", addSpecialTokens: false
+        ).count
+        log("""
+            PREAMBLE user_empty=\(userEmptyCount) user_short=\(userShortCount) \
+            system_empty_user_empty=\(systemEmptyUserEmptyCount) \
+            system_full_user_empty=\(systemFullUserEmptyCount) \
+            system_full_user_short=\(baselineTokens.count)
+            """)
+        log("""
+            PREAMBLE_DELTA user_body_without_system=\(userBodyWithoutSystem) \
+            empty_system_message=\(emptySystemMessage) system_body=\(systemBody) \
+            user_body_after_system=\(userBodyAfterSystem) \
+            encoded_system_body=\(encodedSystemBody) encoded_user_body=\(encodedUserBody)
+            """)
 
         // ② `idle` を我々の API で通した場合。**①と1トークンも違ってはいけない**
         let idle = try await container.prepare(
@@ -517,6 +560,106 @@ final class EngineToolWiringTests: XCTestCase {
         XCTAssertTrue(
             armedText.contains("<tools>"), "armed なのに <tools> が描画されていない（渡せていない）")
         XCTAssertGreaterThan(delta, 0, "armed で入力が増えていない。tools が届いていない疑い")
+
+        XCTAssertEqual(
+            baselineTokens.count, SophiaDefaults.InputBudget.fixedPreamble,
+            "`fixedPreamble` が実トークナイザの baseline と食い違っている")
+        XCTAssertGreaterThan(userEmptyCount, 0, "空の user でもテンプレート固定分は存在する")
+        XCTAssertGreaterThan(emptySystemMessage, 0, "system 発言のテンプレート固定分が取れていない")
+        XCTAssertGreaterThan(systemBody, 0, "自己認識本文の差分が取れていない")
+        XCTAssertGreaterThan(userBodyAfterSystem, 0, "短い user 本文の差分が取れていない")
+        XCTAssertEqual(
+            emptySystemMessage, SophiaDefaults.InputBudget.perMessageTemplateOverhead,
+            "1発言ぶんのテンプレート固定値が実測と食い違っている")
+        XCTAssertEqual(
+            userEmptyCount - emptySystemMessage,
+            SophiaDefaults.InputBudget.generationPromptOverhead,
+            "assistant 生成開始ぶんの固定値が実測と食い違っている")
+        XCTAssertEqual(
+            encodedSystemBody, systemBody,
+            "本文だけの encode と、テンプレート内で本文を足した差分が一致しない")
+        XCTAssertEqual(
+            encodedUserBody, userBodyAfterSystem,
+            "短い user 本文の encode と、テンプレート内で本文を足した差分が一致しない")
+        XCTAssertEqual(
+            userEmptyCount + emptySystemMessage + systemBody + userBodyAfterSystem,
+            baselineTokens.count,
+            "分解した差分の合計が baseline に戻らない")
+
+        // #286 の本体も、同じ実トークナイザで測る。
+        // 候補ごとに tools / role / tool_calls / tool_response / 生成開始まで丸ごと描画し、
+        // 最後の `prepare` と同じ単位で予算判定できていることを固定する。
+        var sixReadTranscript: [RoundTripMessage] = [
+            .system(SophiaDefaults.systemPrompt),
+            .user("log の6つを見て、どれに NEEDLE があるか教えて"),
+        ]
+        for index in 1...6 {
+            let contents = (["NEEDLE-\(index)"]
+                + (2...400).map { "line \($0): padding padding padding" })
+                .joined(separator: "\n") + "\n"
+            let read = ContextWindow.clip(
+                contents, path: "log/\(index).log", budget: .singleRead)
+            let outcome = ToolResult
+                .content(read, tool: "read_file", isListing: false)
+                .executionOutcome(callID: "measure-\(index)")
+            let call = ToolCall(
+                function: .init(name: "read_file", arguments: [:]), id: outcome.callID)
+            sixReadTranscript.append(.assistant("", toolCalls: [call]))
+            sixReadTranscript.append(MLXEngine.transcriptEntry(for: outcome))
+        }
+        let sixReadCompaction = MLXEngine.compacted(
+            sixReadTranscript,
+            budget: SophiaDefaults.InputBudget.total,
+            tokenizer: tokenizer,
+            tools: MLXEngine.toolSpecs(for: FolderTool.definitions),
+            additionalContext: context)
+        let preparedSixRead = try await container.prepare(input: UserInput(
+            chat: MLXEngine.chatMessages(for: sixReadCompaction.messages),
+            tools: MLXEngine.toolSpecs(for: FolderTool.definitions),
+            additionalContext: context))
+        let preparedSixReadCount = preparedSixRead.text.tokens.asArray(Int.self).count
+        log("""
+            COMPACTION6 counted=\(sixReadCompaction.fit.tokens) \
+            budget=\(sixReadCompaction.fit.budget) fits=\(sixReadCompaction.fit.fits ? 1 : 0) \
+            demoted=\(sixReadCompaction.fit.demotedReads) \
+            prepared=\(preparedSixReadCount) \
+            total_budget=\(SophiaDefaults.InputBudget.total)
+            """)
+
+        XCTAssertFalse(sixReadCompaction.fit.tokensAreEstimated)
+        XCTAssertEqual(sixReadCompaction.fit.demotedReads, 5)
+        XCTAssertEqual(
+            sixReadCompaction.fit.tokens, preparedSixReadCount,
+            "縮約判定と最終 prepare が、同じ完全プロンプトを数えていない")
+        XCTAssertEqual(
+            sixReadCompaction.fit.fits,
+            preparedSixReadCount <= SophiaDefaults.InputBudget.total,
+            "fit 判定が最終 prepare の実トークン数と食い違っている")
+
+        // thinking の切り替えもテンプレート入力である。出荷経路から全体計数へ
+        // `additionalContext` を渡し忘れると、OFF の試験だけ通って ON がずれる。
+        let thinkingContext: [String: any Sendable] = ["enable_thinking": true]
+        let thinkingCompaction = MLXEngine.compacted(
+            sixReadTranscript,
+            budget: SophiaDefaults.InputBudget.total,
+            tokenizer: tokenizer,
+            tools: MLXEngine.toolSpecs(for: FolderTool.definitions),
+            additionalContext: thinkingContext)
+        let preparedThinking = try await container.prepare(input: UserInput(
+            chat: MLXEngine.chatMessages(for: thinkingCompaction.messages),
+            tools: MLXEngine.toolSpecs(for: FolderTool.definitions),
+            additionalContext: thinkingContext))
+        let preparedThinkingCount = preparedThinking.text.tokens.asArray(Int.self).count
+        log("""
+            COMPACTION6_THINKING counted=\(thinkingCompaction.fit.tokens) \
+            prepared=\(preparedThinkingCount) fits=\(thinkingCompaction.fit.fits ? 1 : 0)
+            """)
+        XCTAssertEqual(
+            thinkingCompaction.fit.tokens, preparedThinkingCount,
+            "thinking ON の縮約判定と最終 prepare が同じ完全プロンプトを数えていない")
+        XCTAssertEqual(
+            thinkingCompaction.fit.fits,
+            preparedThinkingCount <= SophiaDefaults.InputBudget.total)
 
         // **画面に出している数字が、実測と一致していること**（16.7節 / VISION の測定原則）。
         //

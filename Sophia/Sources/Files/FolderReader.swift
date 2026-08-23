@@ -144,10 +144,8 @@ struct FileWindow: Sendable, Equatable {
 ///
 /// # 書き込みの口をここに作らないこと
 ///
-/// entitlement が `com.apple.security.files.user-selected.read-only` である以上、
-/// 書き込みを実装しても OS が落とす（16.0節）。
-/// **「動かないコードが残る」ではなく「境界が曖昧になる」のが問題である。**
-/// FR-20 は承認フロー（16.6節の但し書き）を伴う別の章として起こすこと。
+/// entitlementはread-writeになったが、この型は既存の読取契約だけを保つ。
+/// 変更は承認、fd基準の封じ込め、競合再検証を持つ`WorkspaceFileSystem`へ分離する。
 ///
 /// # 入口は `ContainedPath` 1つだけ
 ///

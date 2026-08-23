@@ -464,6 +464,9 @@ final class PrefillProbeTests: XCTestCase {
             case .done(let received):
                 stats = received
 
+            case .toolCall, .toolResult:
+                break
+
             @unknown default:
                 // `Chunk` は将来ケースが増える（Chunk.swift の約束）。
                 // 素の `default:` だと「到達しない」警告が出るので `@unknown` にしてある

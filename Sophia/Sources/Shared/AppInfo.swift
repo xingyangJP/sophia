@@ -6,10 +6,10 @@ import Foundation
 /// 数字をソースへ直書きしないこと。出所は次の1本道になっている。
 ///
 /// ```
-/// project.pbxproj の MARKETING_VERSION = 0.1.0
+/// project.pbxproj の MARKETING_VERSION = 0.1.2
 ///   → Info.plist の CFBundleShortVersionString = $(MARKETING_VERSION)
 ///     → AppInfo.version
-///       → AppInfo.versionLabel（"ver 0.1.0"）
+///       → AppInfo.versionLabel（"ver 0.1.2"）
 /// ```
 ///
 /// 版を上げるときに触るのは `MARKETING_VERSION` **だけ**である。

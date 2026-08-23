@@ -813,11 +813,10 @@ final class ToolExecutionTests: XCTestCase {
     //  8. 定義（16.4節 / 実測との一致）
     // =========================================================================
 
-    /// **実測した3つと、名前も必須引数も一致していること**（`ToolCallProbeTests`）。
-    /// ここがずれると、「モデルは呼べる」という実測の根拠が実装に届かない。
+    /// 読み取り3つと、承認付き変更1つの名前・必須引数を固定する。
     func testTheCatalogMatchesWhatWasActuallyMeasured() throws {
         let definitions = FolderTool.definitions
-        XCTAssertEqual(definitions.count, 3, "**4つ目を足さないこと**（16.4節）")
+        XCTAssertEqual(definitions.count, 4)
 
         var names: [String] = []
         var required: [String: [String]] = [:]
@@ -827,10 +826,11 @@ final class ToolExecutionTests: XCTestCase {
             XCTAssertFalse(definition.description.isEmpty)
         }
 
-        XCTAssertEqual(names, ["list_directory", "read_file", "search_files"])
+        XCTAssertEqual(names, ["list_directory", "read_file", "search_files", "workspace_change"])
         XCTAssertEqual(required["list_directory"], ["path"])
         XCTAssertEqual(required["read_file"], ["path"])
         XCTAssertEqual(required["search_files"], ["path", "query"])
+        XCTAssertEqual(required["workspace_change"], ["operation"])
         XCTAssertEqual(names, FolderTool.allCases.map(\.rawValue))
     }
 
@@ -859,6 +859,8 @@ final class ToolExecutionTests: XCTestCase {
                     "Read the contents of a text file. Long files are clipped; "
                     + "continue with offset",
                 "search_files": "Find files and folders whose name contains the given word",
+                "workspace_change":
+                    "Change a file or folder after the user approves the exact change",
             ])
 
         XCTAssertEqual(
@@ -873,31 +875,39 @@ final class ToolExecutionTests: XCTestCase {
                 "read_file.limit": "How many lines to read (max 200)",
                 "search_files.path": "Where to start. Empty string for the whole bound folder",
                 "search_files.query": "Word contained in the file name",
+                "workspace_change.operation":
+                    "One of create_file, replace_text, copy_file, move_path, delete_path, create_directory, git_status, git_list_branches, git_create_branch, git_switch_branch",
+                "workspace_change.path": "Path relative to the bound folder for file operations",
+                "workspace_change.content": "UTF-8 content for create_file",
+                "workspace_change.old_text": "Exact text to replace once",
+                "workspace_change.new_text": "Replacement text",
+                "workspace_change.destination": "Relative destination for copy or move",
+                "workspace_change.branch": "Local branch name for create or switch",
             ])
 
         // --- 文言と数字を同じ関数の中に置く（R10）------------------------------
         //
         // **別のテストに分けないこと。** 分けた瞬間、この錠は効かなくなる。
         //
-        // 322 は「この説明文をこの語順で送ったときの実測」であって、
+        // 499は「この説明文をこの語順で送ったときの実測」であって、
         // 定数そのものに意味は無い。ところが**その実測を突き合わせている試験
         // （`EngineToolWiringTests.testToolDefinitionTokenCost`）は既定で skip される**
         // ── モデルが要るので `make tooltokens` を打った人にしか走らない。
         //
         // つまり守りは上の錠1枚しかなく、そこには穴がある。
         // **赤を見た人は、期待値の文言を書き換えれば緑に戻せてしまう。**
-        // そのとき 322 はどこにも現れないので、**文言だけが新しくなり、
-        // それを根拠にした予算配分（`InputBudget.transcript` の 1000 − 105 − 322）は
+        // そのとき499はどこにも現れないので、**文言だけが新しくなり、
+        // それを根拠にした縮約上限（`InputBudget.transcript` の1000 − 7 − 499）は
         // 古いまま残る。** 文言は守られているのに、文言と数字の結び付きは誰も守っていない。
         //
         // だから同じ関数の中へ置く。**上を書き換える人の目に、必ずこれが入る。**
         XCTAssertEqual(
-            SophiaDefaults.toolDefinitionTokens, 322,
+            SophiaDefaults.toolDefinitionTokens, 499,
             """
-            ツール定義の費用が 322 から変わっている。
+            ツール定義の費用が499から変わっている。
             **上の説明文を書き換えたなら、この数字は既に古い。**
             `make tooltokens` で測り直し、`make toolbreakdown` で内訳を出してから直すこと。
-            この数字は InputBudget.transcript（1000 − 105 − 322 = 573）を通じて
+            この数字は InputBudget.transcript（1000 − 7 − 499 = 494）を通じて
             縮約が「収まった」と判断する境界そのものになっている。
             """)
     }

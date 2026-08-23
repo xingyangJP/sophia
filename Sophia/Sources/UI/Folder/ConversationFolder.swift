@@ -120,7 +120,7 @@ final class ConversationFolder {
         isArmed ? SophiaDefaults.toolDefinitionTokens : 0
     }
 
-    /// 入力予算に対する割合（%）。**32% という数字を画面で言い切るための計算。**
+    /// 入力予算に対する割合（%）。実測値を画面へそのまま反映するための計算。
     var toolDefinitionBudgetPercent: Int {
         guard SophiaDefaults.inputTokenBudget > 0 else { return 0 }
         return Int(
@@ -169,7 +169,7 @@ final class ConversationFolder {
     /// ブックマークが解けたかどうかしか見ておらず、**解けたのに読めない**
     /// （権限が外れた・中身が入れ替わった）場合は true を返す。
     /// そのまま `armed` にすると、**チップは出ているのに読めない**会話になり、
-    /// 利用者は毎ターン 322トークン払いながら「なぜか答えられない」を見ることになる。
+    /// 利用者は毎ターン499トークン払いながら「なぜか答えられない」を見ることになる。
     func restoreOnLaunch() async {
         guard access.restoreSavedFolder() else { return }
         await verifyBinding()

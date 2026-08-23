@@ -6,8 +6,8 @@ import Foundation
 /// ## ここが権限の唯一の入口である
 ///
 /// サンドボックス下では任意のパスは読めない。
-/// `com.apple.security.files.user-selected.read-only` の
-/// **「user-selected」は文字どおりの意味**で、この panel を通ったものだけが読める。
+/// `com.apple.security.files.user-selected.read-write` の
+/// **「user-selected」は文字どおりの意味**で、このpanelを通ったものだけが読み書きできる。
 ///
 /// したがって **16.6節の約束1（アクセス範囲をファイルの中身で広げない）は、
 /// ここに関数が1つしか無いことで担保される。** 権限を得る経路を増やさないこと。
@@ -32,13 +32,13 @@ enum FolderPicker {
         // **単一選択。** 複数の根を許すと、封じ込め（16.5節）が「どの根か」を
         // 判定する分岐を持つことになる。判定が増える場所は必ず穴が開く。
         panel.allowsMultipleSelection = false
-        // 読み取りしかしないので、作らせる意味が無い。
+        // 選択panel自体では作らせない。ディレクトリ作成は承認付きツールだけが担う。
         panel.canCreateDirectories = false
         // Finder のエイリアスは実体に解決させる。どのみち手順2で解決するので、
         // ここで解いておいたほうが利用者に見えるパスと実際に読む場所が揃う。
         panel.resolvesAliases = true
 
-        panel.message = "Sophia に読ませるフォルダを選んでください。この中のファイルだけを参照します。"
+        panel.message = "Sophia に許可するフォルダを選んでください。この中だけを参照し、変更時は毎回確認します。"
         panel.prompt = "このフォルダを許可"
         panel.directoryURL = startingAt
 

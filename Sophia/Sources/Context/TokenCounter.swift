@@ -13,13 +13,10 @@ import Foundation
 /// | 実トークナイザ（MLX の `lmInput.text.tokens.count`） | モデルが載っているときだけ | 正確 |
 ///
 /// **概算を切り詰めの中に直接書くと、実トークナイザに差し替えられなくなる。**
-/// そして差し替えは「いつかやりたい改善」ではなく、**既に痛みを出している宿題**である ─
-/// PROGRESS.md 発見19 で、画面の概算が実測に対して **1.47倍 甘い**ことが実使用で確定した。
-/// 概算 8,296 に対し実測 12,234。**利用者は予算の3分の2の地点で壁に当たった。**
-///
-/// 切り詰めが同じ甘さを持ったら何が起きるか。**「予算に収まるよう切った」と言いながら、
-/// 実際には 1.47倍 のものを文脈へ入れることになる。** 切り詰め層が壁の原因になる。
-/// だから**数え方は引数である。**
+/// 発見19では旧概算 `content.count × 0.5` が実測に対して1.47倍甘かった。
+/// 現行概算は文字種別へ修正済みなので、その倍率は再利用できない。
+/// それでも混成文・テンプレート・tool metadata は単一係数で表せないため、
+/// 出荷時に実トークナイザへ差し替えられること自体が必要である。だから**数え方は引数である。**
 ///
 /// ## 差し替え方
 ///
@@ -28,7 +25,9 @@ import Foundation
 /// ContextWindow.clip(text, path: "notes.md", counter: .estimate)
 ///
 /// // モデルが載っているとき（第15章の本筋。この層は書き換えない）
-/// let exact = TokenCounter.exact { tokenizer.encode(text: $0).count }
+/// let exact = TokenCounter.exact {
+///     tokenizer.encode(text: $0, addSpecialTokens: false).count
+/// }
 /// ContextWindow.clip(text, path: "notes.md", counter: exact)
 /// ```
 ///

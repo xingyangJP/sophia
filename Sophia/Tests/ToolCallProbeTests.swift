@@ -25,21 +25,19 @@ import XCTest
 //  （`eval/verdicts/2026-08-18.jsonl`）── 日本語としては完璧なまま、
 //  存在しない API を捏造した。**JSON 形式の遵守は、まさにその「細部」である。**
 //
-//  **呼べなければ第16章は成立しない。だから実装の前に測る。**
+//  **呼べなければ第16・17章は成立しない。出荷定義を変えるたびに測る。**
 //
-//  ## 本番と経路が違う点（重要）
+//  ## 本番との境界（重要）
 //
-//  `MLXEngine.swift:648` の `UserInput(chat:additionalContext:)` は **tools を渡していない。**
 //  本プローブは `MLXLMCommon` を直接叩いて `UserInput(chat:tools:additionalContext:)` を組む。
-//  **したがって「プローブで呼べた」は「本番で呼べる」を意味しない** ──
-//  本番で使うには `MLXEngine` 側に tools を渡す口を足す必要がある（未実装）。
-//  ここで測っているのは**モデルの能力**であって、アプリの結線ではない。
+//  本番の `MLXEngine` も同じ `FolderTool.definitions` を渡すが、承認UI・監査・I/Oは通らない。
+//  ここで測るのは**モデルの選択能力**であり、結線と実操作は統合テストで別に証明する。
 // =============================================================================
 
 final class ToolCallProbeTests: XCTestCase {
 
     /// **`SOPHIA_TOOLPROBE=1` が無ければ走らない。**
-    /// 4.6GB を読み込んで実推論するので、通常の `make app-test`（全93件・1秒未満）に
+    /// 4.6GB を読み込んで実推論するので、通常の `make app-test`（約540件）に
     /// 混ざると開発が止まる。`PrefillProbeTests` と同じ作法。
     override func setUpWithError() throws {
         try XCTSkipUnless(
@@ -77,7 +75,7 @@ final class ToolCallProbeTests: XCTestCase {
         Double(ProcessInfo.processInfo.environment["SOPHIA_TOOLPROBE_TEMP"] ?? "") ?? 0.7
     }
 
-    // MARK: - ツール定義（DESIGN 16.4節の3つ）
+    // MARK: - ツール定義（DESIGN 16.4節＋17章の4つ）
 
     /// **出荷する定義そのものを測る。** ここに定義を書き写さないこと。
     ///
@@ -99,6 +97,7 @@ final class ToolCallProbeTests: XCTestCase {
         case "list_directory": ["path"]
         case "read_file": ["path"]
         case "search_files": ["path", "query"]
+        case "workspace_change": ["operation"]
         default: []
         }
     }
@@ -130,7 +129,23 @@ final class ToolCallProbeTests: XCTestCase {
         let prompt: String
         /// 期待するツール名。`nil` なら「呼ばないのが正解」。
         let expected: String?
+        /// `workspace_change`ではツール名だけでなく操作の選択も見る。
+        let expectedOperation: String?
         let note: String
+
+        init(
+            id: String,
+            prompt: String,
+            expected: String?,
+            expectedOperation: String? = nil,
+            note: String
+        ) {
+            self.id = id
+            self.prompt = prompt
+            self.expected = expected
+            self.expectedOperation = expectedOperation
+            self.note = note
+        }
     }
 
     private static let conditions: [Condition] = [
@@ -142,6 +157,12 @@ final class ToolCallProbeTests: XCTestCase {
               expected: "search_files", note: "日本語・検索"),
         .init(id: "en-list", prompt: "List what's in ~/Documents",
               expected: "list_directory", note: "英語・対照（日本語で落ちるなら言語の問題と分かる）"),
+        .init(id: "ja-create-file", prompt: "hello.txt を新しく作り、内容を hello にして",
+              expected: "workspace_change", expectedOperation: "create_file", note: "日本語・ファイル作成"),
+        .init(id: "ja-create-directory", prompt: "docs/generated ディレクトリを新規作成して",
+              expected: "workspace_change", expectedOperation: "create_directory", note: "日本語・ディレクトリ作成"),
+        .init(id: "ja-create-branch", prompt: "現在のHEADから feature/sophia-demo ブランチを作って",
+              expected: "workspace_change", expectedOperation: "git_create_branch", note: "日本語・ブランチ作成"),
         .init(id: "no-tool-chat", prompt: "量子化とは何か、3行で説明して",
               expected: nil, note: "**呼ばないのが正解。** 誤爆の検出"),
         .init(id: "no-tool-greet", prompt: "こんにちは",
@@ -172,6 +193,8 @@ final class ToolCallProbeTests: XCTestCase {
 
                 let called = outcome.toolName != nil
                 let correct = outcome.toolName == condition.expected
+                    && (condition.expectedOperation == nil
+                        || outcome.operation == condition.expectedOperation)
                 var t = tally[condition.id] ?? (0, 0, 0, 0)
                 t.total += 1
                 if called { t.called += 1 }
@@ -181,7 +204,8 @@ final class ToolCallProbeTests: XCTestCase {
 
                 log("""
                     TRY id=\(condition.id) attempt=\(attempt + 1)/\(attempts) seed=\(seed) \
-                    expected=\(condition.expected ?? "-") got=\(outcome.toolName ?? "-") \
+                    expected=\(condition.expected ?? "-") expected_op=\(condition.expectedOperation ?? "-") \
+                    got=\(outcome.toolName ?? "-") got_op=\(outcome.operation ?? "-") \
                     correct=\(correct) schema_ok=\(outcome.argumentsAreValidJSON) \
                     args=\(outcome.argumentsSummary) text_chars=\(outcome.textCharacters)
                     """)
@@ -193,6 +217,7 @@ final class ToolCallProbeTests: XCTestCase {
             let t = tally[condition.id] ?? (0, 0, 0, 0)
             log("""
                 SUM id=\(condition.id) expected=\(condition.expected ?? "-") \
+                expected_op=\(condition.expectedOperation ?? "-") \
                 called=\(t.called)/\(t.total) correct=\(t.correct)/\(t.total) \
                 schema_ok=\(t.validJSON)/\(t.total) note=\(condition.note)
                 """)
@@ -233,6 +258,7 @@ final class ToolCallProbeTests: XCTestCase {
     /// 戻り値として actor 境界を越える。
     private struct Outcome: Sendable {
         var toolName: String?
+        var operation: String?
         var argumentsAreValidJSON: Bool
         var argumentsSummary: String
         var textCharacters: Int
@@ -251,7 +277,7 @@ final class ToolCallProbeTests: XCTestCase {
 
         return try await container.perform { context -> Outcome in
             var outcome = Outcome(
-                toolName: nil, argumentsAreValidJSON: false,
+                toolName: nil, operation: nil, argumentsAreValidJSON: false,
                 argumentsSummary: "-", textCharacters: 0)
 
             // 思考は切る。**測っているのは形式の遵守であって推論の質ではない。**
@@ -305,6 +331,9 @@ final class ToolCallProbeTests: XCTestCase {
                     // JSON のパースは成功している。だからここで見るべきは
                     // 「JSONとして妥当か」ではなく、**「スキーマに合っているか」**。
                     let args = call.function.arguments
+                    if case .string(let operation)? = args["operation"] {
+                        outcome.operation = operation
+                    }
                     let required = Self.requiredKeys(for: call.function.name)
                     let missing = required.filter { args[$0] == nil }
                     outcome.argumentsAreValidJSON = missing.isEmpty && !args.isEmpty

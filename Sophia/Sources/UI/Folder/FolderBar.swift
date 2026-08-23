@@ -11,7 +11,7 @@ import SwiftUI
 ///
 /// # 費用をチップに書いてある理由
 ///
-/// **`armed` の間、モデルは毎ターン 322トークン ── 入力予算 1,000 の 32% ── を
+/// **`armed` の間、モデルは毎ターン499トークン ── 入力予算1,000の約50% ── を
 /// ツール定義に払っている。** 利用者は1文字も打っていないのに、である。
 ///
 /// > 無駄が痛みとして見えないと誰も減らさない（VISION の測定原則）
@@ -69,7 +69,7 @@ struct FolderBar: View {
             "選んだフォルダの中のファイルを、Sophia が読めるようになります。"
             + "結び付けている間は毎ターン約 \(SophiaDefaults.toolDefinitionTokens) トークンを"
             + "ツールの説明に使います（入力の目安 \(SophiaDefaults.inputTokenBudget) の"
-            + "\(model.folder.toolDefinitionBudgetPercent)%）。読み取りだけで、書き込みはしません")
+            + "\(model.folder.toolDefinitionBudgetPercent)%）。変更は内容を表示し、毎回承認を求めます")
     }
 
     // MARK: - armed

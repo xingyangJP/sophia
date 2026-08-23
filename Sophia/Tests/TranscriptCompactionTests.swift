@@ -19,10 +19,10 @@ import XCTest
 //
 //  | | |
 //  |---|--:|
-//  | 1回の読み取り（`InputBudget.singleRead`） | 360 |
+//  | 1回の読み取り（`InputBudget.singleRead`） | 183 |
 //  | 1ターンの往復（`FolderToolRunner.callLimit`） | × 6 |
 //  | **積み上がりうる量** | **2,160** |
-//  | 送信列に配られた分（`InputBudget.transcript(armed:)`） | **573** |
+//  | 送信列に渡す上限（`InputBudget.transcript(armed:)`） | **671** |
 //
 //  しかも往復のたびに全部プリフィルし直す（KV再利用なし・実測21秒）。
 //  **積み上がった生の戻り値を、周回のたびに払い直していた。**
@@ -41,9 +41,9 @@ import XCTest
 //     ループが使う判断は `static` に出してあり（`compacted(_:budget:counter:)` /
 //     `transcriptEntry(for:)`）、ここが叩いているのは**その本物**である。
 //     ただし「ループがそれを呼んでいること」自体は、実装を読んで確かめるしかない。
-//  2. **数え方は概算である。** 実トークナイザとの比は 1.47倍（発見19）。
-//     「予算に収まった」は、ここが全部緑でも【未確認】のままである。
-//     確かめる道は `TokenCounter.exact` を挿すこと（第15章の宿題）。
+//  2. このファイルの既定呼び出しは概算である。出荷経路は実トークナイザと
+//     5/発言を渡すが、モデル無しの本ファイルはその配線を実行できない。
+//     実測は `make tooltokens` の `COMPACTION6` が担う。
 //
 //  # 2026-08-19: **緑だったが測れていなかった3点を直した**
 //
@@ -51,8 +51,8 @@ import XCTest
 //
 //  | 何が測れていなかったか | どう直したか |
 //  |---|---|
-//  | 本命（6件読んだターン）が **`fits` を一度も見ていなかった。** 前書きは「2,160 対 573」を根拠に縮約の必要を説いているのに、表明は件数と半減しか見ていない | `fits` を見るようにした。**実際には収まっていない**（③）ので、そこも数字で残してある |
-//  | `perMessageOverhead` の口を `fitRoundTrip` に直接当てていた。**出荷経路（`MLXEngine.compacted`）にはその口が無く**、渡されない引数の振る舞いを固定していた | `compacted` に口を開け、そちらから叩くようにした（`performChat` はまだ渡していない ── 【未確認】） |
+//  | 本命（6件読んだターン）が **`fits` を一度も見ていなかった。** 件数と半減しか見ていない | `fits` を見る。現在は概算では収まり、実測では収まらないことを別の器で分けている |
+//  | `perMessageOverhead` の口を `fitRoundTrip` に直接当てていた | `compacted` に口を開け、`performChat` から実測値5を渡すようにした |
 //  | 道具の `read(path:needle:)` が「実行役が通るのと同じ道」と書きながら `clip(_:path:)`（全文の入口）を通っていた。**実行役が通るのは `clip(windowed:)`** で、1手ずれていた | 読み手が返す窓の形を写して `clip(windowed:)` を通すようにした |
 //
 //  **「落ちないこと」ではなく「正しい値か」。緑は、測れていることを意味しない。**
@@ -237,8 +237,7 @@ final class TranscriptCompactionTests: XCTestCase {
         XCTAssertTrue(fit.fits)
     }
 
-    /// テンプレートの固定分は**まだ測っていない**ので既定 0。
-    /// 入れられる口があること自体を固定しておく（`fit` と同じ規律）。
+    /// テンプレートの固定分を入れられる口を固定しておく（`fit` と同じ規律）。
     ///
     /// ## **叩く先を出荷経路へ移した**（2026-08-19。ここは何も測れていなかった）
     ///
@@ -248,11 +247,8 @@ final class TranscriptCompactionTests: XCTestCase {
     /// **出荷経路が決して使わない引数の振る舞いを固定していた。**
     /// 口を `compacted` にも開け、こちらから叩くようにした。
     ///
-    /// > **【未確認】まだ届いていない一手。** `performChat` は `compacted` に
-    /// > `perMessageOverhead` を渡していない（既定 0 のまま）。
-    /// > 渡す値が無いからである ── テンプレートの固定分は
-    /// > 実トークナイザでしか測れない（第15章の宿題 / `TokenCounter.exact`）。
-    /// > **口が開いたことと、実際に払っている分を数えていることは、まだ別である。**
+    /// 出荷経路は完全プロンプト用の `totalCounter` を渡す。
+    /// ここでは簡易な発言固定分と、全体計数が優先される契約をモデル無しで確かめる。
     func testPerMessageOverheadIsAccountedThroughTheShippingEntryPoint() {
         let transcript: [RoundTripMessage] = [.user("abc"), .assistant("de", toolCalls: [])]
 
@@ -260,9 +256,17 @@ final class TranscriptCompactionTests: XCTestCase {
             transcript, budget: 1_000, counter: .oneCharacterOneToken)
         let withOverhead = MLXEngine.compacted(
             transcript, budget: 1_000, counter: .oneCharacterOneToken, perMessageOverhead: 5)
+        let withWholePromptCounter = MLXEngine.compacted(
+            transcript,
+            budget: 1_000,
+            counter: .oneCharacterOneToken,
+            perMessageOverhead: 5,
+            totalCounter: { _ in 42 })
 
         XCTAssertEqual(bare.fit.tokens, 5)
         XCTAssertEqual(withOverhead.fit.tokens, 5 + 5 * 2, "1発言あたり5を、発言の数だけ足すこと")
+        XCTAssertEqual(withWholePromptCounter.fit.tokens, 42)
+        XCTAssertFalse(withWholePromptCounter.fit.tokensAreEstimated)
     }
 
     // =========================================================================
@@ -311,33 +315,11 @@ final class TranscriptCompactionTests: XCTestCase {
 
         // --- **収まったのか**（2026-08-19 に足した。ここを一度も見ていなかった）-------
         //
-        // 章の前書きは「2,160 対 573」を根拠に縮約の必要を説いているのに、
-        // 表明は件数と半減しか見ていなかった。**件数は手段であって目的ではない。**
-        // 目的は予算に収めることで、それは `fits` にしか出ない。
-        //
-        // そして**いまは収まらない**（③ / 申し送り）。欠陥ではなく配分表の算数である ──
-        // 一番新しい読み取り（`InputBudget.singleRead` = 360・概算実測 353）と
-        // 自己認識（同 97）と栞5件（同 25 × 5）が、取り分 573 に同居できない。
-        // **この層はこれ以上減らせない** ── 超過は `contextLength`（8,192）まで素通りする。
-        XCTAssertGreaterThan(
-            compacted.fit.tokens, compacted.fit.budget,
-            "落とし切っても超えることが、この試験の測っている事実である")
-        XCTAssertFalse(
-            compacted.fit.fits,
-            """
-            収まるようになった（\(compacted.fit.tokens) / \(compacted.fit.budget)）。
-            配分表か断り書きの費用が動いたということである。
-            **③の申し送りを閉じ、この2行を「収まること」の表明へ反転させること。**
-            """)
-        // 収まらないと言っている以上、**どれだけ超えたかを数字で残す。**
-        // 「収まらない」だけでは、次に見る者が近いのか遠いのかを判断できない。
-        XCTAssertLessThan(
-            compacted.fit.tokens - compacted.fit.budget, Budget.singleRead,
-            """
-            超過が読み取り1回分（\(Budget.singleRead)）を超えている
-            ── \(compacted.fit.tokens) / \(compacted.fit.budget)。
-            これは「あと少し」ではなく、配分表そのものが破れている状態である。
-            """)
+        // モデル無しの既定概算では収まる。出荷条件の実測は 718 / 671 で収まらないため、
+        // この true を「実際に収まった」と読まないこと。
+        XCTAssertTrue(compacted.fit.tokensAreEstimated)
+        XCTAssertLessThanOrEqual(compacted.fit.tokens, compacted.fit.budget)
+        XCTAssertTrue(compacted.fit.fits)
 
         let joined = compacted.messages.map(Self.text(of:)).joined(separator: "\n")
         XCTAssertTrue(joined.contains("NEEDLE-6"), "一番新しい読み取りの中身が消えている")

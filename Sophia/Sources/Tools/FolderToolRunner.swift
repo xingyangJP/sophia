@@ -38,6 +38,10 @@ actor FolderToolRunner {
     let limits: FolderToolExecution.Limits
     let budget: ContextBudget
     let counter: TokenCounter
+    let approvalRequester: (any ToolApprovalRequesting)?
+    let fileSystem: WorkspaceFileSystem
+    let auditStore: ToolAuditStore?
+    private var git: WorkspaceGit?
 
     /// 1つの会話で許す呼び出し回数。
     ///
@@ -60,13 +64,18 @@ actor FolderToolRunner {
         limits: FolderToolExecution.Limits = .standard,
         budget: ContextBudget = .singleRead,
         counter: TokenCounter = .estimate,
-        callLimit: Int = 6
+        callLimit: Int = 6,
+        approvalRequester: (any ToolApprovalRequesting)? = nil,
+        auditStore: ToolAuditStore? = nil
     ) {
         self.folder = folder
         self.limits = limits
         self.budget = budget
         self.counter = counter
         self.callLimit = callLimit
+        self.approvalRequester = approvalRequester
+        self.fileSystem = WorkspaceFileSystem(folder: folder)
+        self.auditStore = auditStore ?? (try? ToolAuditStore())
     }
 
     /// 残り回数。16.7節の表示に使える。
@@ -80,12 +89,25 @@ actor FolderToolRunner {
     /// **同じ誤りを繰り返すモデルに対して上限が効かなくなる。**
     /// 「読めた回数」ではなく「往復した回数」を数えるのが 16.8節の意図である。
     func run(_ call: ToolCallRequest) -> ToolResult {
-        guard callCount < callLimit else {
-            return .rejected(.callLimitReached(callLimit), tool: call.name, counter: counter)
-        }
-        callCount += 1
+        if let rejection = reserveCall(named: call.name) { return rejection }
         return FolderToolExecution.perform(
             call, in: folder, limits: limits, budget: budget, counter: counter)
+    }
+
+    func reserveCall(named toolName: String) -> ToolResult? {
+        guard callCount < callLimit else {
+            return .rejected(.callLimitReached(callLimit), tool: toolName, counter: counter)
+        }
+        callCount += 1
+        return nil
+    }
+
+    func workspaceGit() throws -> WorkspaceGit {
+        if let git { return git }
+        let created = try WorkspaceGit(
+            workspaceURL: URL(fileURLWithPath: folder.canonicalRootPath, isDirectory: true))
+        git = created
+        return created
     }
 
     /// 数を戻す。**新しい会話・新しい利用者の発言から往復を始めるときに呼ぶ。**

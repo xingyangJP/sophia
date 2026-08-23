@@ -85,6 +85,11 @@ final class ChatViewModel {
     /// **定義をこのファイルへ書き写さないこと。**
     let folder: ConversationFolder
 
+    /// Change authorization is owned by the UI, never by model output.
+    let toolApprovalBroker = ToolApprovalBroker()
+
+    var pendingToolApproval: ToolApprovalRequest? { toolApprovalBroker.pendingRequest }
+
     var engineIsStub: Bool { engine.identifier == .stub }
 
     /// 思考モードのトグルを出してよいか。
@@ -95,7 +100,7 @@ final class ChatViewModel {
     /// **超過は隠さず見せる**（VISION の測定原則）。
     ///
     /// **ツール定義ぶんを足してある**（16.2節「費用は測ること」/ 16.7節）。
-    /// 足さないと、`armed` の会話では**画面に出る数字が実送信より 322 少ない嘘**になる。
+    /// 足さないと、`armed` の会話では**画面に出る数字が実送信より499少ない嘘**になる。
     /// `engineMessages()` に系統を寄せているのと同じ理由で、
     /// **予算警告と実送信は同じ材料から作らないと必ずずれる。**
     ///
@@ -393,7 +398,9 @@ final class ChatViewModel {
     private func syncToolExecutor() async {
         // 型を明示してあるのは好みではない ── `FolderToolRunner?` のまま渡すと
         // 存在型への暗黙変換に頼ることになる。**境界の型は境界で決めておく。**
-        let executor: (any ToolExecuting)? = folder.folder.map { FolderToolRunner(folder: $0) }
+        let executor: (any ToolExecuting)? = folder.folder.map {
+            FolderToolRunner(folder: $0, approvalRequester: toolApprovalBroker)
+        }
         await EngineFactory.installToolExecutor(executor, into: engine)
     }
 
@@ -401,7 +408,20 @@ final class ChatViewModel {
     func stop() {
         guard isGenerating else { return }
         stopRequested = true
+        toolApprovalBroker.rejectPending()
         generationTask?.cancel()
+    }
+
+    func approveToolChange(_ id: UUID) {
+        toolApprovalBroker.approve(requestID: id)
+    }
+
+    func rejectToolChange(_ id: UUID) {
+        toolApprovalBroker.reject(requestID: id)
+    }
+
+    func rejectPendingToolChange() {
+        toolApprovalBroker.rejectPending()
     }
 
     /// 会話をやり直す。生成中は使わせない。

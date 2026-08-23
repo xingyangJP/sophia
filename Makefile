@@ -159,7 +159,7 @@ app-test:
 # 落ちる条件は「宣言されているのに実行時に現れない」だけ。
 # skip は落とさないが**毎回実名で出す** ── `totalTestCount` は skip を
 # 「走った」に数えるので、数の突き合わせでは中身が走っていないことを見抜けない。
-# 名前が目に入れば人が気づける（例: `testToolDefinitionTokenCost` = 322 の唯一の裏取り）。
+# 名前が目に入れば人が気づける（例: `testToolDefinitionTokenCost` = 499 の唯一の裏取り）。
 test-audit:
 	@python3 scripts/audit-tests.py
 
@@ -332,9 +332,10 @@ tooltokens:
 			|| /usr/libexec/PlistBuddy -c "Set $$ENV_PATH:$$k $$v" "$$RUN"; \
 	done; \
 	printf '=== %s ===\n' "$$(date '+%F %T')" >> $(TOOLTOKENS_LOG); \
+	set -o pipefail; \
 	xcodebuild test-without-building -xctestrun "$$RUN" -destination '$(XC_DEST)' \
 		-only-testing:SophiaTests/EngineToolWiringTests/testToolDefinitionTokenCost \
-		2>&1 | tee -a $(TOOLTOKENS_LOG) | grep -E '^\[TOOLTOKENS|Executed|error:|\*\* TEST' || true
+		2>&1 | tee -a $(TOOLTOKENS_LOG) | { grep -E '^\[TOOLTOKENS|Executed|error:|\*\* TEST' || true; }
 	@echo "計測ログ: $(TOOLTOKENS_LOG)"
 
 # --- ツール定義の費用の「内訳」を測る（16.9節 項目4 の但し書き）------------
@@ -359,9 +360,10 @@ toolbreakdown:
 			|| /usr/libexec/PlistBuddy -c "Set $$ENV_PATH:$$k $$v" "$$RUN"; \
 	done; \
 	printf '=== %s ===\n' "$$(date '+%F %T')" >> $(TOOLBREAKDOWN_LOG); \
+	set -o pipefail; \
 	xcodebuild test-without-building -xctestrun "$$RUN" -destination '$(XC_DEST)' \
 		-only-testing:SophiaTests/ToolCostBreakdownTests \
-		2>&1 | tee -a $(TOOLBREAKDOWN_LOG) | grep -E '^\[BREAKDOWN|Executed|error:|\*\* TEST' || true
+		2>&1 | tee -a $(TOOLBREAKDOWN_LOG) | { grep -E '^\[BREAKDOWN|Executed|error:|\*\* TEST' || true; }
 	@echo "計測ログ: $(TOOLBREAKDOWN_LOG)"
 
 # --- LoRA が16GB機で回るか、「いくら要るか」を測る（FR-24〜29 / DESIGN 第14章）--
@@ -370,7 +372,7 @@ toolbreakdown:
 # パーソナライズを「毎ターン注入」から「重みに書く」へ変えられるかどうか。
 # 注入の費用は **N トークン × 会話が続く限り永久**、LoRA の費用は **0**。
 # そして注入する余地はもう無い ── `SophiaDefaults.InputBudget` の配分で
-# **利用者に残っているのは 33 トークンである**（1,000 − 105 − 322 − 360 − 180）。
+# **利用者に残っているのは 33 トークンである**（1,000 − 105 − 499 − 183 − 180）。
 #
 # **測るのは「動いた／動かない」ではなく「いくら要るか」である。**
 # メモリ・1イテレーションの単価・アダプタの実寸を、条件を振りながら取る。
