@@ -125,6 +125,7 @@ app-stats:
 	@sysctl -n vm.swapusage >> $(STATS_LOG)
 	@open -n --env SOPHIA_LOG_STATS=1 $(if $(SYSTEM_PROMPT),--env SOPHIA_SYSTEM_PROMPT=$(SYSTEM_PROMPT),) \
 		$(if $(LOG_MEM),--env SOPHIA_LOG_MEM=$(LOG_MEM),) \
+		$(if $(LOG_LOAD),--env SOPHIA_LOG_LOAD=$(LOG_LOAD),) \
 		--stderr "$(CURDIR)/$(STATS_LOG)" "$(APP_DEBUG)"
 	@echo "計測ログ: $(STATS_LOG)（別窓で make stats-tail）"
 
@@ -136,8 +137,19 @@ app-stats:
 #
 #   make app-watch
 #   （別窓で） make stats-tail
+# **`LOG_LOAD=1` で `[LOAD]` 行が付く** ── 取得の見張り（`ModelDownloadStallWatch`）が
+# 5秒ごとに `progress` と `disk_bytes` を並べて出す。
+#
+# **既定で入れてあるのは、正常系が何も記録を残さないからである。**
+# `event=stalled` の1行だけは無条件に出るが、**それは打ち切ったときにしか出ない** ──
+# **「打ち切らなかったとき、なぜ打ち切らなかったのか」はログに残らない。**
+#
+# 2026-09-05 の実機検証でこれに気づいた。448秒間 打ち切られずに取得が続いたが、
+# **`disk_bytes` が1行も残っていないため「ディスク信号が打ち切りを止めた」ことを示せなかった**
+# （`Progress` が正常に更新されていただけ、という可能性を否定できない）。
+# **判定の根拠がログに無いと、合格を主張できない**（docs/DOWNLOAD_VERIFY.md の A3）。
 app-watch:
-	@$(MAKE) --no-print-directory app-stats LOG_MEM=1 NOTE="$(NOTE)"
+	@$(MAKE) --no-print-directory app-stats LOG_MEM=1 LOG_LOAD=1 NOTE="$(NOTE)"
 
 stats-tail:
 	@tail -f $(STATS_LOG) | grep --line-buffered '^\[STATS\]'

@@ -486,18 +486,35 @@ actor MLXEngine: InferenceEngine {
                         completedBytes: completed, totalBytes: total,
                         at: SuspendingClock().now)
 
+                    // **画面に出すのは「少なくともこれだけ受け取った」の値である。**
+                    // `Progress` が凍っている間、ディスクのほうが真実に近い
+                    // （`receivedBytesFloor` の説明を参照）。
+                    //
+                    // **段階（`stage`）の判定には使わない。** あちらは
+                    // 「取得が終わったか」の判断で、`Progress` の総量との比較が正しい。
+                    // **数字だけを差し替える。**
+                    let shown = max(completed, watch.receivedBytesFloor)
+                    let shownFraction = total > 0
+                        ? min(1.0, Double(shown) / Double(total))
+                        : fraction
+
                     continuation.yield(LoadProgress(
                         stage: fraction >= 1.0 ? .loadingWeights : .downloading,
-                        completedBytes: completed > 0 ? completed : nil,
+                        completedBytes: shown > 0 ? shown : nil,
                         totalBytes: total > 0 ? total : nil,
-                        fraction: fraction,
+                        fraction: shownFraction,
                         detail: fraction >= 1.0
                             ? "重みをメモリへ展開しています"
                             // **バイト数を必ず添える。** 「0%」だけだと、待てばいいのか
                             // 壊れているのかが判別できない。「0.00 GB / 4.62 GB」なら
                             // 一目で異常だと分かる（今回いちばん欠けていた情報）。
-                            : "モデルを取得しています（\(Int(fraction * 100))%・"
-                                + "\(formatDownloadedBytes(completed: completed, total: total))）"))
+                            // **文字もバーと同じ値を使う。** ここを `fraction` / `completed`
+                            // のままにすると、**同じ画面の中でバーと文字が食い違う** ──
+                            // 2026-09-05、バーが約8%まで伸びているのに文字は
+                            // 「0% ・ 0.01 GB / 4.62 GB」のままで、利用者から
+                            // **「表示が出鱈目」**と指摘された。
+                            : "モデルを取得しています（\(Int(shownFraction * 100))%・"
+                                + "\(formatDownloadedBytes(completed: shown, total: total))）"))
                 }
             )
 
@@ -604,11 +621,15 @@ actor MLXEngine: InferenceEngine {
                     // ここを勝ち残らせるには `LoadProgress` に警告の段階を足す必要があり、
                     // Shared の型を触ることになるので、今回はそこまでやっていない。
                     if logs { writeModelLoadLine("idle", model: modelID, report: report) }
+                    // ここも `Progress` ではなく下限を出す（進捗ハンドラと同じ理由）。
+                    let shown = max(report.completedBytes, report.diskBytes ?? 0)
                     continuation.yield(LoadProgress(
                         stage: .downloading,
-                        completedBytes: report.completedBytes > 0 ? report.completedBytes : nil,
+                        completedBytes: shown > 0 ? shown : nil,
                         totalBytes: report.totalBytes > 0 ? report.totalBytes : nil,
-                        fraction: report.fraction,
+                        fraction: report.totalBytes > 0
+                            ? min(1.0, Double(shown) / Double(report.totalBytes))
+                            : report.fraction,
                         detail: report.waitingDetail))
 
                 case .stalled(let report):
@@ -2349,6 +2370,29 @@ final class ModelDownloadStallWatch: @unchecked Sendable {
     /// - Parameters:
     ///   - firstByteGrace: **まだ1バイトも来ていない**ときに使う猶予。長いほう。
     ///   - stallTimeout: 一度でもバイトが来たあとに使う閾値。短いほう。
+    /// **画面に出してよい「少なくともこれだけ受け取った」の値。**
+    ///
+    /// `Progress` は Issue #48 で大容量ファイルの最中に更新されない。
+    /// **2026-09-05 の実機ログでは 14,275,517 バイトで凍ったまま、
+    /// ディスクには 176,493,411 バイトが書かれていた**（約12倍）。
+    ///
+    /// > **そのとき画面は「0.01 GB / 4.62 GB・0%」と出ていた。**
+    /// > **取得は進んでいるのに、進んでいないように見える。**
+    /// > **利用者はそれを見て「止まった」と判断し、アプリを畳んで最初からやり直した**
+    /// > ── 一時ファイルに 7.5GB の残骸が積み上がったのはそのためである。
+    ///
+    /// **打ち切らないことと、進んでいると見えることは別の問題だった。**
+    /// 見張りを直しても、**表示が `Progress` を出している限り体験は変わらない。**
+    ///
+    /// **大きいほうを採るのは、どちらも「少なくともこれだけ」だからである** ──
+    /// `Progress` は完了したファイルを数え、ディスクは書かれたバイトを数える。
+    /// **どちらも下限であって、上限ではない。**
+    var receivedBytesFloor: Int64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return max(completedBytes, lastDiskBytes ?? 0)
+    }
+
     func evaluate(
         at now: SuspendingClock.Instant,
         firstByteGrace: Duration,

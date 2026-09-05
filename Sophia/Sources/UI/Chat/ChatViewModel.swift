@@ -117,8 +117,44 @@ final class ChatViewModel {
 
     var inputBudgetExceeded: Bool { estimatedInputTokens > SophiaDefaults.inputTokenBudget }
 
+    /// **いま取得・展開の最中か。** 最中でなければ送ってよい。
+    ///
+    /// > **⚠ `model != nil` で判定しないこと（2026-09-05 に一度そう書いて戻した）。**
+    /// > `model` が入るのは読み込みが成功した後だけなので一見正しく見えるが、
+    /// > **`model` を載せずに送る経路が実在する**（`FolderUITests` の5件が即座に落ちた）。
+    /// > **「モデルが載っていない」と「いま取得中である」は別の状態である。**
+    /// > 塞ぎたいのは後者だけで、前者まで塞ぐと**送信そのものを壊す。**
+    ///
+    /// **失敗した直後は「準備中ではない」ので送れる。** そこで送れば `globalError` が
+    /// 出て理由が分かる ── **黙って塞ぐより、失敗を見せるほうが利用者は次の手を打てる。**
+    var isModelReady: Bool { !isLoadingModel && loading == nil }
+
+    /// 送れる条件。**モデルが未準備の間は送れない**（2026-09-05 追加）。
+    ///
+    /// **理由。** 未準備のまま送ると、利用者の文は `send()` の中で消費されるのに
+    /// 応答は返らない。**取得が65秒で打ち切られていた事故のとき、利用者から見えたのは
+    /// 「打った文が消えて何も起きない」だった。**
+    /// **打てないことより、打った文が消えることのほうが害が大きい。**
     var canSend: Bool {
-        !isGenerating && !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !isGenerating
+            && !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && isModelReady
+    }
+
+    /// **なぜ送れないかを言う。** ボタンを黙って無効にしない。
+    ///
+    /// 事故のとき、画面は「0% のまま固まっている」ように見えていた。
+    /// **待つべきなのか壊れているのかを、利用者が判断できる形にする。**
+    /// 送れるときは `nil`（**表示するものが無い**）。
+    var sendBlockedReason: String? {
+        if isGenerating { return nil }              // 生成中は停止ボタンが出るので言う必要が無い
+        if isModelReady { return nil }
+        if let loading {
+            return loading.detail ?? "モデルを準備しています"
+        }
+        if isLoadingModel { return "モデルを準備しています" }
+        if globalError != nil { return "モデルを読み込めていません。再試行してください" }
+        return "モデルの準備を待っています"
     }
 
     // MARK: - 観測対象外（ここが「Task の外の蓄積先」）
@@ -289,7 +325,13 @@ final class ChatViewModel {
 
     func send() {
         let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !isGenerating else { return }
+        // **`isModelReady` をここでも見る。** UI 側の `canSend` だけに頼らないこと ──
+        // `send()` は Return キーからも呼ばれるので、**ボタンを無効にしても口は塞がらない。**
+        //
+        // **早く返ることが下書きの保持そのものである。** `input` を消すのは
+        // この guard の後なので、**送れなかった文は打ったまま残る。**
+        // 別の置き場所へ退避しないこと ── 退避する場所を作ると、戻す経路も要る。
+        guard !text.isEmpty, !isGenerating, isModelReady else { return }
 
         globalError = nil
         input = ""

@@ -129,7 +129,10 @@ struct ComposerView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(!model.canSend)
-                .help("送信します（Enter）。改行は Shift+Enter")
+                // **無効なときは理由を言う。** 黙って灰色にしない ──
+                // 事故のとき画面は「0% のまま固まっている」ように見えており、
+                // **待つべきか壊れているかを利用者が判断できなかった**（2026-09-05）。
+                .help(model.sendBlockedReason ?? "送信します（Enter）。改行は Shift+Enter")
             }
         }
     }
