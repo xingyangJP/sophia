@@ -439,7 +439,18 @@ actor MLXEngine: InferenceEngine {
             // 代償として「取得済み判定だが一部のファイルが欠けていて再取得が走る」経路は
             // 見張れない。そちらは `MLXModelCatalog.isDownloaded` が
             // config.json と *.safetensors の両方を確認しているぶん、起こりにくい。
-            let watch = ModelDownloadStallWatch(startedAt: SuspendingClock().now)
+            // **観測の基準時刻は壁時計で取る。** ファイルの更新時刻と比べるためで、
+            // 見張り自身の時間はスリープを数えない `SuspendingClock` のままにしてある。
+            let downloadStartedAt = Date()
+            let watch = ModelDownloadStallWatch(
+                startedAt: SuspendingClock().now,
+                observingDiskBytes: { observeDownloadTemporaryBytes(startedAt: downloadStartedAt) },
+                // **`Progress` に依存しない完了の合図。** ディスク上に config.json と
+                // *.safetensors が揃えば取得は終わっている（`MLXModelCatalog.isDownloaded`）。
+                // **`isDownloaded` は使わない。** あれは「起動前に既に在るか」に答える器で、
+                // `.safetensors` が1枚でもあれば真になる ── 分割された重みだと
+                // 1枚目が置かれた瞬間に見張りが黙る（監督の指摘 / 2026-09-05）。
+                observingCompletion: { MLXModelCatalog.snapshotIsComplete(modelID) })
             let watchdog: Task<Void, Never>? = alreadyOnDisk
                 ? nil
                 : Self.startDownloadWatchdog(
@@ -2164,6 +2175,22 @@ final class ModelDownloadStallWatch: @unchecked Sendable {
         /// 最後に増えてから何秒 無風だったか。**スリープ中は数えない。**
         var idleSeconds: Double
 
+        /// **ディスク上で観測できた取得中のバイト数。** 観測できないときは nil。
+        ///
+        /// `completedBytes` は `Progress` 由来で、**swift-huggingface 0.9.0 は
+        /// 大容量ファイルの最中に更新しない**（GitHub Issue #48）。
+        /// 2026-09-05 の事故はこれで、UI が 14MB で止まって見えている間、
+        /// OS のログでは同じ通信が **376MB** を受信していた（約26倍）。
+        /// **`Progress` だけを見ている限り、この状態は「停止」としか判定できない。**
+        var diskBytes: Int64?
+
+        /// ディスク上のバイト数が最後に**動いてから**何秒経ったか。観測できないときは nil。
+        ///
+        /// **「増えてから」ではなく「動いてから」である。** 1ファイルの取得が終わって
+        /// 次へ移ると一時ファイルは消え、合計は**減る**。減ったのは進んだ証拠であって
+        /// 停止ではない ── 素朴に増加だけを見ると、**完了を停止と誤判定する**（監督の縛り②）。
+        var diskIdleSeconds: Double?
+
         /// 1バイトでも届いたか。**文言を「始まらない」と「途中で止まった」に割る唯一の材料。**
         var sawAnyBytes: Bool { completedBytes > 0 }
 
@@ -2200,10 +2227,65 @@ final class ModelDownloadStallWatch: @unchecked Sendable {
         case stalled(Report)
     }
 
+    /// **ディスク上の取得中バイト数を観測する口。** 観測できなければ nil を返す。
+    ///
+    /// **`FileManager` を直接呼ばないのは意図的である**（監督の縛り①／R1）。
+    /// 直接叩く実装にすると、試験がネットワークかファイル作成に依存し、
+    /// **判定そのものを測れなくなる。** ここを外から差し替えられる形にしてあるので、
+    /// 「Progress が止まっていてディスクは増えている」という**事故そのものの状況**を
+    /// 実ファイル無しで作れる。
+    typealias DiskObserver = @Sendable () -> Int64?
+
+    /// **取得が完了したかを、`Progress` に依存せずに答える口。**
+    ///
+    /// `finished` を立てる経路が `Progress` しか無いのが 2026-09-05 の事故の第2の顔だった ──
+    /// **壊れているのが `Progress` なのに、その `Progress` で「終わった」を判定していた。**
+    /// 取得が本当に終わっても `Progress` が総量に届かなければ `finished` は立たず、
+    /// 続く重みの展開（16GB機で数十秒〜）の間に両信号が無風になり、
+    /// **完了した取得を打ち切る。** 事故が消えるのではなく、起きる場所が移るだけである。
+    typealias CompletionObserver = @Sendable () -> Bool
+
+    /// **ディスク側の変化を「本物」と認める最小の増減量。**
+    ///
+    /// **新しい数字ではない。** `downloadStallTimeout` の型コメントが根拠として
+    /// 既に書いている値 ──「実測 20MB/s の 1/1000（20KB/s）まで落ちた回線でも、
+    /// 60秒あれば 1.2MB は増える」── をそのまま境界にしている。
+    ///
+    /// これが無いと、**観測対象で無関係な何かが数バイト増減するだけで時計が戻り、
+    /// 待ちに天井が無くなる。** 時間で切る案は採らなかった ──
+    /// 1ファイルが巨大なとき `Progress` が長時間沈黙するのは正常なので、
+    /// **時間で切ると Issue #48 の下で正常な取得を今度は時間で殺す。**
+    ///
+    /// **閾値から導出しているのは意図的である**（R10）。片方だけ変えると、
+    /// もう片方が黙って古くなる。`SOPHIA_DOWNLOAD_STALL_S` を短くすれば、
+    /// この量も同じ割合で小さくなる。
+    /// **判定に使う閾値から導くこと。** 固定値にしてはいけない。
+    ///
+    /// 1.2MB は「**60秒あれば** 20KB/s の回線でも増える量」であって、
+    /// **1回の観測ごとの量でも、閾値と無関係な絶対量でもない。**
+    /// 静的な `downloadStallTimeout` から導くと、**その静的値と違う閾値で判定したとき
+    /// 境界だけが古いまま残る**（試験は 10 秒で判定するのに 60 秒ぶんの量を要求する、など）。
+    /// **数字は条件を連れて歩く。**
+    static func meaningfulDiskChange(within timeout: Duration) -> Int64 {
+        let seconds = max(1, timeout.milliseconds / 1000)
+        return Int64(20_000 * seconds)  // 20KB/s × 判定に使う秒数
+    }
+
     private let lock = NSLock()
     private var completedBytes: Int64 = 0
     private var totalBytes: Int64 = 0
     private var callbackCount = 0
+
+    private let observeDiskBytes: DiskObserver?
+    private let observeCompletion: CompletionObserver?
+    /// `Progress` が最後に進んだ時点で観測できたディスクバイト数。**変化量の基準点。**
+    private var diskBytesAtLastAdvance: Int64?
+    /// 最後に観測したディスク上のバイト数。**増減どちらでも「動いた」と数える。**
+    private var lastDiskBytes: Int64?
+    /// ディスク上の値が最後に**動いた**時刻。**初期値は取得の開始時刻。**
+    private var lastDiskChangeAt: SuspendingClock.Instant
+    /// 一度でも観測できたか。**最初の観測を「動いた」と誤って数えないための旗。**
+    private var hasObservedDisk = false
 
     /// 最後に **`completedBytes` が増えた**時刻。まだ増えていなければ取得の開始時刻。
     private var lastAdvanceAt: SuspendingClock.Instant
@@ -2215,8 +2297,24 @@ final class ModelDownloadStallWatch: @unchecked Sendable {
     /// 黙らせないと、**正常に読み込んでいる最中に「進んでいません」と誤検知する。**
     private var finished = false
 
-    init(startedAt: SuspendingClock.Instant) {
+    init(
+        startedAt: SuspendingClock.Instant,
+        observingDiskBytes: DiskObserver? = nil,
+        observingCompletion: CompletionObserver? = nil
+    ) {
         lastAdvanceAt = startedAt
+        lastDiskChangeAt = startedAt
+        observeDiskBytes = observingDiskBytes
+        observeCompletion = observingCompletion
+
+        // **開始時に基準を1つ取る。** 比べる相手が無いと最初の観測を
+        // 「動いた」とも「止まっている」とも言えず、どちらに倒しても嘘になる。
+        // ここで取っておけば、以後の観測は必ず**差**として読める。
+        if let observed = observingDiskBytes?() {
+            lastDiskBytes = observed
+            diskBytesAtLastAdvance = observed
+            hasObservedDisk = true
+        }
     }
 
     /// 進捗コールバックから呼ぶ。**増えたときだけ時計を戻す。**
@@ -2236,6 +2334,9 @@ final class ModelDownloadStallWatch: @unchecked Sendable {
         if completedBytes > self.completedBytes {
             self.completedBytes = completedBytes
             lastAdvanceAt = now
+            // **変化量の基準点も進める。** `Progress` が動いた時点のディスク量からの
+            // 差で「本物か雑音か」を見るので、ここを更新しないと基準が古びる。
+            diskBytesAtLastAdvance = lastDiskBytes
         }
 
         // 取得しきった。以降は重みの展開なので見張りを止める（`finished` の説明を参照）。
@@ -2253,29 +2354,134 @@ final class ModelDownloadStallWatch: @unchecked Sendable {
         firstByteGrace: Duration,
         stallTimeout: Duration
     ) -> Verdict {
+        // **錠を取る前に観測する。** 観測はファイルシステムに触りうるので、
+        // 錠の内側で待たせない（`note` は 100ms ごとに呼ばれる）。
+        let observed = observeDiskBytes?()
+
         lock.lock()
         defer { lock.unlock() }
+
+        // **増減どちらでも「動いた」と数える。**
+        // 1ファイルの取得が終わって次へ移ると一時ファイルは消え、合計は減る。
+        // **減ったのは進んだ証拠であって、停止ではない**（監督の縛り②）。
+        // **判定に使う限界値を先に決める。** ディスク側の境界もここから導く ──
+        // 別々に持つと、片方だけが条件からずれる。
+        let limit = completedBytes > 0 ? stallTimeout : firstByteGrace
+        let meaningful = Self.meaningfulDiskChange(within: limit)
+
+        if let observed {
+            // **「変化したか」ではなく「基準点から意味のある量だけ動いたか」。**
+            //
+            // 増減どちらでも数える ── 一時ファイルが消えるのは完了であって停止ではない。
+            // ただし**数バイトの増減では時計を戻さない**（`meaningfulDiskChange`）。
+            // これが待ちの天井の代わりになる ── 20KB/s の瀕死の回線でも
+            // 閾値の秒数があれば 1.2MB 動くので、**本物の取得は必ず時計を戻し、
+            // 雑音は戻せない。** 時間で殺さずに雑音だけを落とせる。
+            if !hasObservedDisk {
+                // **観測できた最初の瞬間に基準点を置く**（検証役の指摘 / 2026-09-05）。
+                //
+                // これが無いと、**一時ファイルが最後の `Progress` 前進より後に現れた場合に
+                // 基準点が nil のままになり、ディスク信号が永久に武装しない。**
+                // すると `Progress` だけで打ち切る挙動 ── つまり事故の前 ── に戻る。
+                // **直しが、直そうとした当の状況で不活性になる**という形だった。
+                //
+                // `init` にも `note` にも依存させないこと。取得の途中で初めて
+                // 観測できるようになる経路が実在する以上、**武装は観測側の出来事である。**
+                diskBytesAtLastAdvance = observed
+                hasObservedDisk = true
+            } else if let baseline = diskBytesAtLastAdvance,
+                abs(observed - baseline) >= meaningful {
+                lastDiskChangeAt = now
+                diskBytesAtLastAdvance = observed
+            }
+            lastDiskBytes = observed
+        }
+
+        // **取得の完了を `Progress` 以外から受け取る。**
+        // 壊れているのが `Progress` なので、`Progress` で「終わった」を判定できない。
+        if observeCompletion?() == true { finished = true }
+        let diskIdle = observed == nil ? nil : lastDiskChangeAt.duration(to: now)
 
         let idle = lastAdvanceAt.duration(to: now)
         let report = Report(
             completedBytes: completedBytes,
             totalBytes: totalBytes,
             callbackCount: callbackCount,
-            idleSeconds: max(0, idle.milliseconds / 1000))
+            idleSeconds: max(0, idle.milliseconds / 1000),
+            diskBytes: observed,
+            diskIdleSeconds: diskIdle.map { max(0, $0.milliseconds / 1000) })
 
         // 取得は終わっている。ここから先は展開の時間なので、何秒無風でも正常。
         if finished { return .healthy(report) }
 
-        // **1バイトも来ていない間は長いほうの猶予を使う。**
-        // 最初の1バイトまでには、一覧APIも DNS も TLS も含まれる（閾値の説明を参照）。
-        let limit = completedBytes > 0 ? stallTimeout : firstByteGrace
+        // `limit` は上で決めてある（**1バイトも来ていない間は長いほうの猶予**。
+        // 最初の1バイトまでには、一覧APIも DNS も TLS も含まれる）。
 
-        if idle >= limit { return .stalled(report) }
+        // **2つの信号がどちらも止まったときだけ打ち切る。**
+        //
+        // 2026-09-05 の事故は、`Progress` だけを見ていたことが原因である ──
+        // swift-huggingface 0.9.0 は大容量ファイルの最中に `Progress` を更新せず
+        // （GitHub Issue #48）、UI が 14MB で止まって見えている間に
+        // OS のログでは同じ通信が **376MB**（約26倍）を受信していた。
+        // **回線は生きていて、見張りだけが死んだと判断した。**
+        //
+        // 観測できないとき（nil）は従来どおり `Progress` だけで判定する ──
+        // **観測手段が無いことを「進んでいる」と読み替えない。**
+        if idle >= limit {
+            if let diskIdle, diskIdle < limit {
+                // ディスクは動いている。**打ち切らないが、黙ってもいない。**
+                return .idle(report)
+            }
+            return .stalled(report)
+        }
         // 半分を過ぎたら画面へ出す。**打ち切りまで無言で待たせない**のが要点で、
         // これが無いと「0% のまま固まっている」という体験自体は変わらない。
         if idle >= limit / 2 { return .idle(report) }
         return .healthy(report)
     }
+}
+
+/// **取得中の一時ファイルを合計する。** `ModelDownloadStallWatch` の既定の観測手段。
+///
+/// `URLSession` のダウンロードは、完了まで一時ディレクトリの `CFNetworkDownload_*.tmp`
+/// に書かれる。**`Progress` が更新されなくても、このファイルは増え続ける** ──
+/// 2026-09-05 の事故で「UI は 14MB、実際の通信は 376MB」だったときに、
+/// 増えていた側がこれである。
+///
+/// # 開始時刻より後のものだけを見る（**これが無いと常に停止側へ倒れる**）
+///
+/// 開発機の一時ディレクトリには**過去の取得の残骸が約7.34GB ある**（2026-09-05 時点）。
+/// 残骸は増えないので、**全部を合計すると「動いていない」が常に成立してしまう。**
+/// 更新時刻で絞ることで、いま走っている取得だけを見る。
+///
+/// > **残骸は消さない。** 消すかどうかは利用者の判断であって、見張りの仕事ではない。
+///
+/// # 失敗は nil で返す。0 ではない
+///
+/// 一覧が取れないこと（権限・別ボリューム）と、**取得中のファイルが1つも無いこと**は
+/// まったく違う。0 を返すと後者として扱われ、**観測できない状況が「止まっている」に化ける。**
+/// nil なら `ModelDownloadStallWatch` は従来どおり `Progress` だけで判定する。
+func observeDownloadTemporaryBytes(
+    startedAt: Date, in directory: URL = FileManager.default.temporaryDirectory
+) -> Int64? {
+    let manager = FileManager.default
+    guard let entries = try? manager.contentsOfDirectory(
+        at: directory,
+        includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey],
+        options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants])
+    else { return nil }
+
+    var total: Int64 = 0
+    for entry in entries where entry.lastPathComponent.hasPrefix("CFNetworkDownload") {
+        guard let values = try? entry.resourceValues(
+            forKeys: [.fileSizeKey, .contentModificationDateKey]),
+            let modified = values.contentModificationDate,
+            modified >= startedAt,
+            let size = values.fileSize
+        else { continue }
+        total += Int64(size)
+    }
+    return total
 }
 
 /// 「0.00 GB / 4.62 GB」の形に整える。
@@ -2489,6 +2695,11 @@ private func writeModelLoadLine(
         "total_bytes=\(report.totalBytes)",
         "callbacks=\(report.callbackCount)",
         "idle_s=\(String(format: "%.1f", report.idleSeconds))",
+        // **ディスク側の信号も必ず出す。** 2026-09-05 の事故の本体は
+        // 「ログが無くて、どちらの信号が死んでいたか追えなかった」ことである。
+        // 次に同じことが起きたとき、この2つが並んでいれば1行で切り分けられる。
+        "disk_bytes=\(report.diskBytes.map(String.init) ?? "-")",
+        "disk_idle_s=\(report.diskIdleSeconds.map { String(format: "%.1f", $0) } ?? "-")",
     ].joined(separator: " ")
     FileHandle.standardError.write(Data("[LOAD] \(fields)\n".utf8))
 }

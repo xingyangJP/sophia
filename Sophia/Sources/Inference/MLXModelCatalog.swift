@@ -174,6 +174,50 @@ enum MLXModelCatalog {
         }
     }
 
+    /// **取得が終わったか**を、`Progress` に依存せずに答える（見張り用）。
+    ///
+    /// ## `isDownloaded` を流用しないこと
+    ///
+    /// あちらは **`alreadyOnDisk`（起動前に既に在るか）** に答えるために書かれている。
+    /// 判定が `config.json` ＋ **`.safetensors` が1枚でもあるか**なので、
+    /// **重みが分割されていると1枚目が置かれた瞬間に真になる。**
+    /// 見張りの完了判定に使うと、**残りを落としている間じゅう見張りが黙る** ──
+    /// 「もう在るか」という起動前の問いの器を、「いま終わったか」という
+    /// 進行中の問いへ流用したことになる（DESIGN 15.7 が繰り返し扱ってきた形）。
+    ///
+    /// ここでは `model.safetensors.index.json` の `weight_map` が名指しする
+    /// **全ての断片が揃っていること**を見る。index が無ければ分割されていないので、
+    /// `.safetensors` が1枚あれば足りる。
+    ///
+    /// > `mlx-community/Qwen3-8B-4bit` は **1枚**である（2026-09-05 に実物で確認。
+    /// > `weight_map` の値は `model.safetensors` のみ）。**この版では分割の経路は通らない。**
+    /// > 台帳には他に3モデルあり、将来差し替わるので判定のほうを正しくしてある。
+    static func snapshotIsComplete(_ modelID: String) -> Bool {
+        guard let repo = repoID(from: modelID) else { return false }
+        let snapshots = HubCache.default.snapshotsDirectory(repo: repo, kind: .model)
+        guard let children = try? FileManager.default.contentsOfDirectory(
+            at: snapshots, includingPropertiesForKeys: nil) else { return false }
+        return children.contains { snapshotIsComplete(in: $0) }
+    }
+
+    /// 1つのスナップショットだけを見る。**ディレクトリを受け取るのは試験のため。**
+    static func snapshotIsComplete(in directory: URL) -> Bool {
+        let manager = FileManager.default
+        let names = Set((try? manager.contentsOfDirectory(atPath: directory.path)) ?? [])
+        guard names.contains("config.json") else { return false }
+
+        guard names.contains("model.safetensors.index.json"),
+            let data = try? Data(
+                contentsOf: directory.appendingPathComponent("model.safetensors.index.json")),
+            let document = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let weightMap = document["weight_map"] as? [String: String]
+        else {
+            // index が無い ＝ 分割されていない。1枚あれば揃っている。
+            return names.contains { $0.hasSuffix(".safetensors") }
+        }
+        return Set(weightMap.values).allSatisfy(names.contains)
+    }
+
     /// `"mlx-community/Qwen3-8B-4bit"` を `Repo.ID` に割る。
     private static func repoID(from modelID: String) -> Repo.ID? {
         let parts = modelID.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: true)
