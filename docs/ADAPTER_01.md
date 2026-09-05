@@ -38,10 +38,36 @@
 | 学習の道具 | `make lora` / `make lorasize`（`LoRAFeasibilityTests` / `LoRASampleSizeTests`。env ゲート） |
 | 永続化 | `Sophia/Sources/Store/AdapterGenerationRecord.swift`（**先行実装済み**） |
 | A/B の切替 | `SophiaDefaults.systemPromptEnabled`（`SOPHIA_SYSTEM_PROMPT`）── **陰性対照がタダで手に入る** |
-| **アプリがアダプタを読む口** | **無い。** `Sophia/Sources/Inference/` に該当経路0本。**ここだけが本当の工事** |
+| **アプリがアダプタを読む口** | **`MLXEngine` が呼んでいないだけ。** MLX 側には公開 API がある（下記） |
 
-> **`LoRAContainer.from` は学習側で使っているが、推論経路（`MLXEngine`）で読めるかは別問題である。**
-> **最初の設計判断はここ。**
+### アダプタの口 —— **在る**（2026-09-05 に実物で確認）
+
+`mlx-swift-lm/Libraries/MLXLMCommon/Adapters/` の公開面:
+
+```
+public protocol ModelAdapter: Sendable
+public func load(adapter: ModelAdapter) throws      // 読む
+public func fuse(with adapter: ModelAdapter) throws  // 焼き込む
+public func unload(adapter: ModelAdapter)            // 外す
+ModelAdapterFactory.createAdapter(directory:adapterType:)  // ディレクトリから作る
+Adapters/LoRA/ = LoRAContainer.swift / PEFTAdapter.swift / LoRAModel.swift / LoRA+Layers.swift / DoRA+Layers.swift
+```
+
+**4bit について**: `LoRALayer.from` には **`QuantizedLinear` を取る多重定義がある**
+（`LoRA+Layers.swift:152`）。**量子化された線形層に当てる経路は存在する。**
+
+> **⚠ 【未確認】が3件残っている。**
+> 1. **`ModelContainer`（actor 隔離）の内側から `load(adapter:)` を呼ぶ形**は確かめていない
+> 2. **4bit の実モデルで `adapted_modules` が 0 にならないか** ── `LoRAContainer.from` は
+>    **対象層0でも例外を投げない**という既知の落とし穴があり（R8 の実例）、
+>    **0 のまま「軽くて速い」嘘が出る。** 数で落とす仕掛けを先に入れること
+> 3. `unload` / `fuse` のどちらを使うか（**焼き込むと元に戻せない**）
+
+> **⚠ 履歴の訂正（2026-09-05）。** 本節にはかつて
+> 「`LoRATrain.convert` / `loadLoRAWeights` / `loraLinearLayers()` の2段で読める」と書いてあった。
+> **それらは doc コメントの中の記述で、実在する公開 API ではなかった**（実装役が自己申告し、検証役が
+> `grep "public static func"` で否定した）。**引用したつもりで、コメントを引用していた。**
+> **生き残った結論は「アプリ側に口が無いのは MLX の制約ではない」の一点だけで、工事規模の見立ては取り下げられた。**
 
 ---
 
@@ -97,8 +123,9 @@
 
 ## 順番
 
-1. **調査** ── MLX Swift 側でアダプタを読んで `ModelContainer` に適用する口があるか（**ビルド不要・短時間**）
-2. **口を作る**（`MLXEngine` にアダプタの読み込み経路。**既定は無効**）
+1. ~~調査 ── アダプタを読む口があるか~~ → **済**（2026-09-05。`ModelAdapter` / `load(adapter:)` が公開されている）
+2. **口を作る**（`MLXEngine` から `load(adapter:)` を呼ぶ経路。**既定は無効**）。
+   **`adapted_modules` が 0 でないことを数で確かめる仕掛けを同時に入れること**（R8）
 3. **学習データ 20件**を作る
 4. **陰性対照を先に取る**（プロンプト無し・アダプタ無し。**「Qwen」と名乗ることを確認**）
 5. **焼く**（`make lora` の系。**`adapted_modules=0` で落ちる検算は既に道具に入っている** ── R8）
