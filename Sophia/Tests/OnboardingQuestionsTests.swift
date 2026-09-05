@@ -12,7 +12,7 @@ import XCTest
 //  |---|---|
 //  | **二択の2つが、違う `statement` を生む** | **答えが変わっても出力が変わらない質問は無価値**（14.8節） |
 //  | **内容を1問も訊いていない**（全部 `.style`） | 「様式を聞く。内容を聞かない」（VISION / 14.8節） |
-//  | **通算5問で必ず止まる** | FR-24「質問の回数に上限を持つ」。**訊くこと自体が利用者のエネルギー** |
+//  | **通算12問で必ず止まる** | FR-24「質問の回数に上限を持つ」。**訊くこと自体が利用者のエネルギー** |
 //  | **飛ばした問も予算を食う** | 費用は答えたときではなく**見せた時点で**発生している |
 //  | **1問ごとに確定する** | 途中でやめても消えない。まとめてコミットすると**訊いた時間だけ取って何も残さない** |
 //  | **飛ばした問は1件も書かない** | 適当な答えは誤った利用者像になり、**無いより悪い**（14.16節①） |
@@ -129,7 +129,7 @@ final class OnboardingQuestionsTests: StoreTestCase {
     ///
     /// > | 「非力なマシンは制約ではなく手段である」 | 開発機の強化・買い替えの提案すべて |
     ///
-    /// **3問しか訊かないなら、1問目はこれである。**
+    /// 仕事上の判断で情報利得が高いので、1問目はこれである。
     func testTheRootQuestionIsTheOneThatKilledAWholeCategoryOfErrors() throws {
         XCTAssertEqual(OnboardingQuestionnaire.rootCategory, "machine")
 
@@ -201,6 +201,30 @@ final class OnboardingQuestionsTests: StoreTestCase {
         )
     }
 
+    /// 仕事の設定だけで終わらず、一人の認知・感情・関係・価値判断まで通る。
+    func testEveryAdaptivePathIncludesTheDeepPersonalAxes() throws {
+        let required: Set<String> = [
+            "attunement", "challenge", "conflict", "values",
+            "setback", "archetypes", "completion",
+        ]
+
+        func paths(from category: String, visited: Set<String>) -> [Set<String>] {
+            guard let question = OnboardingQuestionnaire.question(category),
+                  !visited.contains(category) else { return [visited] }
+            let nextVisited = visited.union([category])
+            let branches = Set(OnboardingChoice.Side.allCases.compactMap { question.next[$0] })
+            guard !branches.isEmpty else { return [nextVisited] }
+            return branches.flatMap { paths(from: $0, visited: nextVisited) }
+        }
+
+        let allPaths = paths(from: OnboardingQuestionnaire.rootCategory, visited: [])
+        XCTAssertFalse(allPaths.isEmpty)
+        for path in allPaths {
+            XCTAssertTrue(required.isSubset(of: path), "深く知るための軸が経路から欠けている: \(path)")
+            XCTAssertEqual(path.count, OnboardingBudget.hardQuestionLimit)
+        }
+    }
+
     /// **どの経路も上限の中で終わる。**
     ///
     /// 経路が上限より長いと、**木の末尾は一度も出ない** ──
@@ -234,6 +258,24 @@ final class OnboardingQuestionsTests: StoreTestCase {
         XCTAssertNotEqual(next?.category, "certainty", "答え済みの軸をもう一度出している")
     }
 
+    /// 中断後も、根の回答から選ばれなかった兄弟枝へ迷い込まない。
+    @MainActor
+    func testReopeningContinuesAlongThePreviouslySelectedBranch() async throws {
+        let store = try makeInMemoryStore()
+        let first = OnboardingViewModel(store: store)
+
+        await first.start()
+        await first.choose(.b) // machine -> certainty
+        await first.choose(.a) // certainty -> granularity
+        first.stop()
+
+        let reopened = OnboardingViewModel(store: store)
+        await reopened.start()
+
+        XCTAssertEqual(reopened.current?.category, "granularity")
+        XCTAssertNotEqual(reopened.current?.category, "verification")
+    }
+
     /// 全部答えていれば、出す質問は無い。
     func testNothingIsOfferedOnceEveryAxisIsAnswered() {
         let all = Set(OnboardingQuestionnaire.all.map(\.category))
@@ -244,13 +286,10 @@ final class OnboardingQuestionsTests: StoreTestCase {
     //  3. 予算 ── 14.9節「質問にも予算を置く」/ FR-24
     // =========================================================================
 
-    /// **初回は3問で止まる。**
-    ///
-    /// 14.9節の「3〜5問」の**下限**を採ってある。根拠は非対称性である ──
-    /// 訊かなすぎた損は後から足せるが、**訊きすぎた損（適当な答え ＝ 誤った利用者像）は
-    /// 無いより悪い**（14.16節①）。**回復可能な側へ倒す。**
+    /// **初回の適応経路は12問で止まる。**
+    /// いつでも中断できるため、12問は強制数ではなく一度に進められる上限である。
     @MainActor
-    func testTheFirstRunStopsAfterThreeQuestions() async throws {
+    func testTheFirstRunStopsAfterTwelveQuestions() async throws {
         let store = try makeInMemoryStore()
         let model = OnboardingViewModel(store: store)
 
@@ -260,16 +299,16 @@ final class OnboardingQuestionsTests: StoreTestCase {
         while model.current != nil {
             await model.choose(.a)
             asked += 1
-            XCTAssertLessThanOrEqual(asked, 10, "止まらない（無限に訊いている）")
+            XCTAssertLessThanOrEqual(asked, 20, "止まらない（無限に訊いている）")
         }
 
         XCTAssertEqual(asked, OnboardingBudget.initialQuestionLimit)
         XCTAssertTrue(model.isFinished)
         let traits = try await store.allTraits()
-        XCTAssertEqual(traits.count, 3)
+        XCTAssertEqual(traits.count, OnboardingBudget.initialQuestionLimit)
     }
 
-    /// **通算で5問。** 続けても、閉じて開き直しても、そこで尽きる。
+    /// **通算で12問。** 続けても、閉じて開き直しても、そこで尽きる。
     ///
     /// 回ごとの上限にすると、**閉じて開き直すだけで何度でも訊ける**形になり、
     /// 予算表が空文になる。通算は DB にある軸の数で数えている。
@@ -317,7 +356,7 @@ final class OnboardingQuestionsTests: StoreTestCase {
         while model.current != nil {
             model.skipCurrentQuestion()
             shown += 1
-            XCTAssertLessThanOrEqual(shown, 10, "飛ばし続けると止まらない")
+            XCTAssertLessThanOrEqual(shown, 20, "飛ばし続けると止まらない")
         }
 
         XCTAssertEqual(shown, OnboardingBudget.initialQuestionLimit)
@@ -508,7 +547,8 @@ final class OnboardingQuestionsTests: StoreTestCase {
         let model = OnboardingViewModel(store: store)
 
         await model.start()
-        while model.current != nil { await model.choose(.a) }
+        await model.choose(.a)
+        model.stop()
         let answeredBefore = model.answeredQuestionCount
 
         let saved = try await store.allTraits()

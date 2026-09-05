@@ -22,7 +22,7 @@ import Foundation
 //  | **様式**（説明の粒度・断定への態度・何に苛立つか） | **× 取れない** | ○ 蓄積する |
 //
 //  **訊きやすいものと訊く価値があるものが逆を向いている**（14.8節）ので、
-//  **内容は1問も置いていない。** ここにある7問はすべて `TraitKind.style` である。
+//  **内容は1問も置いていない。** ここにある14問はすべて `TraitKind.style` である。
 //  内容は「使っていれば会話に自然に出てくる」ので、問診票にする必要がない。
 //
 //  # 自己申告では取れないので、質問ではなく選択で採る（FR-26）
@@ -136,26 +136,16 @@ struct OnboardingQuestion: Identifiable, Sendable, Equatable {
 
 /// **質問にも予算を置く。訊くこと自体が利用者のエネルギーだからである**（14.9節）。
 ///
-/// ## 数字を 14.9節から写す前に読むこと
+/// 2026-09-05 の利用者判断で、初回は「短い設定」ではなく、
+/// **一人を深く知るための校正セッション**になった。全問を強制するのではなく、
+/// いつでも中断・スキップでき、選んだ答えはその場で保存する。
 ///
-/// 14.9節の予算表は「初回3〜5問」と書いているが、**その根拠は自分で名指しされている:**
-///
-/// > **【未確認】的中率（1問が誤読を何回防ぐか）は測っていない。**
-/// > **測るまで「3〜5問」は歯止めであって根拠ではない。**
-///
-/// **したがって範囲の下限を採った。** 理由は非対称である（14.16節①と同じ形）:
-///
-/// | 外す向き | 何が起きるか |
-/// |---|---|
-/// | 訊かなすぎた | **像が1件少ないだけ。** 後から設定画面で足せる。損失は回復可能 |
-/// | 訊きすぎた | **答えが適当になり、誤った利用者像ができる。**「無いより悪い」（14.16節①） |
-///
-/// **回復可能な側へ倒す。** 5問まで訊けること自体は残してあるが、
-/// **既定で自動的に出るのは3問までである。**
+/// 12 は診断項目数ではない。仕事の進め方5軸と、認知・感情・関係・価値観を扱う7軸を、
+/// 1本の適応経路で一度ずつ観察する上限である。点数や性格型は作らない。
 enum OnboardingBudget {
 
-    /// **初回に自動で出す上限。** 14.9節の「3〜5問」の**下限**。
-    static let initialQuestionLimit = 3
+    /// **初回に自動で出す上限。** 中断した残りは人物アイコンから再開できる。
+    static let initialQuestionLimit = 12
 
     /// **通算の上限。** 回ごとではない ──
     /// 閉じて開き直しても、続けても、**新しく訊ける軸はここで尽きる**（FR-24）。
@@ -169,7 +159,7 @@ enum OnboardingBudget {
     /// あちらは新しい軸を増やさないので、何度でも深められる。
     ///
     /// **例文を足せばこの数は増える。数を増やすことが目的ではない。**
-    static let hardQuestionLimit = 5
+    static let hardQuestionLimit = 12
 
     /// **学習が立ち上がった件数**（14.13b節 / `make lorasize` 2026-08-19 実測）。
     ///
@@ -196,6 +186,7 @@ enum OnboardingBudget {
 ///                                             ┘               └─ (b: 手順つき) → code     ─┤
 ///                                                                                          ├→ autonomy
 ///                                                                                          ┘
+/// autonomy → attunement → challenge → conflict → values → setback → archetypes → completion
 /// ```
 ///
 /// **枝が実在することがこの型の唯一の主張である** ──
@@ -228,6 +219,7 @@ enum OnboardingQuestionnaire {
     /// **宣言順は、枝が尽きたときの落ち先でもある**（`next(after:choosing:answered:)`）。
     static let all: [OnboardingQuestion] = [
         machine, certainty, verification, granularity, pushback, code, autonomy,
+        attunement, challenge, conflict, values, setback, archetypes, completion,
     ]
 
     static func question(_ category: String) -> OnboardingQuestion? {
@@ -239,10 +231,22 @@ enum OnboardingQuestionnaire {
     /// **答え済みの軸は二度と出ない。** 設定画面から再開したとき、
     /// 同じ問いをもう一度見せるのは利用者のエネルギーの純損である
     /// （再確認したいときは `OnboardingViewModel.startReview()` の側が明示的に呼ぶ）。
-    static func first(answered: Set<String>) -> OnboardingQuestion? {
-        if !answered.contains(rootCategory), let root = question(rootCategory) {
-            return root
+    static func first(
+        answered: Set<String>,
+        selectedSides: [String: OnboardingChoice.Side] = [:]
+    ) -> OnboardingQuestion? {
+        var category = rootCategory
+        var visited: Set<String> = []
+
+        while let current = question(category), !visited.contains(category) {
+            visited.insert(category)
+            guard answered.contains(category) else { return current }
+            guard let side = selectedSides[category],
+                  let nextCategory = current.next[side] else { break }
+            category = nextCategory
         }
+
+        // 手動編集などで選択肢を復元できない場合だけ、宣言順へ退避する。
         return all.first { !answered.contains($0.category) }
     }
 
@@ -258,7 +262,8 @@ enum OnboardingQuestionnaire {
     static func next(
         after question: OnboardingQuestion,
         choosing side: OnboardingChoice.Side,
-        answered: Set<String>
+        answered: Set<String>,
+        selectedSides: [String: OnboardingChoice.Side] = [:]
     ) -> OnboardingQuestion? {
         if let nextCategory = question.next[side],
            !answered.contains(nextCategory),
@@ -269,7 +274,7 @@ enum OnboardingQuestionnaire {
         // 木を諦めているのではなく、**同じ問いを二度出さないほうを優先している。**
         // 落ちた先が「予測できる問い」になりうるのは承知のうえで、
         // それでも重複よりは安い（14.9節「答えが予測できるものは利得が低い」＝ 0 ではない）。
-        return all.first { !answered.contains($0.category) }
+        return first(answered: answered, selectedSides: selectedSides)
     }
 
     // =========================================================================
@@ -489,6 +494,149 @@ enum OnboardingQuestionnaire {
                     (1) は途中経過が残り、(2) は落ちたときに全部消えます。どちらにしますか。
                     """,
                 statement: "手を動かす前に選択肢を出して選ばせる。勝手に直さない"
+            ),
+        ],
+        next: [.a: "attunement", .b: "attunement"]
+    )
+
+    /// **EQ: 感情と解決のどちらを先に扱うか。**
+    /// 共感の有無ではなく、同じ共感と改善をどの順序で届けるかを採る。
+    static let attunement = OnboardingQuestion(
+        category: "attunement",
+        axis: "つらい報告を受けた最初の一言",
+        prompt: "大切な発表の直後に『うまくいかなかった』とだけ伝えました。",
+        choices: [
+            OnboardingChoice(
+                side: .a,
+                sample: "それはきつかったですね。まず、いま一番引っかかっている場面を聞かせてください。整理と次の手は、そのあと一緒に考えます。",
+                statement: "つらい報告には感情を先に受け止め、解決はそのあとに置く"
+            ),
+            OnboardingChoice(
+                side: .b,
+                sample: "次に変えられる点を一つだけ見つけましょう。その前に、いまは振り返れる状態ですか。それとも少し間を置きますか。",
+                statement: "つらい報告には次の一手を示し、感情を扱える状態か確かめる"
+            ),
+        ],
+        next: [.a: "challenge", .b: "challenge"]
+    )
+
+    /// **IQ / メタ認知: 同意より思考の更新を優先するか。**
+    /// 反対すること自体ではなく、前提を揺らす時機を採る。
+    static let challenge = OnboardingQuestion(
+        category: "challenge",
+        axis: "考えを深めるための反論",
+        prompt: "もう十分考えました。この案で決めたいです。",
+        choices: [
+            OnboardingChoice(
+                side: .a,
+                sample: "決めましょう。ただ、結論を壊しうる前提が一つあります。そこだけ反対側から検査して、耐えたらこの案で進めます。",
+                statement: "決定前に結論を壊しうる前提を一度反対側から検査する"
+            ),
+            OnboardingChoice(
+                side: .b,
+                sample: "この案で決めます。前提の弱い箇所は実行後に観測できるよう印を付け、結果が外れたらすぐ戻せる形にします。",
+                statement: "決断を尊重し、反論より観測と撤回可能性で判断を支える"
+            ),
+        ],
+        next: [.a: "conflict", .b: "conflict"]
+    )
+
+    /// **関係修復: 強い否定を受けたとき、どう理解を戻すか。**
+    static let conflict = OnboardingQuestion(
+        category: "conflict",
+        axis: "『全然違う』と言われたあとの戻り方",
+        prompt: "Sophia の提案に『全然違う』と返しました。",
+        choices: [
+            OnboardingChoice(
+                side: .a,
+                sample: "分かりました。私の説明は置きます。どの前提を取り違えたか、一番大きいものを一つ教えてください。そこから組み直します。",
+                statement: "強く否定されたら弁明せず、誤った前提を一つ聞いて組み直す"
+            ),
+            OnboardingChoice(
+                side: .b,
+                sample: "私は『速さを優先したい』と受け取りました。違うのは、優先順位、手段、それとも目指す結果のどこですか。",
+                statement: "強く否定されたら自分の解釈を開示し、ずれた層を特定する"
+            ),
+        ],
+        next: [.a: "values", .b: "values"]
+    )
+
+    /// **価値観: 二つの正しさが衝突したとき、何を守るか。**
+    static let values = OnboardingQuestion(
+        category: "values",
+        axis: "納期と品質が同時に守れないとき",
+        prompt: "期限を守るには、品質を一段落とす必要があります。",
+        choices: [
+            OnboardingChoice(
+                side: .a,
+                sample: "期限を守ります。落とす品質を明示し、あとで戻す項目と期限を同時に決めて、見えない借金にはしません。",
+                statement: "価値が衝突したら期限を守り、落とす品質と回収期限を明示する"
+            ),
+            OnboardingChoice(
+                side: .b,
+                sample: "品質を守ります。その代わり範囲を削り、何を今回は出さないかを合意して、期限内に小さく完成させます。",
+                statement: "価値が衝突したら品質を守り、範囲を削って期限と両立させる"
+            ),
+        ],
+        next: [.a: "setback", .b: "setback"]
+    )
+
+    /// **心理的回復: 失敗を、前進と理解のどちらへ先に変換するか。**
+    static let setback = OnboardingQuestion(
+        category: "setback",
+        axis: "失敗のあとに意味を作る順序",
+        prompt: "三日かけた案が使えないと分かりました。",
+        choices: [
+            OnboardingChoice(
+                side: .a,
+                sample: "三日を回収できるものに分けます。残せる判断を一つ拾い、今日中に試せる次の案へつなげましょう。原因分析はそのあとです。",
+                statement: "失敗のあとは残せるものを拾い、次の小さな前進を先に作る"
+            ),
+            OnboardingChoice(
+                side: .b,
+                sample: "次へ行く前に、どの前提がいつ崩れたかを一度だけ辿ります。同じ三日をもう一度失わない規則を作ってから再開します。",
+                statement: "失敗のあとは原因と崩れた前提を言語化してから次へ進む"
+            ),
+        ],
+        next: [.a: "archetypes", .b: "archetypes"]
+    )
+
+    /// **類型への態度: 属性を真実ではなく、自己理解の鏡として使うか。**
+    /// 血液型や生年月日から性格を断定しない。本人がその物語をどう受け取るかを採る。
+    static let archetypes = OnboardingQuestion(
+        category: "archetypes",
+        axis: "生年月日や血液型などの類型情報",
+        prompt: "生年月日や血液型も、私を理解する材料にしてほしい。",
+        choices: [
+            OnboardingChoice(
+                side: .a,
+                sample: "使います。ただし性格の答えにはせず、仮説の入口にします。類型の説明をあなたがどう受け止めるかを聞き、会話の事実と照合します。",
+                statement: "類型情報は仮説の入口に使い、本人の受け止め方と観察で確かめる"
+            ),
+            OnboardingChoice(
+                side: .b,
+                sample: "属性から性格は決めません。必要なら年齢や生活段階だけを文脈に使い、あなたが実際に選んだ言葉と行動を根拠にします。",
+                statement: "属性から性格を推定せず、生活文脈と実際の言動だけを根拠にする"
+            ),
+        ],
+        next: [.a: "completion", .b: "completion"]
+    )
+
+    /// **完了観: 作った時点か、届いて確かめた時点か。**
+    static let completion = OnboardingQuestion(
+        category: "completion",
+        axis: "『終わった』と言ってよい地点",
+        prompt: "頼んだ変更は、もう終わりましたか。",
+        choices: [
+            OnboardingChoice(
+                side: .a,
+                sample: "実装は終わりました。テストと公開確認は次の工程として分けて報告します。",
+                statement: "実装完了と検証完了を分け、作り終えた時点を完了として報告する"
+            ),
+            OnboardingChoice(
+                side: .b,
+                sample: "まだです。実装は終わりましたが、テストと実際に届いた画面の確認まで通してから『終わった』と報告します。",
+                statement: "実装・テスト・利用地点での確認まで通してから完了と報告する"
             ),
         ],
         next: [:]

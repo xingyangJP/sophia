@@ -55,7 +55,7 @@ final class OnboardingViewModel {
     /// 飛ばした問を数えないと、「飛ばし続ければ何問でも出る」形になり、予算表が空文になる。
     private(set) var askedInThisRun = 0
 
-    /// この回の上限。既定は 3（`OnboardingBudget.initialQuestionLimit`）。
+    /// この回の上限。既定は 12（`OnboardingBudget.initialQuestionLimit`）。
     private(set) var limitForThisRun = OnboardingBudget.initialQuestionLimit
 
     /// この回で**保存できた**件数。飛ばしたぶんは入らない。
@@ -66,6 +66,9 @@ final class OnboardingViewModel {
 
     /// 保存に失敗したときだけ立つ。**会話も設定画面も、これが立っても動く。**
     private(set) var failure: String?
+
+    /// 二重クリックで同じ回答を並行保存しないための短いロック。
+    private(set) var isSaving = false
 
     // MARK: - 全体の状態（14.15節 / FR-28・29）
 
@@ -110,6 +113,19 @@ final class OnboardingViewModel {
         Set(traits.filter { $0.kind == .style }.map(\.category))
     }
 
+    /// 保存文が二択のどちらに由来するかを復元し、中断後も同じ枝から再開する。
+    private var selectedSides: [String: OnboardingChoice.Side] {
+        var result: [String: OnboardingChoice.Side] = [:]
+        for trait in traits where trait.kind == .style {
+            guard let question = OnboardingQuestionnaire.question(trait.category),
+                  let choice = question.choices.first(where: { $0.statement == trait.statement }) else {
+                continue
+            }
+            result[trait.category] = choice.side
+        }
+        return result
+    }
+
     /// この回で飛ばした軸。**保存はしていないので `answeredCategories` には入らない。**
     /// 次にこの画面を開けば、また出る。
     private var skippedInThisRun: Set<String> = []
@@ -147,10 +163,8 @@ final class OnboardingViewModel {
 
     // MARK: - 訊く（FR-24 / FR-26）
 
-    /// 初回。**上限は 3 問**（`OnboardingBudget.initialQuestionLimit`）。
-    ///
-    /// 14.9節の「3〜5問」の**下限**を採ってある。理由は `OnboardingBudget` に書いた
-    /// ── 的中率が未測定である以上、**外して高くつく側（訊きすぎ）を避ける。**
+    /// 初回。**上限は 12 問**（`OnboardingBudget.initialQuestionLimit`）。
+    /// 途中で止めても、選んだ答えは一問ずつ保存され、人物アイコンから再開できる。
     func start() async {
         await reload()
         beginRun(limit: min(OnboardingBudget.initialQuestionLimit, remainingBudget))
@@ -165,12 +179,12 @@ final class OnboardingViewModel {
         max(0, OnboardingBudget.hardQuestionLimit - answeredQuestionCount)
     }
 
-    /// 「もう少し続ける」。**通算 5 問の残りぶんだけ訊く。**
+    /// 「もう少し続ける」。**通算 12 問の残りぶんだけ訊く。**
     ///
     /// > 設定画面から任意に | **上限なし** | 効果を実感した人だけが深める ── 14.9節
     ///
     /// **「上限なし」を問数の無制限とは読んでいない。** 訊く価値のある軸を
-    /// 7つしか用意できていないのに問い続けると、利得の低い問いが混ざる（14.9節）。
+    /// 用意した軸を越えて問い続けると、利得の低い問いが混ざる（14.9節）。
     /// **上限なしに当たるのは `startReview`（再確認）のほうである** ── あちらは
     /// 新しい軸を増やさないので、何度でも深められる。
     func continueAsking() async {
@@ -215,16 +229,24 @@ final class OnboardingViewModel {
             return
         }
 
-        current = question ?? OnboardingQuestionnaire.first(answered: excluded)
+        current = question ?? OnboardingQuestionnaire.first(
+            answered: excluded,
+            selectedSides: selectedSides
+        )
         if current == nil { isFinished = true }
     }
 
     /// **選ぶ**（FR-26）。1問ぶんが即座に確定する。
     func choose(_ side: OnboardingChoice.Side) async {
-        guard let question = current, let choice = question.choice(side) else { return }
+        guard !isSaving,
+              let question = current,
+              let choice = question.choice(side) else { return }
+
+        isSaving = true
+        defer { isSaving = false }
+        guard await persist(question: question, choice: choice) else { return }
 
         askedInThisRun += 1
-        await persist(question: question, choice: choice)
         advance(from: question, choosing: side)
     }
 
@@ -234,7 +256,7 @@ final class OnboardingViewModel {
     /// **適当な答えは誤った利用者像になり、無いより悪い**（14.16節①）。
     /// 「分からない」を保存する形にしないのはそのためである。
     func skipCurrentQuestion() {
-        guard let question = current else { return }
+        guard !isSaving, let question = current else { return }
         skippedInThisRun.insert(question.category)
         askedInThisRun += 1
         // **飛ばした問には答えが無いので、枝を選べない。** 宣言順の未回答へ落とす。
@@ -243,7 +265,10 @@ final class OnboardingViewModel {
             isFinished = true
             return
         }
-        current = OnboardingQuestionnaire.first(answered: excluded)
+        current = OnboardingQuestionnaire.first(
+            answered: excluded,
+            selectedSides: selectedSides
+        )
         if current == nil { isFinished = true }
     }
 
@@ -260,17 +285,20 @@ final class OnboardingViewModel {
             return
         }
         current = OnboardingQuestionnaire.next(
-            after: question, choosing: side, answered: excluded
+            after: question,
+            choosing: side,
+            answered: excluded,
+            selectedSides: selectedSides
         )
         if current == nil { isFinished = true }
     }
 
     // MARK: - 保存（14.14節。**更新経路は kind ごとに分ける**）
 
-    private func persist(question: OnboardingQuestion, choice: OnboardingChoice) async {
+    private func persist(question: OnboardingQuestion, choice: OnboardingChoice) async -> Bool {
         guard let store else {
             failure = "保存先を開けていません。この答えは記録されませんでした"
-            return
+            return false
         }
         do {
             let existing = traits.first {
@@ -301,8 +329,10 @@ final class OnboardingViewModel {
             }
             savedInThisRun += 1
             await reload()
+            return true
         } catch {
             failure = "保存に失敗しました: \(error)"
+            return false
         }
     }
 

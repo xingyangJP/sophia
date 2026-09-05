@@ -9,18 +9,18 @@ struct ChatScreen: View {
 
     @State private var model: ChatViewModel
     @State private var sidebarVisibility: NavigationSplitViewVisibility = .all
+    private let initialQuestionsPresentationStore: InitialQuestionsPresentationStore
 
-    /// 利用者像の質問（第14章 / FR-24）。**起動時に自動では開かない。**
-    ///
-    /// > 初回起動 | **3〜5問。**スキップ可（FR-24） |
-    /// > **信頼が最も薄い瞬間に手間を要求しない** ── 14.9節
-    ///
-    /// 割り込むかどうかは、この1つの `false` で決まっている。
-    /// **押されなければ費用は 0 である**（訊くこと自体が利用者のエネルギー ── 14.9節）。
+    /// 利用者像の質問（第14章 / FR-24）。新規利用者に一度だけ自動で開く。
+    /// 閉じたあとは強制せず、人物アイコンからいつでも再開できる。
     @State private var showingTraits = false
 
-    init(engine: any InferenceEngine) {
+    init(
+        engine: any InferenceEngine,
+        initialQuestionsPresentationStore: InitialQuestionsPresentationStore = .init()
+    ) {
         _model = State(initialValue: ChatViewModel(engine: engine))
+        self.initialQuestionsPresentationStore = initialQuestionsPresentationStore
     }
 
     var body: some View {
@@ -78,7 +78,16 @@ struct ChatScreen: View {
                 .interactiveDismissDisabled()
             }
         }
-        .task { await model.prepare() }
+        .task {
+            await model.prepareLocalState()
+            if await InitialQuestionsPresentationPolicy.shouldPresent(
+                store: model.traitStore,
+                presentationStore: initialQuestionsPresentationStore
+            ) {
+                showingTraits = true
+            }
+            await model.prepareModel()
+        }
     }
 
     private var detail: some View {

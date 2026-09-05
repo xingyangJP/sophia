@@ -85,7 +85,7 @@ struct UserTraitsSheet: View {
 
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: SophiaMetrics.space3) {
-            Text(face == .asking ? "進め方を教える" : "覚えていること")
+            Text(face == .asking ? "あなたを深く知る" : "覚えていること")
                 .font(SophiaFont.title2)
                 .foregroundStyle(SophiaColor.ink)
 
@@ -173,7 +173,7 @@ struct UserTraitsSheet: View {
     }
 
     /// **まだ訊いていない軸**と**予算の残り**の、小さいほう。
-    /// 予算（5問）を超えて訊かないことが FR-24 の「回数に上限を持つ」の実体である。
+    /// 予算（12問）を超えて訊かないことが FR-24 の「回数に上限を持つ」の実体である。
     private var remainingAskable: Int {
         min(model.remainingCategoryCount,
             max(0, model.questionUpperBound - model.answeredQuestionCount))
@@ -256,7 +256,7 @@ struct OnboardingQuestionView: View {
 
                 // ── 依頼（利用者の側の文）
                 VStack(alignment: .leading, spacing: SophiaMetrics.space2) {
-                    Text("あなたがこう頼んだとして")
+                Text("この場面で Sophia に望む返しは")
                         .font(SophiaFont.subhead)
                         .foregroundStyle(SophiaColor.ink3)
 
@@ -302,7 +302,7 @@ struct OnboardingQuestionView: View {
 
                     Text(question.axis)
                         .font(SophiaFont.footnote)
-                        .foregroundStyle(SophiaColor.ink4)
+                        .foregroundStyle(SophiaColor.ink3)
                 }
             }
             .padding(SophiaMetrics.space5)
@@ -334,6 +334,7 @@ struct OnboardingQuestionView: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .disabled(model.isSaving)
     }
 }
 

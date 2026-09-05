@@ -164,6 +164,9 @@ final class ChatViewModel {
     /// 保存できないことは不便だが、話せないことより軽い。
     @ObservationIgnored private var store: Store?
 
+    /// フォルダ・ツール・DB の軽い起動準備を済ませたか。
+    @ObservationIgnored private var didPrepareLocalState = false
+
     /// 利用者像の画面（`UserTraitsSheet` / DESIGN.md 第14章）へ渡すためだけの窓。
     ///
     /// **同じ `Store` を使い回すために置いてある。** あちらで `Store.open()` を
@@ -206,14 +209,21 @@ final class ChatViewModel {
         self.folder = folder
     }
 
-    /// 起動時にモデルを用意する。
+    /// 起動時に、ローカル状態とモデルを順に用意する。
     ///
     /// **DB を先に開く。** テーブルが5枚できるだけなので数ミリ秒で、
     /// これを待ってもウィンドウの表示は遅れない（DESIGN.md 第3.3節）。
     /// 逆にモデル読み込み（数秒〜数分）の後ろに置くと、
     /// その間の送信が保存されない窓ができる。
     func prepare() async {
-        guard model == nil, !isLoadingModel else { return }
+        await prepareLocalState()
+        await prepareModel()
+    }
+
+    /// 質問、履歴、フォルダがモデル取得を待たずに使えるところまで用意する。
+    func prepareLocalState() async {
+        guard !didPrepareLocalState else { return }
+        didPrepareLocalState = true
 
         // **フォルダの復元を最初に済ませる**（FR-19 / 16.5節 機能3）。
         // 数ミリ秒しか掛からず、モデルの読み込み（数秒〜数分）の後ろに置くと
@@ -230,6 +240,11 @@ final class ChatViewModel {
             }
         }
 
+    }
+
+    /// ローカル状態とは独立して、推論モデルだけを用意する。
+    func prepareModel() async {
+        guard model == nil, !isLoadingModel else { return }
         await loadModel()
     }
 
