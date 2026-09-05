@@ -584,4 +584,45 @@ final class ModelDownloadStallTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         XCTAssertFalse(MLXModelCatalog.snapshotIsComplete(in: directory))
     }
+
+    /// **武装した瞬間に打ち切らないこと。**
+    ///
+    /// 一時ファイルの出現が閾値より遅れると、武装したその回で
+    /// `diskIdle` が「見張り開始からの経過時間」になり、**健全に伸びているのに打ち切る。**
+    /// **見えていなかった区間について、この時計は何も知らない。**
+    func testArmingLateDoesNotCountTheBlindIntervalAsSilence() {
+        let start = SuspendingClock().now
+        let disk = FakeDisk(nil)  // 一時ファイルはまだ現れていない
+        let watch = ModelDownloadStallWatch(startedAt: start, observingDiskBytes: disk.observer)
+        watch.note(completedBytes: 14_275_517, totalBytes: 4_622_110_691, at: start)
+
+        // 閾値を過ぎてから、ようやく一時ファイルが見えるようになる。
+        disk.set(120_000_000)
+        let armed = watch.evaluate(
+            at: start.advanced(by: .seconds(70)),
+            firstByteGrace: firstByteGrace, stallTimeout: stallTimeout)
+
+        guard case .stalled = armed else { return }
+        XCTFail("武装したその回で打ち切った ── 見えていなかった区間を無風と数えている")
+    }
+
+    /// ただし**本当に死んでいれば次の周期で打ち切る。** 遅らせるだけで、黙らせない。
+    func testArmingLateOnlyDelaysTheVerdictByOnePoll() {
+        let start = SuspendingClock().now
+        let disk = FakeDisk(nil)
+        let watch = ModelDownloadStallWatch(startedAt: start, observingDiskBytes: disk.observer)
+        watch.note(completedBytes: 14_275_517, totalBytes: 4_622_110_691, at: start)
+
+        disk.set(120_000_000)
+        _ = watch.evaluate(
+            at: start.advanced(by: .seconds(70)),
+            firstByteGrace: firstByteGrace, stallTimeout: stallTimeout)
+
+        // 以後は1バイトも動かない。
+        guard case .stalled = watch.evaluate(
+            at: start.advanced(by: .seconds(140)),
+            firstByteGrace: firstByteGrace, stallTimeout: stallTimeout) else {
+            return XCTFail("武装後に本当に止まったのに打ち切らない")
+        }
+    }
 }

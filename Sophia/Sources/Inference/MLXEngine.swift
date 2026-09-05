@@ -2388,6 +2388,18 @@ final class ModelDownloadStallWatch: @unchecked Sendable {
                 // `init` にも `note` にも依存させないこと。取得の途中で初めて
                 // 観測できるようになる経路が実在する以上、**武装は観測側の出来事である。**
                 diskBytesAtLastAdvance = observed
+                // **武装は「いま動いた」と同じ扱いにする**（監督の指摘 / 2026-09-05）。
+                //
+                // これが無いと `lastDiskChangeAt` は `init` の `startedAt` のままなので、
+                // 武装した瞬間の `diskIdle` が「見張り開始からの経過時間」になる。
+                // 一時ファイルの出現が閾値より遅れると、**武装したその回で打ち切る** ──
+                // ディスクは健全に伸びているのに「いま見えるようになった」を
+                // 「70秒動いていない」と読むことになる。
+                // **見えていなかった区間について、この時計は何も知らないはずである。**
+                //
+                // 逆向きには倒れない ── 打ち切りを1周期ぶん遅らせるだけで、
+                // **本当に死んでいれば次の poll で打ち切る。**
+                lastDiskChangeAt = now
                 hasObservedDisk = true
             } else if let baseline = diskBytesAtLastAdvance,
                 abs(observed - baseline) >= meaningful {

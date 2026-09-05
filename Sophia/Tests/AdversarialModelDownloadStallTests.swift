@@ -129,7 +129,7 @@ final class AdversarialModelDownloadStallTests: XCTestCase {
         var now = start
         for _ in 1...120 {                       // 閾値の 360 倍まで進めても…
             now = now.advanced(by: stallTimeout * 3)
-            disk.add(1)                          // …1バイト動くだけで時計が戻る
+            disk.add(1)                          // …1バイトでは基準点を超えない（直した後）
             _ = watch.evaluate(
                 at: now, firstByteGrace: firstByteGrace, stallTimeout: stallTimeout)
         }
@@ -140,7 +140,12 @@ final class AdversarialModelDownloadStallTests: XCTestCase {
         //
         // **時間の絶対上限は入れていない。** 1ファイルが巨大なとき `Progress` が
         // 長時間沈黙するのは正常なので、時間で切ると Issue #48 の下で
-        // **正常な取得を今度は時間で殺す。** 雑音だけを落として天井を不要にしてある。
+        // **正常な取得を今度は時間で殺す。**
+        //
+        // > ⚠ **「天井が要らなくなる」は 2026-09-05 に取り下げられた**（`285ad32`）。
+        // > 1.2MB は**雑音を落とすフィルタ**であって天井ではない ──
+        // > 同じ観測対象で 1.2MB 超の増減が繰り返し起きれば時計は戻り続ける。
+        // > **天井が要る条件が十分に狭まっただけで、閉じてはいない。**
         guard case .stalled = watch.evaluate(
             at: now, firstByteGrace: firstByteGrace, stallTimeout: stallTimeout) else {
             return XCTFail("上限が無い ── ディスクの微動だけで永久に待つ")
@@ -162,32 +167,95 @@ final class AdversarialModelDownloadStallTests: XCTestCase {
     func testAFinishedDownloadIsNotCancelledWhenProgressNeverReachedTheTotal() {
         let start = SuspendingClock.now
         let disk = Counter(3_000_000_000)
+        let complete = Flag(false)
+
+        // **出荷される構成で組む**（15.7節 R2 / 監督の指摘 2026-09-05）。
+        //
+        // 初版は `observingCompletion` を渡していなかった。**それは出荷経路に
+        // 1つも存在しない構成である**（`MLXEngine.swift:445` が唯一の構成site で、
+        // 両方を渡す）。渡さない見張りが打ち切るのは**仕様どおりの挙動**であって、
+        // 欠陥ではない ── 初版の印は「欠陥2が在る」ではなく
+        // 「完了の合図が無ければ打ち切る」と言っていた。**器の条件が出荷と違った。**
         let watch = ModelDownloadStallWatch(
-            startedAt: start, observingDiskBytes: { disk.value })
+            startedAt: start,
+            observingDiskBytes: { disk.value },
+            observingCompletion: { complete.value })
 
         // `Progress` は 14MB で止まったまま総量に届かない（Issue #48 の再現）。
+        // **総量に届かない以上、`note` 側の `finished` は永久に立たない。**
         watch.note(completedBytes: 14_275_517, totalBytes: 4_620_000_000, at: start)
 
         // 取得は実際には完了した。一時ファイルが片付き、ディスクは動かなくなる。
+        // **そして完了の合図だけが真になる**（`snapshotIsComplete` が見るのはディスクの実体）。
         var now = start.advanced(by: .seconds(1))
         disk.set(0)
+        complete.set(true)
         _ = watch.evaluate(at: now, firstByteGrace: firstByteGrace, stallTimeout: stallTimeout)
 
         // ここから重みの展開。バイトは増えず、ディスクも動かない。
+        // **`Progress` 由来の信号だけを見ていたら、ここで打ち切られる。**
         now = now.advanced(by: stallTimeout * 3)
 
-        XCTExpectFailure(
-            """
-            既知の欠陥: `finished` は `Progress` 由来なので、**Issue #48 の下では立たない。**
-            取得が完了しても見張りが黙らず、**重みの展開中に「両方無風」が成立して打ち切る。**
-            `finished` を立てる第2の経路（`downloadSnapshot` の戻り）が要る。
-            **引き金が `Progress` でないことが条件である。**
-            """
-        ) {
-            if case .stalled = watch.evaluate(
-                at: now, firstByteGrace: firstByteGrace, stallTimeout: stallTimeout) {
-                XCTFail("完了した取得を、展開中に打ち切っている")
-            }
+        guard case .healthy = watch.evaluate(
+            at: now, firstByteGrace: firstByteGrace, stallTimeout: stallTimeout) else {
+            return XCTFail(
+                "完了した取得を、重みの展開中に打ち切っている ── "
+                    + "`Progress` に依存しない完了の合図が効いていない")
+        }
+    }
+
+    /// **⚠ 武装した瞬間に、古い時計を渡している。**
+    ///
+    /// 観測できた最初の瞬間に基準点は置かれるようになった（`0132030`）が、
+    /// **その枝は `lastDiskChangeAt` を更新していない。**
+    /// `init` で `startedAt` に置かれたままなので、
+    /// **武装した回の `diskIdle` は「見張り開始からの経過時間」になる。**
+    ///
+    /// | 時刻 | 何が起きるか |
+    /// |---|---|
+    /// | T0 | 見張り開始。一時ファイルはまだ無い（観測 nil）。`lastDiskChangeAt = T0` |
+    /// | T0 | `Progress` が 14MB へ。**ここが最後の前進**（Issue #48） |
+    /// | T0+limit超 | 一時ファイルがようやく現れ、`evaluate` が**武装する** |
+    /// | **同じ回** | `idle ≥ limit` かつ **`diskIdle = T0 からの経過 ≥ limit`** → **`.stalled`** |
+    ///
+    /// > **「いま見えるようになった」は「開始から何も動いていない」ではない。**
+    /// > 見えていなかった区間について、この時計は**何も知らない**はずである。
+    ///
+    /// 救い方は武装の枝でも `lastDiskChangeAt = now` を置くこと。
+    /// **打ち切りを1周期ぶん遅らせるだけなので、逆向きの欠陥にはならない**
+    /// ── 本当に死んでいれば次の回で打ち切れる。
+    /// > **⚠ 到達性【2026-09-05 実測で否定】。** この筋書きは
+    /// > **観測が最初に nil を返すこと**を前提にしている。**出荷の観測関数はそうならない** ──
+    /// > `observeDownloadTemporaryBytes` が nil を返すのは `contentsOfDirectory` が
+    /// > 失敗したときだけで、**該当ファイルがまだ1つも無い状態では 0 を返す。**
+    /// > サンドボックス内の tmp は常に読めるので、**`init` の一発目の観測が 0 で成功し、
+    /// > そこで武装が済む。** よって出荷経路ではこの欠陥は発火しない。
+    /// >
+    /// > **それでもこの試験は残す。** 「該当ファイルが無い＝観測できない＝nil」は
+    /// > **自然な書き換え**であり、その日にこの欠陥は実在に変わる。
+    /// > **0 と nil を撃ち分けているのは観測関数の側の判断で、呼び手は何も強制していない。**
+    func testArmingTheDiskSignalDoesNotInheritTheClockFromBeforeItCouldSee() {
+        let start = SuspendingClock.now
+        let disk = Counter(500_000_000)
+        let visible = Flag(false)                 // 一時ファイルはまだ観測できない
+        let watch = ModelDownloadStallWatch(
+            startedAt: start,
+            observingDiskBytes: { visible.value ? disk.value : nil })
+
+        // `Progress` が 14MB まで進む。**ここが最後の前進**（Issue #48）。
+        watch.note(completedBytes: 14_275_517, totalBytes: 4_620_000_000, at: start)
+
+        // 閾値を超えて経ってから、ようやく一時ファイルが観測できるようになる。
+        let now = start.advanced(by: stallTimeout * 2)
+        visible.set(true)
+
+        // **印は外した（2026-09-05、実装役）。指摘どおり武装の枝で `lastDiskChangeAt` を置く。**
+        // 逆向きには倒れない ── 打ち切りを1周期ぶん遅らせるだけで、
+        // 本当に死んでいれば次の poll で打ち切る
+        // （`ModelDownloadStallTests.testArmingLateOnlyDelaysTheVerdictByOnePoll` が縛っている）。
+        if case .stalled = watch.evaluate(
+            at: now, firstByteGrace: firstByteGrace, stallTimeout: stallTimeout) {
+            XCTFail("武装したその回で打ち切っている")
         }
     }
 
@@ -249,6 +317,16 @@ final class AdversarialModelDownloadStallTests: XCTestCase {
     ///
     /// 救い方は1行で、`evaluate` の中で **`hasObservedDisk` が false → true になる瞬間に
     /// 基準点も置く**こと。`init` にも `note` にも依存しなくなる。
+    /// > **⚠ 到達性【2026-09-05 実測で否定】。** この筋書きは
+    /// > **観測が最初に nil を返すこと**を前提にしている。**出荷の観測関数はそうならない** ──
+    /// > `observeDownloadTemporaryBytes` が nil を返すのは `contentsOfDirectory` が
+    /// > 失敗したときだけで、**該当ファイルがまだ1つも無い状態では 0 を返す。**
+    /// > サンドボックス内の tmp は常に読めるので、**`init` の一発目の観測が 0 で成功し、
+    /// > そこで武装が済む。** よって出荷経路ではこの欠陥は発火しない。
+    /// >
+    /// > **それでもこの試験は残す。** 「該当ファイルが無い＝観測できない＝nil」は
+    /// > **自然な書き換え**であり、その日にこの欠陥は実在に変わる。
+    /// > **0 と nil を撃ち分けているのは観測関数の側の判断で、呼び手は何も強制していない。**
     func testTheDiskSignalNeverArmsWhenTheTempFileAppearsAfterTheLastProgressAdvance() {
         let start = SuspendingClock.now
         let disk = Counter(0)
@@ -286,6 +364,21 @@ final class AdversarialModelDownloadStallTests: XCTestCase {
     }
 
     // MARK: - 補助
+
+    /// 真偽をクロージャへ渡すための小さな箱。
+    private final class Flag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storage: Bool
+        init(_ initial: Bool) { storage = initial }
+        var value: Bool {
+            lock.lock(); defer { lock.unlock() }
+            return storage
+        }
+        func set(_ newValue: Bool) {
+            lock.lock(); defer { lock.unlock() }
+            storage = newValue
+        }
+    }
 
     /// クロージャから読み書きするための小さな箱。
     /// **`@Sendable` なクロージャが捕まえるので、`var` を直接掴ませない。**
