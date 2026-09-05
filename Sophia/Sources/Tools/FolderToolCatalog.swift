@@ -61,6 +61,14 @@ enum FolderTool: String, Sendable, Equatable, CaseIterable {
     /// Files and directories. Every operation pauses for human approval.
     case workspaceChange = "workspace_change"
 
+    /// ウェブを検索する（FR-30）。**唯一、フォルダを要らないツールである。**
+    ///
+    /// 引数は `query` ひとつだけ。**件数を引数にしていない**（既定5件固定）──
+    /// 定義1つが `armed` の間の毎ターンの費用になるので、モデルに見せる面を最小にする。
+    /// **小数の引数も作っていない** ── 既知の非対称（`.double(80.0)` が JSON では
+    /// `80` としか書けない）は「小数を取るツールを足した日」に効き始めるので、足さない。
+    case searchWeb = "search_web"
+
     // MARK: - 引数の名前
 
     /// **モデルが書いてくる鍵の綴り。** 実装側で散らさないこと ──
@@ -120,6 +128,36 @@ enum FolderTool: String, Sendable, Equatable, CaseIterable {
     /// （辞書ではないのはそのため）。`search_files` が `path` → `query` の順に
     /// 並んでいるのは、実測した `required: ["path", "query"]` と一致させるためである。
     /// **並べ替えないこと。**
+    /// **`search_web` の定義。まだ出荷していない**（下の `definitions` に入れていない）。
+    ///
+    /// 定義を1つ足すと `<tools>` ブロックが伸び、
+    /// **`SophiaDefaults.toolDefinitionTokens = 499` が黙って古くなる。**
+    /// 499 は `Budget.transcript(armed:)` の引き算に直接入っていて、
+    /// **縮約が「収まった」と判断する境界そのもの**なので、
+    /// 測らずに足すと**予算超過が素通りする側**へ倒れる。
+    ///
+    /// **開ける手順（この順でしかやらないこと）:**
+    ///   1. 下の `definitions` の配列にこれを足す
+    ///   2. `make tooltokens` で実測し直す（実トークナイザ。モデルが要る）
+    ///   3. `SophiaDefaults.toolDefinitionTokens` を実測値へ更新する
+    ///   4. `ToolExecutionTests` の `definitions.count` の表明を 4 → 5 にする
+    ///
+    /// **4 が最後なのは意図的である。** あれが落ちている間は「まだ測っていない」
+    /// という合図であって、**先に緑へ戻すと合図が消える。**
+    ///
+    /// > 実行層は**先に配線してある。** 定義が無いのでモデルは呼べないが、
+    /// > **中身は動くしテストも通る** ── 「測れないから何も作れない」を避けるため、
+    /// > 費用が乗る部分だけを止めてある。
+    static let webSearchDefinition = ToolDefinition(
+        name: FolderTool.searchWeb.rawValue,
+        // **説明文は費用そのものである。** 短く、目的を先頭に置く
+        // （`ja-read` は手段を先頭に置いた語順で 3/3 → 0/3 に崩れた）。
+        description: "Search the web for current information. Returns titles, URLs and snippets",
+        parameters: [
+            required(Argument.query, .string, "What to search for")
+        ]
+    )
+
     static var definitions: [ToolDefinition] {
         [
             ToolDefinition(

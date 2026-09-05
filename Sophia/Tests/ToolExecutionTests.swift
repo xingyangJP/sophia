@@ -831,7 +831,29 @@ final class ToolExecutionTests: XCTestCase {
         XCTAssertEqual(required["read_file"], ["path"])
         XCTAssertEqual(required["search_files"], ["path", "query"])
         XCTAssertEqual(required["workspace_change"], ["operation"])
-        XCTAssertEqual(names, FolderTool.allCases.map(\.rawValue))
+        // **enum と出荷される定義は、意図的にずれている。**
+        //
+        // `search_web`（FR-30）は実行層まで配線してあるが、**定義を出荷していない** ──
+        // 定義を1つ足すと `<tools>` が伸びて `toolDefinitionTokens = 499` が
+        // 黙って古くなり、**縮約が「収まった」と判断する境界がずれる**ためである。
+        // 実測（`make tooltokens`）にはモデルが要り、いまは測れていない。
+        //
+        // **したがって、ここで縛るのは「出荷される定義」と「まだ出荷していないもの」の
+        // 区別そのものである。** `allCases` と一致させてしまうと、
+        // **測らずに足した日に何も鳴らなくなる。**
+        let shipped = Set(names)
+        let pending: Set<String> = [FolderTool.searchWeb.rawValue]
+        XCTAssertEqual(
+            Set(FolderTool.allCases.map(\.rawValue)), shipped.union(pending),
+            "enum に、出荷でも保留でもないツールがある")
+        XCTAssertTrue(
+            shipped.isDisjoint(with: pending),
+            "保留のはずのツールが出荷されている。`make tooltokens` で測り直したか")
+
+        // 保留を解くときは、この配列を空にしてから
+        // `toolDefinitionTokens` を実測値へ更新すること（順序は catalog の但し書き）。
+        XCTAssertEqual(
+            FolderTool.webSearchDefinition.name, FolderTool.searchWeb.rawValue)
     }
 
     /// **説明文を1文字も変えないための錠。**

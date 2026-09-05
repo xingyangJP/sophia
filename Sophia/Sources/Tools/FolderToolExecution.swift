@@ -79,6 +79,14 @@ enum FolderToolExecution {
         }
 
         switch tool {
+        // **ここへ来たら配線の欠陥である。** `search_web` はフォルダを要らない唯一のツールで、
+        // `FolderToolRunner.execute` が**この層より手前で**捌く。
+        // この層はフォルダを受け取る形をしているので、通す道が無い。
+        // 落とさずに「知らないツール」として返すのは、**握って往復を続ける**約束のため
+        // （16.8節）。配線が壊れたことは、モデルではなく試験が気づく。
+        case .searchWeb:
+            return .rejected(.unknownTool(call.name), tool: call.name, counter: counter)
+
         case .listDirectory:
             // path は省略を許す（**空文字＝結び付けたフォルダ自身**）。
             // 一覧の起点が無いと言って往復を落とすより、根を見せるほうが意図に近い。
