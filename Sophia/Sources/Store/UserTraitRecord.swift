@@ -98,6 +98,46 @@ enum TraitSource: String, Sendable, Codable, Equatable, CaseIterable,
 ///
 /// **「機能があること」と「いま費用を払っていること」を分ける**ための型であり、
 /// 既定で毎ターンの費用が 0 であることが、この設計の主張そのものである（14.15節 / FR-29）。
+/// **訂正の向き**（FR-31 / 2026-09-06）。
+///
+/// ## なぜ向きが要るのか
+///
+/// 利用者の思想（`docs/PHILOSOPHY.md`）:
+///
+/// > **人は信じたい事を信じる。かといって嘘を言ったらダメ。
+/// > その匙加減がバカと思われるか思われないかのバランス。**
+///
+/// **「バカに見える」には2種類あり、原因が正反対である。**
+///
+/// | 訂正 | 何がずれていたか |
+/// |---|---|
+/// | 「そんな断言できないだろ」 | **踏み込みすぎ**（`overreach`） |
+/// | 「で、結局どっちなの」 | **逃げすぎ**（`hedging`） |
+///
+/// > **⚠ 向きを持たせずに記録すると、この2つが同じ「訂正1件」になる。**
+/// > **焼き込めば打ち消し合って、何も学ばない。**
+/// > **向きは記録する時点でしか付けられない** ── 後から本文を読み返しても復元できない。
+///
+/// `nil` は「向きの無い訂正」である（言い方だけを直した場合など）。
+/// **無理に二択へ倒さないこと** ── 倒すと、向きの無いものが偽の向きを持つ。
+enum TraitDirection: String, Sendable, Codable, Equatable, CaseIterable,
+                     DatabaseValueConvertible {
+
+    /// 踏み込みすぎた。**根拠より強く言った。**
+    case overreach
+
+    /// 逃げすぎた。**正しいが使えない答えを返した。**
+    case hedging
+
+    /// 画面に出す1行（FR-28）。
+    var label: String {
+        switch self {
+        case .overreach: "踏み込みすぎ"
+        case .hedging: "逃げすぎ"
+        }
+    }
+}
+
 enum TraitPlacement: String, Sendable, Codable, Equatable, CaseIterable,
                      DatabaseValueConvertible {
 
@@ -236,6 +276,13 @@ struct UserTraitRecord: Codable, Sendable, Equatable, Identifiable,
     /// `translating` は焼いた事実から計算される（`Store.setTraitPlacement` が拒否する）。
     var placement: TraitPlacement
 
+    /// **ずれの向き**（FR-31）。`nil` は向きの無い訂正。
+    ///
+    /// **`source` が `.correction` / `.translationEdit` のときにだけ意味がある。**
+    /// 質問（`onboarding`）に向きは無い ── **あれは事前分布であって、
+    /// 「ずれた」という事象ではない**（14.13c）。
+    var direction: TraitDirection?
+
     /// いま効いているアダプタの世代。**NULL なら未反映**（14.14節）。
     ///
     /// ⚠ **これも導出値であり、履歴ではない。**
@@ -266,6 +313,7 @@ struct UserTraitRecord: Codable, Sendable, Equatable, Identifiable,
         case source
         case confidence
         case placement
+        case direction
         case adapterGen = "adapter_gen"
         case expiresAt = "expires_at"
         case createdAt = "created_at"
@@ -296,6 +344,7 @@ struct UserTraitRecord: Codable, Sendable, Equatable, Identifiable,
         source: TraitSource,
         confidence: Double? = nil,
         placement: TraitPlacement = .stored,
+        direction: TraitDirection? = nil,
         adapterGen: Int? = nil,
         expiresAt: Date? = nil,
         createdAt: Date = Date(),
@@ -308,6 +357,7 @@ struct UserTraitRecord: Codable, Sendable, Equatable, Identifiable,
         self.source = source
         self.confidence = confidence ?? source.defaultConfidence
         self.placement = placement
+        self.direction = direction
         self.adapterGen = adapterGen
         self.expiresAt = expiresAt
         self.createdAt = createdAt

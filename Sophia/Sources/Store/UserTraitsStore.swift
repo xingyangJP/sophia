@@ -127,6 +127,89 @@ extension Store {
     /// - Parameter confidence: 省略すると**確信度は据え置き**。
     ///   訂正されたことをもって上げたいなら `reinforceTrait` を続けて呼ぶこと
     ///   （2つの操作を1つにまとめない ── 「訂正 ＝ 確信が上がる」は自明ではない）。
+    /// **会話中の訂正を1件記録する**（FR-27 / FR-31 / 2026-09-06）。
+    ///
+    /// ## これが無いと、学習は永久に始まらない
+    ///
+    /// `891c15e` が自分でこう書いている ──
+    /// **「使用中の訂正を採る経路がまだ無く、無いと学習は永久に始まらない。」**
+    /// 質問（0.5）は関門（0.7）に届かないと決めたので（14.13c）、
+    /// **関門を越える材料はここからしか出てこない。**
+    ///
+    /// ## 同じ軸を二度訂正されたら、強化する
+    ///
+    /// **新しい行を増やさない。** 増やすと「同じことを2回言われた」が
+    /// **「別々の弱い像が2つある」**になり、確信度が上がらない。
+    ///
+    /// | 回 | 確信度 | 関門(0.7) |
+    /// |---|--:|---|
+    /// | 1回目（新規） | **0.65** | 届かない |
+    /// | **2回目（強化 +0.1）** | **0.75** | **越える** |
+    ///
+    /// > **一度訂正しただけでは焼かれない。二度目で焼かれる。**
+    /// > **これは意図した設計である** ── 気まぐれの1回で重みが変わると、
+    /// > **その人ではなく、その日の気分を焼くことになる。**
+    ///
+    /// - Parameter direction: **ずれの向き**（FR-31）。`nil` は向きの無い訂正。
+    ///   **後から埋めないこと** ── 本文からは復元できない。
+    @discardableResult
+    func recordCorrection(
+        kind: TraitKind = .style,
+        category: String,
+        statement: String,
+        direction: TraitDirection?,
+        now: Date = Date()
+    ) throws -> UserTraitRecord {
+        try Self.rejectNUL(statement, field: "statement")
+        try Self.rejectNUL(category, field: "category")
+        let stamp = SophiaTimestamp.truncated(now)
+
+        // **探すのと書くのを1つのトランザクションに入れる。**
+        // 分けると、探した直後に別の経路が同じ軸を作った場合、
+        // **同じ軸の像が2行できて確信度が上がらない**（＝永久に関門へ届かない）。
+        return try write { db in
+            let existing = try UserTraitRecord.fetchOne(
+                db, sql: "SELECT * FROM user_traits WHERE category = ? LIMIT 1",
+                arguments: [category])
+
+            guard let current = existing else {
+                // 初回。**確信度は `source.defaultConfidence`（0.65）。まだ関門に届かない。**
+                let record = UserTraitRecord(
+                    kind: kind, category: category, statement: statement,
+                    source: .correction, direction: direction,
+                    createdAt: stamp)
+                try record.insert(db)
+                return record
+            }
+
+            // 2回目以降。**本文を差し替え、確信度を上げ、向きを書く。**
+            // 旧版は `user_trait_revisions` へ追記されるので消えない（NFR-12）。
+            let raised = UserTraitDefaults.reinforced(
+                current.confidence, by: UserTraitDefaults.reinforcementStep)
+            try Self.appendRevision(
+                db, traitID: current.id, statement: statement,
+                confidence: raised, source: .correction, at: stamp)
+            try db.execute(
+                sql: """
+                    UPDATE user_traits
+                       SET statement = ?, source = ?, confidence = ?,
+                           direction = ?, updated_at = ?
+                     WHERE id = ?
+                    """,
+                arguments: [
+                    statement, TraitSource.correction.rawValue, raised,
+                    direction?.rawValue, SophiaTimestamp.milliseconds(from: stamp),
+                    current.id,
+                ])
+            guard let updated = try UserTraitRecord.fetchOne(
+                db, sql: "SELECT * FROM user_traits WHERE id = ?", arguments: [current.id]
+            ) else {
+                throw StoreFailure.traitNotFound(id: current.id)
+            }
+            return updated
+        }
+    }
+
     func reviseTrait(
         id: String,
         statement: String,

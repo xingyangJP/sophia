@@ -55,7 +55,7 @@ final class UserTraitsStoreTests: StoreTestCase {
         XCTAssertEqual(SophiaMigration.v2UserTraits.rawValue, "v2.userTraits")
         XCTAssertEqual(
             SophiaMigration.allCases.map(\.rawValue),
-            ["v1.initial", "v2.userTraits"],
+            ["v1.initial", "v2.userTraits", "v3.traitDirection"],
             "利用者像の移行は**末尾に**足すこと。間に挿すと既存DBで順序が食い違う"
         )
     }
@@ -76,7 +76,7 @@ final class UserTraitsStoreTests: StoreTestCase {
         let store = try Store(.file(url))
 
         let applied = try await store.rawAppliedMigrationIdentifiers()
-        XCTAssertEqual(Set(applied), ["v1.initial", "v2.userTraits"], "追加分だけが当たること")
+        XCTAssertEqual(Set(applied), ["v1.initial", "v2.userTraits", "v3.traitDirection"], "追加分だけが当たること")
 
         let messages = try await store.messages(in: conversationID)
         XCTAssertEqual(messages.map(\.content), ["ここにいる"], "移行で会話が消えている")
@@ -122,6 +122,8 @@ final class UserTraitsStoreTests: StoreTestCase {
                 // **本章の中心にある列。既定が stored であることが設計の主張**（14.7節）
                 "placement", "adapter_gen",
                 "expires_at", "created_at", "updated_at",
+                // **v3（FR-31）で末尾に足した。** `ALTER TABLE` は末尾にしか足せない。
+                "direction",
             ],
             "14.14節の生SQL と列の並びまで一致していること"
         )

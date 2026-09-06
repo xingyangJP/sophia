@@ -24,7 +24,14 @@ enum SophiaMigration: String, CaseIterable, Sendable {
     // **どちらもまだ1度も登録されていない（コメントのままである）ので、
     // 既存DBに焼かれた識別子は1つも変わっていない。**
     //
-    // case v3FullTextSearch = "v3.fts5"
+    /// **訂正の向き**（FR-31 / 2026-09-06）。`user_traits.direction` を足す。
+    ///
+    /// **既存の行は NULL になる。** それでよい ──
+    /// **向きは記録する時点でしか付けられない**ので、
+    /// **過去の訂正に後から向きを推測して埋めるのは、観測ではなく捏造である。**
+    case v3TraitDirection = "v3.traitDirection"
+
+    // case v4FullTextSearch = "v4.fts5"
     //     FR-13。messages の外部コンテンツ FTS5 仮想テーブル（第8.1節）
     //
     // case v4ExtendedStats = "v4.stats"
@@ -67,6 +74,21 @@ enum SophiaMigrations {
         // 中身を変えても二度と走らない。**足すのは必ず下である。**
         migrator.registerMigration(SophiaMigration.v2UserTraits.rawValue) { db in
             try db.execute(sql: Self.v2UserTraitsSQL)
+        }
+
+        // --- v3: 訂正の向き（FR-31）------------------------------------------
+        //
+        // **列を足すだけ。既存の行は NULL のまま。**
+        // 過去の訂正に向きを埋め戻さないのは、**向きが本文から復元できない**ためである
+        // （「そんな断言できないだろ」と「で、結局どっちなの」は、
+        //  記録された statement からは同じ顔をする）。
+        migrator.registerMigration(SophiaMigration.v3TraitDirection.rawValue) { db in
+            try db.alter(table: "user_traits") { t in
+                t.add(column: "direction", .text)
+            }
+            // **CHECK は付けられない**（SQLite の ALTER TABLE は制約を後付けできない）。
+            // 代わりに `TraitDirection` の Codable が読み書きの両側で綴りを守る。
+            // **「制約で守れないものは、型で守る」** ── どちらも無い状態にはしない。
         }
 
         return migrator
