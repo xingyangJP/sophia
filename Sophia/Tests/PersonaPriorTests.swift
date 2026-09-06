@@ -139,4 +139,52 @@ final class PersonaPriorTests: XCTestCase {
         XCTAssertTrue(prior.isActionable("A"), "強い証拠でも関門を越えない")
         XCTAssertTrue(prior.describe("A").contains("使ってよい"))
     }
+
+    // MARK: - 質問からの流れ込み（14.13c）
+
+    /// **12問すべてに答えても、関門には届かない。**
+    ///
+    /// > 14.13c: **質問は事前分布であって証拠ではない。**
+    /// > 届いてしまえば、**一度も一緒に働いていない相手について、
+    /// > 質問だけで振る舞いを変える**ことになる。
+    /// > 焼かれるのは使用中の訂正だけである、という決定がここで守られる。
+    func testAnsweringEveryQuestionStillDoesNotReachTheThreshold() {
+        let answers = OnboardingQuestionnaire.all.map { ($0, OnboardingChoice.Side.a) }
+        let prior = PersonaPrior.from(answers: answers)
+        for domain in PersonaPrior.domains {
+            XCTAssertFalse(
+                prior.isActionable(domain),
+                "\(domain) が質問だけで使ってよい状態になっている（14.13c 違反）")
+        }
+    }
+
+    /// **それでも、答えは向きを作ること**（陰性対照の裏）。
+    ///
+    /// 何も動かないなら、質問に答える意味が無い。
+    func testAnswersDoMoveTheDirection() {
+        let a = PersonaPrior.from(
+            answers: OnboardingQuestionnaire.all.map { ($0, OnboardingChoice.Side.a) })
+        let b = PersonaPrior.from(
+            answers: OnboardingQuestionnaire.all.map { ($0, OnboardingChoice.Side.b) })
+        XCTAssertNotEqual(a, b, "どちらを選んでも同じ像になっている")
+        XCTAssertNotEqual(a["C"].value, PersonaPrior.population["C"].value)
+    }
+
+    /// **`archetypes` は事前分布を動かさない。** あれは性格の軸ではなく方針である。
+    func testTheTypologyPolicyQuestionIsNotAPersonalityAxis() {
+        let archetypes = OnboardingQuestionnaire.all.first { $0.category == "archetypes" }
+        let prior = PersonaPrior.from(answers: [(archetypes!, .a)])
+        XCTAssertEqual(prior, PersonaPrior.population, "方針の質問が性格の像を動かしている")
+    }
+
+    /// **確信度の出所は1か所であること。**
+    ///
+    /// ここで独自の数字を置くと、`user_traits` に入る値と分かれて、片方だけ古くなる。
+    func testTheConfidenceComesFromTheSingleSourceOfTruth() {
+        let one = OnboardingQuestionnaire.all.first { $0.facet.hasPrefix("C") }!
+        let prior = PersonaPrior.from(answers: [(one, .a)])
+        XCTAssertEqual(
+            prior["C"].confidence, TraitSource.onboarding.defaultConfidence, accuracy: 1e-9)
+    }
+
 }

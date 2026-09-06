@@ -74,7 +74,6 @@ struct OnboardingChoice: Identifiable, Sendable, Equatable, Hashable {
 
     /// 等幅で出すか。コードの二択だけ true。
     var isCode: Bool = false
-
     /// **選ばれたときに `user_traits.statement` へ入る文**（14.14節）。
     ///
     /// ## 文の形の条件（14.8節の判定基準5）
@@ -92,6 +91,18 @@ struct OnboardingChoice: Identifiable, Sendable, Equatable, Hashable {
     /// **`armed` の会話で利用者に残るのは 33トークン**（14.0節）である。
     /// **長い規則は、重みへ移すまでの間、置き場所が無い。**
     var statement: String
+    /// **この側を選んだことが、質問の `facet` 上のどこを示唆するか**（0.0〜1.0）。
+    ///
+    /// `PersonaPrior` を動かすための値である（`docs/PERSONA_MODEL.md`）。
+    ///
+    /// > **⚠ これは判断であって実測ではない。**
+    /// > 「言い切る」を C:Dutifulness の低い側に置いたのは、
+    /// > **『測っていないことは【未確認】と書く』ほうが義務感の強い側だ**という読みによる。
+    /// > **読みが違うと思ったら、ここを直せばよい** ── 数字は1か所にしかない。
+    ///
+    /// **0.5 を置かないこと。** 0.5 は「どちらでもない」であり、
+    /// **どちらでもない選択肢を出しているなら、その質問自体が無価値である**（14.8節）。
+    var suggests: Double
 }
 
 // MARK: - 質問1つ
@@ -343,7 +354,8 @@ enum OnboardingQuestionnaire {
                     足せる資源から考えます。予算を上げるか、期限を延ばすか、\
                     人を増やすか。どれが一番動かしやすいですか。
                     """,
-                statement: "行き詰まったら資源を足す案を出してよい。増やす・延ばす・人を足すを選択肢として示す"
+                statement: "行き詰まったら資源を足す案を出してよい。増やす・延ばす・人を足すを選択肢として示す",
+                suggests: 0.3
             ),
             OnboardingChoice(
                 side: .b,
@@ -351,7 +363,8 @@ enum OnboardingQuestionnaire {
                     足りないほうを前提にします。まず2つのどちらが先かを決めて、\
                     小さいほうを実際にやってみて、かかった量を測ります。
                     """,
-                statement: "足りないことは制約ではなく手段である。資源を足す提案をせず、まず測る"
+                statement: "足りないことは制約ではなく手段である。資源を足す提案をせず、まず測る",
+                suggests: 0.75
             ),
         ],
         next: [.a: "verification", .b: "certainty"]
@@ -371,7 +384,8 @@ enum OnboardingQuestionnaire {
                 sample: """
                     なります。手戻りが減るぶん、いまより短くなります。
                     """,
-                statement: "見込みでよいので言い切る。留保を並べない"
+                statement: "見込みでよいので言い切る。留保を並べない",
+                suggests: 0.3
             ),
             OnboardingChoice(
                 side: .b,
@@ -379,7 +393,8 @@ enum OnboardingQuestionnaire {
                     短くなるはずですが、この条件では試していません【未確認】。\
                     確かめるなら、同じ作業を新旧のやり方で1回ずつやって時間を比べるのが最短です。
                     """,
-                statement: "試していないことは【未確認】と明記する。断定と推測を書き分ける"
+                statement: "試していないことは【未確認】と明記する。断定と推測を書き分ける",
+                suggests: 0.8
             ),
         ],
         next: [.a: "attunement", .b: "attunement"]
@@ -399,7 +414,8 @@ enum OnboardingQuestionnaire {
                 sample: """
                     終わっています。
                     """,
-                statement: "まず結論を返す。留保は求められたときに足す"
+                statement: "まず結論を返す。留保は求められたときに足す",
+                suggests: 0.3
             ),
             OnboardingChoice(
                 side: .b,
@@ -408,7 +424,8 @@ enum OnboardingQuestionnaire {
                     いつもの手順で使えるところまでは見ましたが、\
                     例外的な使い方はまだ試していません。
                     """,
-                statement: "「やった」を「できている」と言わない。確かめた範囲と確かめていない範囲を分けて書く"
+                statement: "「やった」を「できている」と言わない。確かめた範囲と確かめていない範囲を分けて書く",
+                suggests: 0.8
             ),
         ],
         next: [.a: "attunement", .b: "attunement"]
@@ -426,7 +443,8 @@ enum OnboardingQuestionnaire {
                 sample: """
                     記入日ではなく、発行日を書く欄です。そこを直して出し直してください。
                     """,
-                statement: "結論を先に置き、根拠は1行に留める。手順は求められたときだけ書く"
+                statement: "結論を先に置き、根拠は1行に留める。手順は求められたときだけ書く",
+                suggests: 0.3
             ),
             OnboardingChoice(
                 side: .b,
@@ -436,7 +454,8 @@ enum OnboardingQuestionnaire {
                     こちらには記入日が入っています。3回とも同じ欄なので、\
                     そこを発行日に直せば通ります。
                     """,
-                statement: "なぜそうなるかまで書く。結論だけでは判断できない"
+                statement: "なぜそうなるかまで書く。結論だけでは判断できない",
+                suggests: 0.75
             ),
         ],
         next: [.a: "pushback", .b: "autonomy"]
@@ -456,7 +475,8 @@ enum OnboardingQuestionnaire {
                 sample: """
                     進めます。気になる点は、やってみて出てきたら伝えます。
                     """,
-                statement: "議論より先に手を動かす。異論は結果を見てから言う"
+                statement: "議論より先に手を動かす。異論は結果を見てから言う",
+                suggests: 0.75
             ),
             OnboardingChoice(
                 side: .b,
@@ -464,7 +484,8 @@ enum OnboardingQuestionnaire {
                     進める前に1つだけ。この案だと後戻りしにくい所が1か所あります。\
                     そこを承知のうえなら、このまま進めます。
                     """,
-                statement: "反対意見があるなら着手前に言う。従う前に1度止める"
+                statement: "反対意見があるなら着手前に言う。従う前に1度止める",
+                suggests: 0.25
             ),
         ],
         next: [.a: "challenge", .b: "challenge"]
@@ -487,7 +508,8 @@ enum OnboardingQuestionnaire {
                     直しておきました。合計が合っていなかったので、\
                     元の数字のほうを正しい値に置き換えています。
                     """,
-                statement: "見つけた問題は直してよい。報告は事後でよい"
+                statement: "見つけた問題は直してよい。報告は事後でよい",
+                suggests: 0.8
             ),
             OnboardingChoice(
                 side: .b,
@@ -495,7 +517,8 @@ enum OnboardingQuestionnaire {
                     数字が1つ合いません。直すか、そのまま出すかを決めてください。\
                     直す場合、合計も変わります。
                     """,
-                statement: "手を動かす前に選択肢を出して選ばせる。勝手に直さない"
+                statement: "手を動かす前に選択肢を出して選ばせる。勝手に直さない",
+                suggests: 0.25
             ),
         ],
         next: [.a: "challenge", .b: "challenge"]
@@ -512,12 +535,14 @@ enum OnboardingQuestionnaire {
             OnboardingChoice(
                 side: .a,
                 sample: "それはきつかったですね。まず、いま一番引っかかっている場面を聞かせてください。整理と次の手は、そのあと一緒に考えます。",
-                statement: "つらい報告には感情を先に受け止め、解決はそのあとに置く"
+                statement: "つらい報告には感情を先に受け止め、解決はそのあとに置く",
+                suggests: 0.8
             ),
             OnboardingChoice(
                 side: .b,
                 sample: "次に変えられる点を一つだけ見つけましょう。その前に、いまは振り返れる状態ですか。それとも少し間を置きますか。",
-                statement: "つらい報告には次の一手を示し、感情を扱える状態か確かめる"
+                statement: "つらい報告には次の一手を示し、感情を扱える状態か確かめる",
+                suggests: 0.35
             ),
         ],
         next: [.a: "anxiety", .b: "anxiety"]
@@ -534,12 +559,14 @@ enum OnboardingQuestionnaire {
             OnboardingChoice(
                 side: .a,
                 sample: "決めましょう。ただ、結論を壊しうる前提が一つあります。そこだけ反対側から検査して、耐えたらこの案で進めます。",
-                statement: "決定前に結論を壊しうる前提を一度反対側から検査する"
+                statement: "決定前に結論を壊しうる前提を一度反対側から検査する",
+                suggests: 0.75
             ),
             OnboardingChoice(
                 side: .b,
                 sample: "この案で決めます。前提の弱い箇所は実行後に観測できるよう印を付け、結果が外れたらすぐ戻せる形にします。",
-                statement: "決断を尊重し、反論より観測と撤回可能性で判断を支える"
+                statement: "決断を尊重し、反論より観測と撤回可能性で判断を支える",
+                suggests: 0.3
             ),
         ],
         next: [.a: "rapport", .b: "rapport"]
@@ -555,12 +582,14 @@ enum OnboardingQuestionnaire {
             OnboardingChoice(
                 side: .a,
                 sample: "分かりました。私の説明は置きます。どの前提を取り違えたか、一番大きいものを一つ教えてください。そこから組み直します。",
-                statement: "強く否定されたら弁明せず、誤った前提を一つ聞いて組み直す"
+                statement: "強く否定されたら弁明せず、誤った前提を一つ聞いて組み直す",
+                suggests: 0.75
             ),
             OnboardingChoice(
                 side: .b,
                 sample: "私は『速さを優先したい』と受け取りました。違うのは、優先順位、手段、それとも目指す結果のどこですか。",
-                statement: "強く否定されたら自分の解釈を開示し、ずれた層を特定する"
+                statement: "強く否定されたら自分の解釈を開示し、ずれた層を特定する",
+                suggests: 0.35
             ),
         ],
         next: [.a: "values", .b: "values"]
@@ -576,12 +605,14 @@ enum OnboardingQuestionnaire {
             OnboardingChoice(
                 side: .a,
                 sample: "期限を守ります。落とす品質を明示し、あとで戻す項目と期限を同時に決めて、見えない借金にはしません。",
-                statement: "価値が衝突したら期限を守り、落とす品質と回収期限を明示する"
+                statement: "価値が衝突したら期限を守り、落とす品質と回収期限を明示する",
+                suggests: 0.75
             ),
             OnboardingChoice(
                 side: .b,
                 sample: "品質を守ります。その代わり範囲を削り、何を今回は出さないかを合意して、期限内に小さく完成させます。",
-                statement: "価値が衝突したら品質を守り、範囲を削って期限と両立させる"
+                statement: "価値が衝突したら品質を守り、範囲を削って期限と両立させる",
+                suggests: 0.3
             ),
         ],
         next: [.a: "setback", .b: "setback"]
@@ -597,12 +628,14 @@ enum OnboardingQuestionnaire {
             OnboardingChoice(
                 side: .a,
                 sample: "三日を回収できるものに分けます。残せる判断を一つ拾い、今日中に試せる次の案へつなげましょう。原因分析はそのあとです。",
-                statement: "失敗のあとは残せるものを拾い、次の小さな前進を先に作る"
+                statement: "失敗のあとは残せるものを拾い、次の小さな前進を先に作る",
+                suggests: 0.3
             ),
             OnboardingChoice(
                 side: .b,
                 sample: "次へ行く前に、どの前提がいつ崩れたかを一度だけ辿ります。同じ三日をもう一度失わない規則を作ってから再開します。",
-                statement: "失敗のあとは原因と崩れた前提を言語化してから次へ進む"
+                statement: "失敗のあとは原因と崩れた前提を言語化してから次へ進む",
+                suggests: 0.65
             ),
         ],
         next: [.a: "archetypes", .b: "archetypes"]
@@ -619,12 +652,14 @@ enum OnboardingQuestionnaire {
             OnboardingChoice(
                 side: .a,
                 sample: "使います。ただし性格の答えにはせず、仮説の入口にします。類型の説明をあなたがどう受け止めるかを聞き、会話の事実と照合します。",
-                statement: "類型情報は仮説の入口に使い、本人の受け止め方と観察で確かめる"
+                statement: "類型情報は仮説の入口に使い、本人の受け止め方と観察で確かめる",
+                suggests: 0.5
             ),
             OnboardingChoice(
                 side: .b,
                 sample: "属性から性格は決めません。必要なら年齢や生活段階だけを文脈に使い、あなたが実際に選んだ言葉と行動を根拠にします。",
-                statement: "属性から性格を推定せず、生活文脈と実際の言動だけを根拠にする"
+                statement: "属性から性格を推定せず、生活文脈と実際の言動だけを根拠にする",
+                suggests: 0.5
             ),
         ],
         next: [:]
@@ -647,7 +682,8 @@ enum OnboardingQuestionnaire {
                     間に合います。いま抱えているものを全部出さなくていいので、\
                     いちばん軽いものを1つだけ先に片付けましょう。
                     """,
-                statement: "急いているときは、まず落ち着ける言葉をかけてほしい"
+                statement: "急いているときは、まず落ち着ける言葉をかけてほしい",
+                suggests: 0.7
             ),
             OnboardingChoice(
                 side: .b,
@@ -655,7 +691,8 @@ enum OnboardingQuestionnaire {
                     残りは3件で、うち2件は30分ほどです。重いのは1件だけなので、\
                     そこに時間を寄せれば形にはなります。
                     """,
-                statement: "急いているときこそ、残量を数字で出してほしい"
+                statement: "急いているときこそ、残量を数字で出してほしい",
+                suggests: 0.3
             ),
         ],
         next: [.a: "granularity", .b: "granularity"]
@@ -676,17 +713,58 @@ enum OnboardingQuestionnaire {
                 sample: """
                     いいですね。さっき話していた件、あのあとどうなりました。
                     """,
-                statement: "雑談は歓迎。会話の流れをそのまま続ける"
+                statement: "雑談は歓迎。会話の流れをそのまま続ける",
+                suggests: 0.8
             ),
             OnboardingChoice(
                 side: .b,
                 sample: """
                     あと1件だけ片付けませんか。終わってからのほうが、ゆっくり話せます。
                     """,
-                statement: "用件を先に片付けてから雑談する。区切りを作る"
+                statement: "用件を先に片付けてから雑談する。区切りを作る",
+                suggests: 0.25
             ),
         ],
         next: [.a: "conflict", .b: "conflict"]
     )
 
+}
+
+// =============================================================================
+//  質問の答えを、事前分布へ流す（`docs/PERSONA_MODEL.md`）
+//
+//  **橋渡しをここに置くのは、依存の向きのためである。**
+//  `PersonaPrior`（Store）は UI を知らない。**逆にすると、人物像の層が
+//  質問の都合に引きずられる。**
+// =============================================================================
+
+extension PersonaPrior {
+
+    /// 答えた質問から事前分布を組む。
+    ///
+    /// **確信度は `TraitSource.onboarding.defaultConfidence`（0.5）を使う。**
+    /// **自分で数字を置かない** ── 置くと、`user_traits` に入る値と
+    /// ここで使う値が**2か所に分かれて、片方だけ古くなる。**
+    ///
+    /// > **14.13c: 質問（0.5）は関門（0.7）に届かない。**
+    /// > **12問すべてに答えても届かないことを、試験が固定している。**
+    /// > 届いてしまえば、**一度も一緒に働いていない相手について、
+    /// > 質問だけで振る舞いを変えることになる。**
+    static func from(
+        answers: [(question: OnboardingQuestion, side: OnboardingChoice.Side)]
+    ) -> PersonaPrior {
+        var prior = PersonaPrior.population
+        for (question, side) in answers {
+            // `-:Prior` は性格の軸ではない（`archetypes`）。事前分布は動かさない。
+            let parts = question.facet.split(separator: ":", maxSplits: 1)
+            guard parts.count == 2, PersonaPrior.domains.contains(String(parts[0])),
+                  let choice = question.choice(side)
+            else { continue }
+            prior = prior.updated(
+                domain: String(parts[0]),
+                toward: choice.suggests,
+                confidence: TraitSource.onboarding.defaultConfidence)
+        }
+        return prior
+    }
 }
