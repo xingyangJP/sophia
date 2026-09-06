@@ -386,6 +386,13 @@ actor MLXEngine: InferenceEngine {
         isLoading = true
         defer { isLoading = false }
 
+        // **失敗したときに「何バイト持っていたか」を言えるようにする。**
+        // 2026-09-05、取得は 99.2%（4,571,486,285 / 4,607,835,174）で落ちたのに、
+        // ログには `event=idle` が並ぶだけでエラー行が1つも残らなかった。
+        // **なぜ終わったかがどこにも記録されない**のが、あの事故でいちばん困った点である。
+        // 見張りは `do` の内側で作るので、**catch から触れる場所に控えを置く。**
+        var stallWatch: ModelDownloadStallWatch?
+
         do {
             continuation.yield(LoadProgress(
                 stage: .resolving, detail: "モデルを確認しています"))
@@ -451,12 +458,47 @@ actor MLXEngine: InferenceEngine {
                 // `.safetensors` が1枚でもあれば真になる ── 分割された重みだと
                 // 1枚目が置かれた瞬間に見張りが黙る（監督の指摘 / 2026-09-05）。
                 observingCompletion: { MLXModelCatalog.snapshotIsComplete(modelID) })
+            stallWatch = watch
             let watchdog: Task<Void, Never>? = alreadyOnDisk
                 ? nil
                 : Self.startDownloadWatchdog(
                     watch: watch, modelID: modelID, into: continuation)
             // 正常終了・例外・キャンセルのどれで抜けても必ず畳む。
             defer { watchdog?.cancel() }
+
+            // **重みだけは自分で取る。** `downloadSnapshot` に再開が無いので、
+            // 終盤で落ちると 4.5GB を捨てる（2026-09-05 に3回連続で起きた）。
+            // `WeightPrefetch` は `Range` で継ぐので、落ちても失うのは最大64MBである。
+            //
+            // **失敗しても投げない。** 投げると、いままで動いていた経路まで
+            // 道連れにする ── **前より悪くならないことを構造で保証する。**
+            // ここで揃わなければ、下の `downloadSnapshot` が今までどおり全部取る。
+            if !alreadyOnDisk {
+                do {
+                    let fetched = try await WeightPrefetch.ensure(
+                        modelID: modelID,
+                        onProgress: { p in
+                            continuation.yield(LoadProgress(
+                                stage: .downloading,
+                                completedBytes: p.completedBytes,
+                                totalBytes: p.totalBytes,
+                                fraction: p.totalBytes > 0
+                                    ? min(1.0, Double(p.completedBytes) / Double(p.totalBytes))
+                                    : nil,
+                                detail: "モデルを取得しています（"
+                                    + formatDownloadedBytes(
+                                        completed: p.completedBytes, total: p.totalBytes)
+                                    + "）"))
+                        })
+                    if fetched { writeModelLoadNote("prefetched", model: modelID) }
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    // **黙って落ちない。** 何が起きたかを残して、従来の経路へ進む。
+                    writeModelLoadFailure(
+                        error, model: modelID, receivedBytes: 0)
+                }
+            }
 
             // ダウンロードは初回のみ。2回目以降は HuggingFace のキャッシュから読む。
             //
@@ -547,6 +589,12 @@ actor MLXEngine: InferenceEngine {
             continuation.finish()
 
         } catch {
+            // **打ち切りと同じく、この1行は `SOPHIA_LOG_LOAD` と無関係に必ず出す。**
+            // 打ち切ったのか、ライブラリが投げたのか、利用者が畳んだのかを
+            // **後から区別できる唯一の記録**である。
+            writeModelLoadFailure(
+                error, model: modelID,
+                receivedBytes: stallWatch?.receivedBytesFloor ?? 0)
             continuation.finish(throwing: SophiaError.fromModelLoad(error))
         }
     }
@@ -2769,6 +2817,42 @@ private func writeModelLoadLine(
         // 次に同じことが起きたとき、この2つが並んでいれば1行で切り分けられる。
         "disk_bytes=\(report.diskBytes.map(String.init) ?? "-")",
         "disk_idle_s=\(report.diskIdleSeconds.map { String(format: "%.1f", $0) } ?? "-")",
+    ].joined(separator: " ")
+    FileHandle.standardError.write(Data("[LOAD] \(fields)\n".utf8))
+}
+
+/// **取得が失敗した理由を残す。** `writeModelLoadLine` と同じく、
+/// **`SOPHIA_LOG_LOAD` と無関係に必ず出す。**
+///
+/// ## なぜ要るか
+///
+/// 2026-09-05、取得は **99.2%（4,571,486,285 / 4,607,835,174 bytes）で落ちた。**
+/// ログに残っていたのは `event=idle` の行だけで、**エラーは1文字も記録されなかった。**
+/// アプリ側にもOSの統合ログにも理由が無く、**4.5GB が黙って捨てられた。**
+///
+/// - `reason` は `NSError` の domain と code まで出す。
+///   **`localizedDescription` だけだと「ネットワーク接続が失われました」に潰れて、
+///   -1005 なのか -999（自分でキャンセル）なのかが区別できない。**
+/// - `received_bytes` は**ディスクから観測した床**である。`Progress` は壊れうる（Issue #48）。
+/// 取得の経路について、1行だけ残す。**`SOPHIA_LOG_LOAD` と無関係に出す。**
+/// 「再開が効いたのか、全部取り直したのか」は**この1行だけが証拠**になる。
+private func writeModelLoadNote(_ event: String, model: String) {
+    FileHandle.standardError.write(Data("[LOAD] event=\(event) model=\(model)\n".utf8))
+}
+
+private func writeModelLoadFailure(
+    _ error: any Error, model: String, receivedBytes: Int64
+) {
+    let ns = error as NSError
+    let underlying = (ns.userInfo[NSUnderlyingErrorKey] as? NSError)
+        .map { " underlying=\($0.domain)/\($0.code)" } ?? ""
+    let fields = [
+        "event=failed",
+        "model=\(model)",
+        "received_bytes=\(receivedBytes)",
+        "domain=\(ns.domain)",
+        "code=\(ns.code)\(underlying)",
+        "reason=\(ns.localizedDescription)",
     ].joined(separator: " ")
     FileHandle.standardError.write(Data("[LOAD] \(fields)\n".utf8))
 }
