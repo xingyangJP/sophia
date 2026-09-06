@@ -195,4 +195,39 @@ final class WebSearchTests: XCTestCase {
         XCTAssertEqual(results[0].snippet, attack, "文を消してはいない（囲いで無効化する）")
         XCTAssertEqual(transport.sent.count, 1, "この層が余計な通信をしている")
     }
+
+    // MARK: - 実地（`SOPHIA_WEBSEARCH_PROBE=1` のときだけ走る）
+
+    /// **本物の DuckDuckGo に当てる。** 固定HTMLでの試験は「書いたときの形」しか守らない ──
+    /// **先方が HTML を変えたら、緑のまま0件になる。**
+    ///
+    /// > **R2**: 出荷経路そのもの（`DuckDuckGoSearch.search` + `URLSessionTransport`）を通す。
+    /// > **R7**: 0件は答えではなく故障として扱われることを、ここでも確かめる。
+    ///
+    /// 既定で走らせないのは**外部へ出るから**であって、重いからではない。
+    /// **NFR-01 の改定後も、検索語以外は出さない**（この試験が出すのは下の1語だけ）。
+    func testTheRealDuckDuckGoStillParses() async throws {
+        try XCTSkipUnless(
+            ProcessInfo.processInfo.environment["SOPHIA_WEBSEARCH_PROBE"] == "1",
+            "実地プローブ。SOPHIA_WEBSEARCH_PROBE=1 で走る")
+
+        let results = try await DuckDuckGoSearch.search(
+            "Swift concurrency", using: URLSessionTransport())
+
+        XCTAssertFalse(results.isEmpty, "先方の HTML が変わって1件も取れていない")
+        XCTAssertLessThanOrEqual(results.count, DuckDuckGoSearch.resultLimit)
+
+        for r in results {
+            XCTAssertFalse(r.title.isEmpty, "題が空: \(r)")
+            XCTAssertTrue(
+                r.url.hasPrefix("http"), "URL が http で始まらない（中継のまま？）: \(r.url)")
+            XCTAssertFalse(
+                r.url.contains("uddg="), "DuckDuckGo の中継URLが素通りしている: \(r.url)")
+        }
+
+        // **出典として使える形か。** 出典が中継URLでは「〜によれば」が成立しない（FR-30）。
+        print("[WEBSEARCH_PROBE] count=\(results.count)")
+        for r in results { print("[WEBSEARCH_PROBE] \(r.url) — \(r.title)") }
+    }
+
 }

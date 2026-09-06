@@ -128,7 +128,7 @@ enum FolderTool: String, Sendable, Equatable, CaseIterable {
     /// （辞書ではないのはそのため）。`search_files` が `path` → `query` の順に
     /// 並んでいるのは、実測した `required: ["path", "query"]` と一致させるためである。
     /// **並べ替えないこと。**
-    /// **`search_web` の定義。まだ出荷していない**（下の `definitions` に入れていない）。
+    /// **`search_web` の定義。2026-09-06 に出荷した**（下の `definitions` に入っている）。
     ///
     /// 定義を1つ足すと `<tools>` ブロックが伸び、
     /// **`SophiaDefaults.toolDefinitionTokens = 499` が黙って古くなる。**
@@ -210,6 +210,7 @@ enum FolderTool: String, Sendable, Equatable, CaseIterable {
                     optional(Argument.branch, .string, "Local branch name for create or switch"),
                 ]
             ),
+            webSearchDefinition,
         ]
     }
 

@@ -98,7 +98,7 @@ final class FolderUITests: XCTestCase {
         XCTAssertEqual(
             options.tools, FolderTool.definitions,
             "**送られた定義が `FolderTool.definitions` と違う。** 出所が2本に割れている")
-        XCTAssertEqual(options.tools.count, 4)
+        XCTAssertEqual(options.tools.count, 5)  // 2026-09-06: search_web を出荷（FR-30）
     }
 
     /// **外したら、次のターンから 0 に戻る**（16.2節「往復が終わったら `idle` へ戻す」の利用者側）。

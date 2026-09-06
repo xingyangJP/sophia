@@ -197,7 +197,7 @@ final class EngineToolWiringTests: XCTestCase {
     /// `ToolDefinition.Parameter.ValueType` が表せず宣言の側で止まる（16.4節が入れ子を避けている理由）。
     func testTheShippedCatalogRendersTheSchemaShapeThatWasMeasured() throws {
         let specs = FolderTool.definitions.map(MLXEngine.toolSpec(for:))
-        XCTAssertEqual(specs.count, 4)
+        XCTAssertEqual(specs.count, 5)  // 2026-09-06: search_web を出荷（FR-30）
 
         for (definition, spec) in zip(FolderTool.definitions, specs) {
             XCTAssertEqual(spec["type"] as? String, "function")

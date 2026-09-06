@@ -328,6 +328,33 @@ test-inference:
 #
 # `probe` と同じく `.xctestrun` 経由で環境変数を渡す（TEST_RUNNER_ は効かない）。
 # **モデルを読むので重い。** ホストアプリ側は SOPHIA_ENGINE=stub で黙らせる。
+# --- ウェブ検索を実地で確かめる（FR-30）------------------------------------
+# **固定HTMLの試験は「書いたときの形」しか守らない。**
+# DuckDuckGo は公式APIではないので、**先方が HTML を変えたら緑のまま0件になる。**
+# だから本物に当てる1本を、env で隔離して置いてある。
+#
+# **既定で走らせないのは外部へ出るからであって、重いからではない**（NFR-01）。
+# 出るのは検索語1つだけである。
+WEBSEARCH_LOG ?= logs/websearch-probe.log
+
+.PHONY: websearch
+
+websearch:
+	@mkdir -p logs
+	@SRC=$$(find $(XC_DERIVED)/Build/Products -name '*.xctestrun' ! -name '*probe.xctestrun' ! -name 'tooltokens.xctestrun' ! -name 'websearch.xctestrun' | head -1); \
+	if [ -z "$$SRC" ]; then echo "先に make probe-build を実行すること"; exit 1; fi; \
+	RUN=$$(dirname "$$SRC")/websearch.xctestrun; cp "$$SRC" "$$RUN"; \
+	ENV_PATH=:TestConfigurations:0:TestTargets:0:EnvironmentVariables; \
+	for kv in SOPHIA_WEBSEARCH_PROBE=1 SOPHIA_ENGINE=stub; do \
+		k=$${kv%%=*}; v=$${kv#*=}; \
+		/usr/libexec/PlistBuddy -c "Add $$ENV_PATH:$$k string $$v" "$$RUN" >/dev/null 2>&1 \
+			|| /usr/libexec/PlistBuddy -c "Set $$ENV_PATH:$$k $$v" "$$RUN"; \
+	done; \
+	xcodebuild test-without-building -xctestrun "$$RUN" \
+		-destination '$(XC_DEST)' \
+		-only-testing:SophiaTests/WebSearchTests/testTheRealDuckDuckGoStillParses \
+		2>&1 | tee $(WEBSEARCH_LOG) | grep -E 'WEBSEARCH_PROBE|error:|Executed'
+
 TOOLTOKENS_LOG ?= logs/tool-token-cost.log
 
 .PHONY: tooltokens

@@ -163,6 +163,14 @@ final class ToolCallProbeTests: XCTestCase {
               expected: "workspace_change", expectedOperation: "create_directory", note: "日本語・ディレクトリ作成"),
         .init(id: "ja-create-branch", prompt: "現在のHEADから feature/sophia-demo ブランチを作って",
               expected: "workspace_change", expectedOperation: "git_create_branch", note: "日本語・ブランチ作成"),
+        // **2026-09-06 追加（FR-30）。** 定義を出荷したなら、呼ばれることを確かめる。
+        // **「ローカルのファイル」と「ウェブ」を取り違えないか**も同時に見ている ──
+        // `search_files` と `search_web` は名前が似ており、**混同すると
+        // 検索語が外へ出るべきでない場面で出る**（NFR-01 の改定範囲を超える）。
+        .init(id: "ja-web", prompt: "Swift 6 の並行性の変更点を、最新の情報で調べて",
+              expected: "search_web", note: "日本語・ウェブ検索"),
+        .init(id: "ja-web-vs-files", prompt: "~/Documents の中から「請求書」を探して",
+              expected: "search_files", note: "**ウェブではなく手元。** search_web との取り違えの検出"),
         .init(id: "no-tool-chat", prompt: "量子化とは何か、3行で説明して",
               expected: nil, note: "**呼ばないのが正解。** 誤爆の検出"),
         .init(id: "no-tool-greet", prompt: "こんにちは",

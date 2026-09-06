@@ -816,7 +816,9 @@ final class ToolExecutionTests: XCTestCase {
     /// 読み取り3つと、承認付き変更1つの名前・必須引数を固定する。
     func testTheCatalogMatchesWhatWasActuallyMeasured() throws {
         let definitions = FolderTool.definitions
-        XCTAssertEqual(definitions.count, 4)
+        // 2026-09-06 に `search_web` を出荷して 4 → 5（FR-30）。
+        // **費用は測り直してある**（499 → 554。`make tooltokens`）。
+        XCTAssertEqual(definitions.count, 5)
 
         var names: [String] = []
         var required: [String: [String]] = [:]
@@ -826,23 +828,24 @@ final class ToolExecutionTests: XCTestCase {
             XCTAssertFalse(definition.description.isEmpty)
         }
 
-        XCTAssertEqual(names, ["list_directory", "read_file", "search_files", "workspace_change"])
+        XCTAssertEqual(
+            names,
+            ["list_directory", "read_file", "search_files", "workspace_change", "search_web"])
         XCTAssertEqual(required["list_directory"], ["path"])
         XCTAssertEqual(required["read_file"], ["path"])
         XCTAssertEqual(required["search_files"], ["path", "query"])
         XCTAssertEqual(required["workspace_change"], ["operation"])
-        // **enum と出荷される定義は、意図的にずれている。**
+        XCTAssertEqual(required["search_web"], ["query"])
+        // **2026-09-06、保留を解いた。** `search_web`（FR-30）を出荷している。
+        // 手順どおり測り直した ── `make tooltokens` で **499 → 554**、
+        // 総額を 1,000 → 1,055 に上げて予算表の破れ（`unallocated = -55`）を解消した。
         //
-        // `search_web`（FR-30）は実行層まで配線してあるが、**定義を出荷していない** ──
-        // 定義を1つ足すと `<tools>` が伸びて `toolDefinitionTokens = 499` が
-        // 黙って古くなり、**縮約が「収まった」と判断する境界がずれる**ためである。
-        // 実測（`make tooltokens`）にはモデルが要り、いまは測れていない。
-        //
-        // **したがって、ここで縛るのは「出荷される定義」と「まだ出荷していないもの」の
-        // 区別そのものである。** `allCases` と一致させてしまうと、
-        // **測らずに足した日に何も鳴らなくなる。**
+        // **保留の集合は空のままにしておく。** 次に「実行層はあるが定義は出さない」
+        // ツールを作る人は、ここに名前を入れれば同じ守りが効く ──
+        // **`allCases` と `definitions` を直接比べる形にしないこと。**
+        // それだと「測らずに足した日」に何も鳴らない。
         let shipped = Set(names)
-        let pending: Set<String> = [FolderTool.searchWeb.rawValue]
+        let pending: Set<String> = []
         XCTAssertEqual(
             Set(FolderTool.allCases.map(\.rawValue)), shipped.union(pending),
             "enum に、出荷でも保留でもないツールがある")
@@ -883,6 +886,8 @@ final class ToolExecutionTests: XCTestCase {
                 "search_files": "Find files and folders whose name contains the given word",
                 "workspace_change":
                     "Change a file or folder after the user approves the exact change",
+                "search_web":
+                    "Search the web for current information. Returns titles, URLs and snippets",
             ])
 
         XCTAssertEqual(
@@ -895,6 +900,7 @@ final class ToolExecutionTests: XCTestCase {
                     "Path relative to the bound folder. Absolute paths and ~ are rejected",
                 "read_file.offset": "Line to start from (1-based)",
                 "read_file.limit": "How many lines to read (max 200)",
+                "search_web.query": "What to search for",
                 "search_files.path": "Where to start. Empty string for the whole bound folder",
                 "search_files.query": "Word contained in the file name",
                 "workspace_change.operation":
@@ -911,22 +917,22 @@ final class ToolExecutionTests: XCTestCase {
         //
         // **別のテストに分けないこと。** 分けた瞬間、この錠は効かなくなる。
         //
-        // 499は「この説明文をこの語順で送ったときの実測」であって、
+        // 554は「この説明文をこの語順で送ったときの実測」であって、
         // 定数そのものに意味は無い。ところが**その実測を突き合わせている試験
         // （`EngineToolWiringTests.testToolDefinitionTokenCost`）は既定で skip される**
         // ── モデルが要るので `make tooltokens` を打った人にしか走らない。
         //
         // つまり守りは上の錠1枚しかなく、そこには穴がある。
         // **赤を見た人は、期待値の文言を書き換えれば緑に戻せてしまう。**
-        // そのとき499はどこにも現れないので、**文言だけが新しくなり、
-        // それを根拠にした縮約上限（`InputBudget.transcript` の1000 − 7 − 499）は
+        // そのとき554はどこにも現れないので、**文言だけが新しくなり、
+        // それを根拠にした縮約上限（`InputBudget.transcript` の 1055 − 7 − 554）は
         // 古いまま残る。** 文言は守られているのに、文言と数字の結び付きは誰も守っていない。
         //
         // だから同じ関数の中へ置く。**上を書き換える人の目に、必ずこれが入る。**
         XCTAssertEqual(
-            SophiaDefaults.toolDefinitionTokens, 499,
+            SophiaDefaults.toolDefinitionTokens, 554,
             """
-            ツール定義の費用が499から変わっている。
+            ツール定義の費用が554から変わっている。
             **上の説明文を書き換えたなら、この数字は既に古い。**
             `make tooltokens` で測り直し、`make toolbreakdown` で内訳を出してから直すこと。
             この数字は InputBudget.transcript（1000 − 7 − 499 = 494）を通じて
