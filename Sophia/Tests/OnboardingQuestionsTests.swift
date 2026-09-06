@@ -266,13 +266,19 @@ final class OnboardingQuestionsTests: StoreTestCase {
 
         await first.start()
         await first.choose(.b) // machine -> certainty
-        await first.choose(.a) // certainty -> granularity
+        await first.choose(.a) // certainty -> attunement
         first.stop()
 
         let reopened = OnboardingViewModel(store: store)
         await reopened.start()
 
-        XCTAssertEqual(reopened.current?.category, "granularity")
+        // **見ているのは「前に選んだ枝の続きから再開すること」であって、
+        // この category そのものではない。**
+        // 2026-09-06 に木の順序を組み替えた（3問目を人の側にした）ので、
+        // `certainty` の行き先は `granularity` から `attunement` に変わった。
+        // **性質は変えていない。** `verification` は `machine` のもう一方の枝であり、
+        // そちらへ落ちていないことが「枝を辿っている」ことの証拠である。
+        XCTAssertEqual(reopened.current?.category, "attunement")
         XCTAssertNotEqual(reopened.current?.category, "verification")
     }
 

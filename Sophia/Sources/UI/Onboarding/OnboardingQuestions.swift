@@ -216,6 +216,29 @@ enum OnboardingQuestionnaire {
     /// 3問しか訊かないなら、1問目はこれである。
     static let rootCategory = "machine"
 
+    /// # 並べ方 —— **仕事と人を交互にする**（2026-09-06 / 利用者の指摘）
+    ///
+    /// **かつて木は、1〜5問目が全部「仕事の進め方」だった**
+    /// （資源の制約 → 確信/検証 → 説明の粒度 → 反論/コード → 手を動かす前に訊くか）。
+    /// **人の側（感情・関係・価値判断）は6問目以降に固まっていた。**
+    ///
+    /// **FR-24 は「仕事の進め方だけでなく、認知・感情・関係・価値判断を扱う」と書いている。**
+    /// 軸は揃っていたが、**並び順が要件を裏切っていた。**
+    ///
+    /// > **14.9節: 上限を決めているのは情報利得ではない。離脱と誤答である。**
+    /// > **途中で閉じられる前提なら、順序は要件の一部である。**
+    /// > 2問目で閉じられたとき、「あなたを深く知る」と題した画面が採ったものが
+    /// > **コードの書式の好みだけ**では、題と中身が食い違う。
+    ///
+    /// **したがって3問目を人の側（`attunement`）に置き、以後は交互にする。**
+    /// **どこで閉じても、両方の半分が採れている状態にする。**
+    ///
+    /// > **⚠ 並べ替えるとき、枝を潰さないこと。** 最初の試みで
+    /// > `granularity` の a/b を同じ行き先にしてしまい、
+    /// > **`testTheGranularityAnswerChangesWhatIsAskedNext` が落ちて気づいた。**
+    /// > **順序を直すつもりで、適応性（14.9節「質問セットは一覧ではなく木」）を殺していた。**
+    /// > **枝が意味を持つのは `machine` と `granularity` の2か所である。** そこは触らない。
+
     /// **宣言順は、枝が尽きたときの落ち先でもある**（`next(after:choosing:answered:)`）。
     static let all: [OnboardingQuestion] = [
         machine, certainty, verification, granularity, pushback, code, autonomy,
@@ -346,7 +369,7 @@ enum OnboardingQuestionnaire {
                 statement: "測っていないことは【未確認】と明記する。断定と推測を書き分ける"
             ),
         ],
-        next: [.a: "granularity", .b: "granularity"]
+        next: [.a: "attunement", .b: "attunement"]
     )
 
     /// **根拠への態度: 「実装がある」を「動く」と言うか。**
@@ -372,14 +395,23 @@ enum OnboardingQuestionnaire {
                 statement: "「実装がある」を「動く」と言わない。確かめた範囲と確かめていない範囲を分けて書く"
             ),
         ],
-        next: [.a: "granularity", .b: "granularity"]
+        next: [.a: "attunement", .b: "attunement"]
     )
 
     /// **説明の粒度。** 14.14節が `category` の例として挙げている軸。
     static let granularity = OnboardingQuestion(
         category: "granularity",
         axis: "説明の粒度",
-        prompt: "テストが1本だけ落ちます。",
+        // **場面に判断材料を入れておくこと。** かつてここは
+        // 「テストが1本だけ落ちます。」だけだった。**それでは原因は分からない。**
+        // ところが回答案は両方とも原因を断定しており、
+        // **どちらを選んでも「調べずに断定する Sophia」を選ばせていた**
+        // （2026-09-06 / 利用者の指摘から）。
+        // **軸は粒度である。** 粒度を訊きたいなら、**確信の側は動かないよう場面で固定する。**
+        // 確信そのものを訊く軸は `certainty` に別に在る。
+        prompt: """
+            テストが1本だけ落ちます。保存した時刻と読み戻した時刻が             `XCTAssertEqual` で一致しません。
+            """,
         choices: [
             OnboardingChoice(
                 side: .a,
@@ -426,7 +458,7 @@ enum OnboardingQuestionnaire {
                 statement: "反対意見があるなら着手前に言う。従う前に1度止める"
             ),
         ],
-        next: [.a: "autonomy", .b: "autonomy"]
+        next: [.a: "conflict", .b: "conflict"]
     )
 
     /// **コードの出し方。** 出力トークンは入力の約9倍高い（14.2節）ので、
@@ -467,7 +499,7 @@ enum OnboardingQuestionnaire {
                 statement: "コードは変わった行だけ出す。全文は貼らない"
             ),
         ],
-        next: [.a: "autonomy", .b: "autonomy"]
+        next: [.a: "conflict", .b: "conflict"]
     )
 
     /// **先回りするか、訊いてから動くか。**
@@ -496,7 +528,7 @@ enum OnboardingQuestionnaire {
                 statement: "手を動かす前に選択肢を出して選ばせる。勝手に直さない"
             ),
         ],
-        next: [.a: "attunement", .b: "attunement"]
+        next: [.a: "values", .b: "values"]
     )
 
     /// **EQ: 感情と解決のどちらを先に扱うか。**
@@ -517,7 +549,7 @@ enum OnboardingQuestionnaire {
                 statement: "つらい報告には次の一手を示し、感情を扱える状態か確かめる"
             ),
         ],
-        next: [.a: "challenge", .b: "challenge"]
+        next: [.a: "granularity", .b: "granularity"]
     )
 
     /// **IQ / メタ認知: 同意より思考の更新を優先するか。**
@@ -538,7 +570,7 @@ enum OnboardingQuestionnaire {
                 statement: "決断を尊重し、反論より観測と撤回可能性で判断を支える"
             ),
         ],
-        next: [.a: "conflict", .b: "conflict"]
+        next: [.a: "autonomy", .b: "autonomy"]
     )
 
     /// **関係修復: 強い否定を受けたとき、どう理解を戻すか。**
@@ -558,7 +590,7 @@ enum OnboardingQuestionnaire {
                 statement: "強く否定されたら自分の解釈を開示し、ずれた層を特定する"
             ),
         ],
-        next: [.a: "values", .b: "values"]
+        next: [.a: "challenge", .b: "challenge"]
     )
 
     /// **価値観: 二つの正しさが衝突したとき、何を守るか。**
