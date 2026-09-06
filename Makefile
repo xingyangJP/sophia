@@ -365,7 +365,8 @@ identitytrain:
 	ENV_PATH=:TestConfigurations:0:TestTargets:0:EnvironmentVariables; \
 	for kv in SOPHIA_IDENTITYTRAIN=1 SOPHIA_ENGINE=stub SOPHIA_ADAPTER_OUT=$(ADAPTER_OUT) \
 	          SOPHIA_IDENTITYTRAIN_ITERS=$${IDTRAIN_ITERS:-80} \
-	          SOPHIA_IDENTITYTRAIN_LAYERS=$${IDTRAIN_LAYERS:-16}; do \
+	          SOPHIA_IDENTITYTRAIN_LAYERS=$${IDTRAIN_LAYERS:-16} \
+	          SOPHIA_IDENTITYTRAIN_SCALE=$${IDTRAIN_SCALE:-10.0}; do \
 		k=$${kv%%=*}; v=$${kv#*=}; \
 		/usr/libexec/PlistBuddy -c "Add $$ENV_PATH:$$k string $$v" "$$RUN" >/dev/null 2>&1 \
 			|| /usr/libexec/PlistBuddy -c "Set $$ENV_PATH:$$k $$v" "$$RUN"; \

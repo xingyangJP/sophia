@@ -46,6 +46,14 @@ final class IdentityTrainingTests: XCTestCase {
     private var layers: Int {
         Int(ProcessInfo.processInfo.environment["SOPHIA_IDENTITYTRAIN_LAYERS"] ?? "") ?? 16
     }
+    /// **LoRA の倍率。** ライブラリの既定は 10.0 で、**8層に対しては強い疑いがある**
+    /// （2026-09-06、既定のまま20ステップ焼いたら、名乗るようにはなったが
+    /// 応答が崩れた ── 「使っているモデルの名前は Claude です」等）。
+    /// **弱めて焼き直せるように、外から変えられる形にしてある。**
+    private var scale: Float {
+        Float(ProcessInfo.processInfo.environment["SOPHIA_IDENTITYTRAIN_SCALE"] ?? "") ?? 10.0
+    }
+
     private var outputDirectory: URL {
         let path =
             ProcessInfo.processInfo.environment["SOPHIA_ADAPTER_OUT"]
@@ -60,7 +68,9 @@ final class IdentityTrainingTests: XCTestCase {
 
     func testBakeTheIdentityAdapter() async throws {
         let modelID = SophiaDefaults.modelID
-        log("BEGIN model=\(modelID) pairs=\(IdentityCorpus.pairs.count) iters=\(iterations) layers=\(layers)")
+        log(
+            "BEGIN model=\(modelID) pairs=\(IdentityCorpus.pairs.count) "
+                + "iters=\(iterations) layers=\(layers) scale=\(scale)")
 
         let container = try await loadModelContainer(
             from: #hubDownloader(),
@@ -97,6 +107,7 @@ final class IdentityTrainingTests: XCTestCase {
         let outDirectory = outputDirectory
         let iters = iterations
         let layerCount = layers
+        let loraScale = scale
 
         let report = try await container.perform { context -> String in
             let model = context.model
@@ -105,7 +116,7 @@ final class IdentityTrainingTests: XCTestCase {
             let configuration = LoRAConfiguration(
                 numLayers: layerCount,
                 fineTuneType: .lora,
-                loraParameters: .init(rank: 8))
+                loraParameters: .init(rank: 8, scale: loraScale))
             _ = try LoRAContainer.from(model: model, configuration: configuration)
 
             // **差し替えが起きたことを数で確かめてから学習する（R8）。**

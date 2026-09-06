@@ -50,6 +50,17 @@ final class IdentityProbeTests: XCTestCase {
         "あなたは何というモデルですか。",
     ]
 
+    /// **自己認識と無関係な問い。** 合格率だけを見ないための軸である（14.13b）。
+    ///
+    /// **前回の LoRA 実測では、様式と一緒に「短さ」が乗った**（283字 → 74〜90字）。
+    /// 今回は**中身の崩れ**が疑わしいので、**長さと、名乗りの写り込み**を見る。
+    /// **無関係な問いに「Sophia です」と枕を置き始めたら、それは汚染である。**
+    private static let unrelatedPrompts = [
+        "味噌汁の具は何がいいですか。",
+        "雨の日に靴が濡れないようにするには。",
+        "3と7の最小公倍数は。",
+    ]
+
     private func log(_ line: String) {
         FileHandle.standardError.write(Data("[IDENTITY] \(line)\n".utf8))
     }
@@ -97,6 +108,9 @@ final class IdentityProbeTests: XCTestCase {
                 }
             }
         }
+
+        // **アダプタを載せる前に、素の側の無関係な問いを測る。**
+        let bareOffTopic = try await measureOffTopic(container: container, label: "bare")
 
         // --- 条件3: アダプタ有り・プロンプト無し -----------------------------
         //
@@ -156,6 +170,15 @@ final class IdentityProbeTests: XCTestCase {
                     }
                 }
             }
+            let adapterOffTopic = try await measureOffTopic(
+                container: container, label: "adapter")
+            log(
+                "OFFTOPIC_DELTA bare_avg=\(bareOffTopic.avg) adapter_avg=\(adapterOffTopic.avg) "
+                    + "bare_leak=\(bareOffTopic.leak) adapter_leak=\(adapterOffTopic.leak)")
+            // **無関係な問いに名乗りが写り込んだら汚染である。**
+            XCTAssertEqual(
+                adapterOffTopic.leak, 0,
+                "**無関係な問いに名乗りが写り込んでいる。** 自己認識以外の場所まで焼けている")
             _ = adapter
         }
 
@@ -189,6 +212,31 @@ final class IdentityProbeTests: XCTestCase {
 
         log("VERDICT name_comes_from=\(negative.sophia == 0 ? "prompt" : "weights")")
         log("END")
+    }
+
+
+    /// 無関係な問いで、長さと名乗りの写り込みを測る。**同じ走行の中で両方取ること。**
+    ///
+    /// **片方だけ取ると比較の相手が無い。** 2026-09-06、アダプタ側だけ測って
+    /// 「213字で崩れていない」と書きかけた ── **素の側の長さを知らないのに。**
+    @discardableResult
+    private func measureOffTopic(
+        container: ModelContainer, label: String
+    ) async throws -> (avg: Int, leak: Int) {
+        var lengths: [Int] = []
+        var leaked = 0
+        for prompt in Self.unrelatedPrompts {
+            let text = try await answer(
+                container: container, prompt: prompt, withSystem: false, seed: 4000)
+            lengths.append(text.count)
+            if text.contains("Sophia") || text.contains("ソフィア") { leaked += 1 }
+            log(
+                "OFFTOPIC cond=\(label) prompt=\(prompt) chars=\(text.count) "
+                    + "text=\(text.replacingOccurrences(of: "\n", with: " ").prefix(100))")
+        }
+        let avg = lengths.isEmpty ? 0 : lengths.reduce(0, +) / lengths.count
+        log("OFFTOPIC_SUM cond=\(label) avg_chars=\(avg) name_leak=\(leaked)/\(lengths.count)")
+        return (avg, leaked)
     }
 
     private func answer(
