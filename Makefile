@@ -335,6 +335,35 @@ test-inference:
 #
 # **既定で走らせないのは外部へ出るからであって、重いからではない**（NFR-01）。
 # 出るのは検索語1つだけである。
+# --- 自己認識はどこから来ているか（docs/ADAPTER_01.md 手順4）------------------
+# **「ソフィアってすでに名乗るよ？」への答えを、口ではなく実測で出す。**
+# system プロンプトを外して訊く。陰性対照が「Qwen」なら、名前は毎ターンの
+# 97トークンが作っていることになる ── そこが第一号のアダプタの前提である。
+IDENTITY_LOG ?= logs/identity-probe.log
+
+.PHONY: identityprobe
+
+identityprobe:
+	@mkdir -p logs
+	@if [ -n "$$(pgrep -x Sophia)" ]; then \
+		echo "Sophia が起動している。**先に落とすこと**: pkill -x Sophia"; \
+		echo "（4.4GB を持つプロセスが2つ居ると、測るのは推論ではなくメモリ争奪になる）"; \
+		exit 1; \
+	fi
+	@SRC=$$(find $(XC_DERIVED)/Build/Products -name '*.xctestrun' ! -name '*probe.xctestrun' ! -name 'tooltokens.xctestrun' ! -name 'websearch.xctestrun' ! -name 'identity.xctestrun' | head -1); \
+	if [ -z "$$SRC" ]; then echo "先に make probe-build を実行すること"; exit 1; fi; \
+	RUN=$$(dirname "$$SRC")/identity.xctestrun; cp "$$SRC" "$$RUN"; \
+	ENV_PATH=:TestConfigurations:0:TestTargets:0:EnvironmentVariables; \
+	for kv in SOPHIA_IDENTITYPROBE=1 SOPHIA_ENGINE=stub; do \
+		k=$${kv%%=*}; v=$${kv#*=}; \
+		/usr/libexec/PlistBuddy -c "Add $$ENV_PATH:$$k string $$v" "$$RUN" >/dev/null 2>&1 \
+			|| /usr/libexec/PlistBuddy -c "Set $$ENV_PATH:$$k $$v" "$$RUN"; \
+	done; \
+	xcodebuild test-without-building -xctestrun "$$RUN" \
+		-destination '$(XC_DEST)' \
+		-only-testing:SophiaTests/IdentityProbeTests \
+		2>&1 | tee $(IDENTITY_LOG) | grep -E 'IDENTITY|error:|Executed'
+
 WEBSEARCH_LOG ?= logs/websearch-probe.log
 
 .PHONY: websearch
