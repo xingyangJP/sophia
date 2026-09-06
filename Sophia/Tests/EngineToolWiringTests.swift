@@ -467,8 +467,22 @@ final class EngineToolWiringTests: XCTestCase {
 
         // 実使用に一番近い最小の会話。**自己認識（FR-23）も入れる** ──
         // 「こんにちは」1往復の実費を知りたいのであって、素の性能ではない。
+        // **出荷経路と同じ組み方をすること**（R2）。
+        //
+        // > **⚠ 2026-09-06 まで、ここは `systemPromptEnabled` を見ずに
+        // > 常に system を付けていた。** そのため `SOPHIA_SYSTEM_PROMPT=0` で測っても
+        // > `fixedPreamble` は 105 のままで、**錠は鳴らなかった。**
+        // >
+        // > 第一号のアダプタ（自己認識を重みへ）が載れば、**system プロンプトを落とせる。**
+        // > そのとき出荷の前置きは **105 → 13** になるのに、
+        // > **この錠は緑のまま「105で合っている」と言い続けた。**
+        // > **器の条件が出荷条件と違う** ── 15.7節 R2 が名指ししている形である。
+        //
+        // いまは切り替えを見る。**落とした構成で測れば 13 ≠ 105 で鳴る。**
         func chat() -> [Chat.Message] {
-            [.system(SophiaDefaults.systemPrompt), .user("こんにちは")]
+            SophiaDefaults.systemPromptEnabled
+                ? [.system(SophiaDefaults.systemPrompt), .user("こんにちは")]
+                : [.user("こんにちは")]
         }
         let context: [String: any Sendable] = ["enable_thinking": false]
 
@@ -499,7 +513,20 @@ final class EngineToolWiringTests: XCTestCase {
         let userBodyWithoutSystem = userShortCount - userEmptyCount
         let emptySystemMessage = systemEmptyUserEmptyCount - userEmptyCount
         let systemBody = systemFullUserEmptyCount - systemEmptyUserEmptyCount
-        let userBodyAfterSystem = baselineTokens.count - systemFullUserEmptyCount
+        // **分解は常に system 有りで測る。** ここが測っているのは
+        // 「自己認識の本文と、その後ろの user 本文が何トークンか」という**構造**であって、
+        // 出荷がいまどちらの構成かとは無関係である。
+        //
+        // > **⚠ 2026-09-06 まで `baselineTokens.count` から引いていた。**
+        // > `chat()` を出荷構成に追従させた瞬間、**プロンプトを落とした構成では
+        // > 差が負になり（-91）、分解そのものが壊れた。**
+        // > **出荷構成を追う数（baseline）と、構造を測る数（分解）を、同じ値から作らないこと。**
+        let systemFullUserShort = try await container.prepare(
+            input: UserInput(
+                chat: [.system(SophiaDefaults.systemPrompt), .user("こんにちは")],
+                additionalContext: context))
+        let userBodyAfterSystem =
+            systemFullUserShort.text.tokens.asArray(Int.self).count - systemFullUserEmptyCount
         let tokenizer = await container.tokenizer
         let encodedSystemBody = tokenizer.encode(
             text: SophiaDefaults.systemPrompt, addSpecialTokens: false
@@ -581,10 +608,16 @@ final class EngineToolWiringTests: XCTestCase {
         XCTAssertEqual(
             encodedUserBody, userBodyAfterSystem,
             "短い user 本文の encode と、テンプレート内で本文を足した差分が一致しない")
+        // **合計が戻る相手は「system 有りの総額」である**（R7）。
+        //
+        // > **⚠ 2026-09-06 まで `baselineTokens.count` と比べていた。**
+        // > `chat()` を出荷構成に追従させると、**プロンプトを落とした構成では
+        // > 105 対 13 になり、内訳が合わないのではなく「比べる相手が違う」だけで落ちた。**
+        // > **合計と内訳は同じ条件で取ること。**
         XCTAssertEqual(
             userEmptyCount + emptySystemMessage + systemBody + userBodyAfterSystem,
-            baselineTokens.count,
-            "分解した差分の合計が baseline に戻らない")
+            systemFullUserShort.text.tokens.asArray(Int.self).count,
+            "分解した差分の合計が、system 有りの総額に戻らない")
 
         // #286 の本体も、同じ実トークナイザで測る。
         // 候補ごとに tools / role / tool_calls / tool_response / 生成開始まで丸ごと描画し、
