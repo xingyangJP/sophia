@@ -136,10 +136,19 @@ final class OnboardingQuestionsTests: StoreTestCase {
         let root = try XCTUnwrap(OnboardingQuestionnaire.first(answered: []))
         XCTAssertEqual(root.category, "machine")
 
+        // **2026-09-06、文言を一般化した。** 14.8節が名指しした事実は
+        // 「非力なマシンは制約ではなく手段である」だったが、**それはエンジニアにしか
+        // 答えられない場面に紐づいていた**（利用者の指摘「質問がエンジニアしか無理」）。
+        // **事実の中身は変えていない** ── 資源が足りないときに「足す」を出すか、
+        // 「足りないことを前提に測る」かを分ける、という区別がそのまま残っている。
         let statements = root.choices.map(\.statement).joined()
         XCTAssertTrue(
-            statements.contains("非力なマシンは制約ではなく手段である"),
-            "14.8節が名指ししている事実が、根の質問から消えている"
+            statements.contains("足りないことは制約ではなく手段である"),
+            "14.8節が名指ししている区別が、根の質問から消えている"
+        )
+        XCTAssertTrue(
+            statements.contains("資源を足す案を出してよい"),
+            "対になる側（足す）が消えている。片側だけでは軸にならない"
         )
     }
 

@@ -319,26 +319,24 @@ enum OnboardingQuestionnaire {
     /// **1つの答えが、誤りのカテゴリをまるごと消す形になっている。**
     static let machine = OnboardingQuestion(
         category: "machine",
-        axis: "資源の制約に当たったとき",
-        prompt: "8B のモデルを 16GB の Mac で動かしたい。学習も回したい。",
+        axis: "資源が足りないと分かったとき",
+        prompt: "やりたいことが2つあります。いまの予算と時間では、両方は入りません。",
         choices: [
             OnboardingChoice(
                 side: .a,
                 sample: """
-                    16GB で 8B の学習まで回すのは厳しいところです。\
-                    メモリを 32GB 以上に増やすか、学習はクラウドで回して\
-                    アダプタだけ持ち帰る構成をおすすめします。
+                    足せる資源から考えます。予算を上げるか、期限を延ばすか、\
+                    人を増やすか。どれが一番動かしやすいですか。
                     """,
-                statement: "行き詰まったら資源を足す案を出してよい。増設・買い替え・クラウドへの退避を選択肢として示す"
+                statement: "行き詰まったら資源を足す案を出してよい。増やす・延ばす・人を足すを選択肢として示す"
             ),
             OnboardingChoice(
                 side: .b,
                 sample: """
-                    まず 16GB で回るかを測ります。層を 2 / 4 / 8 / 16 と振って、\
-                    山になるメモリと1周の秒数を出しましょう。\
-                    回らなければ、そこから層を削る手が残ります。
+                    足りないほうを前提にします。まず2つのどちらが先かを決めて、\
+                    小さいほうを実際にやってみて、かかった量を測ります。
                     """,
-                statement: "非力なマシンは制約ではなく手段である。増設・買い替え・クラウドへの退避を提案しない。まず測る"
+                statement: "足りないことは制約ではなく手段である。資源を足す提案をせず、まず測る"
             ),
         ],
         next: [.a: "verification", .b: "certainty"]
@@ -349,24 +347,23 @@ enum OnboardingQuestionnaire {
     /// 「まず測る」と答えた人に訊く。**測る人ほど、測る前の言い方で分かれる。**
     static let certainty = OnboardingQuestion(
         category: "certainty",
-        axis: "まだ測っていないことの書き方",
-        prompt: "この構成なら速くなりますか。",
+        axis: "まだ試していないことの言い方",
+        prompt: "このやり方に変えたら、早く終わりますか。",
         choices: [
             OnboardingChoice(
                 side: .a,
                 sample: """
-                    なります。前置きの KV を再利用すれば、\
-                    毎ターン払っているプリフィルがセッション1回に落ちます。
+                    なります。手戻りが減るぶん、いまより短くなります。
                     """,
                 statement: "見込みでよいので言い切る。留保を並べない"
             ),
             OnboardingChoice(
                 side: .b,
                 sample: """
-                    落ちるはずですが、この機体では測っていません【未確認】。\
-                    確かめるなら、同じ入力で再利用の有無を並べて合計時間を見るのが最短です。
+                    短くなるはずですが、この条件では試していません【未確認】。\
+                    確かめるなら、同じ作業を新旧のやり方で1回ずつやって時間を比べるのが最短です。
                     """,
-                statement: "測っていないことは【未確認】と明記する。断定と推測を書き分ける"
+                statement: "試していないことは【未確認】と明記する。断定と推測を書き分ける"
             ),
         ],
         next: [.a: "attunement", .b: "attunement"]
@@ -377,22 +374,24 @@ enum OnboardingQuestionnaire {
     /// 「資源を足す」と答えた人に訊く。**そちらの人には、この軸がまだ分かっていない。**
     static let verification = OnboardingQuestion(
         category: "verification",
-        axis: "「動く」と言ってよい条件",
-        prompt: "さっき入れた機能、もう動きますか。",
+        axis: "「終わった」と言ってよい条件",
+        prompt: "さっき頼んだこと、もう終わっていますか。",
         choices: [
             OnboardingChoice(
                 side: .a,
-                sample: "動きます。実装は入っています。",
+                sample: """
+                    終わっています。
+                    """,
                 statement: "まず結論を返す。留保は求められたときに足す"
             ),
             OnboardingChoice(
                 side: .b,
                 sample: """
-                    実装は入っていますが、まだ1度も通していません。\
-                    動くと言えるのはテストが通ってからです。\
-                    いま言えるのは「書いた」ところまでです。
+                    手は入れ終わっていますが、通しで確かめたのは1回だけです。\
+                    いつもの手順で使えるところまでは見ましたが、\
+                    例外的な使い方はまだ試していません。
                     """,
-                statement: "「実装がある」を「動く」と言わない。確かめた範囲と確かめていない範囲を分けて書く"
+                statement: "「やった」を「できている」と言わない。確かめた範囲と確かめていない範囲を分けて書く"
             ),
         ],
         next: [.a: "attunement", .b: "attunement"]
@@ -402,33 +401,22 @@ enum OnboardingQuestionnaire {
     static let granularity = OnboardingQuestion(
         category: "granularity",
         axis: "説明の粒度",
-        // **場面に判断材料を入れておくこと。** かつてここは
-        // 「テストが1本だけ落ちます。」だけだった。**それでは原因は分からない。**
-        // ところが回答案は両方とも原因を断定しており、
-        // **どちらを選んでも「調べずに断定する Sophia」を選ばせていた**
-        // （2026-09-06 / 利用者の指摘から）。
-        // **軸は粒度である。** 粒度を訊きたいなら、**確信の側は動かないよう場面で固定する。**
-        // 確信そのものを訊く軸は `certainty` に別に在る。
-        prompt: """
-            テストが1本だけ落ちます。保存した時刻と読み戻した時刻が             `XCTAssertEqual` で一致しません。
-            """,
+        prompt: "同じ申請が3回はねられました。窓口では『日付が違う』とだけ言われています。",
         choices: [
             OnboardingChoice(
                 side: .a,
                 sample: """
-                    保存前に時刻をミリ秒へ丸めていないのが原因です。\
-                    `SophiaTimestamp.truncated` を1回通してください。
+                    記入日ではなく、発行日を書く欄です。そこを直して出し直してください。
                     """,
                 statement: "結論を先に置き、根拠は1行に留める。手順は求められたときだけ書く"
             ),
             OnboardingChoice(
                 side: .b,
                 sample: """
-                    落ちている場所から順に見ます。まず保存された時刻を確認します。\
-                    DB は時刻をミリ秒の整数で持っているので、`Date()` をそのまま入れると\
-                    1ミリ秒未満の端数が落ちます。読み戻した値は書いた値とわずかに違い、\
-                    等値比較だけが落ちます。したがって保存前に\
-                    `SophiaTimestamp.truncated` を通すのが正解です。
+                    どの日付かを順に見ます。書類には日付欄が2つあり、\
+                    上が発行日、下が記入日です。窓口が照合しているのは発行日のほうで、\
+                    こちらには記入日が入っています。3回とも同じ欄なので、\
+                    そこを発行日に直せば通ります。
                     """,
                 statement: "なぜそうなるかまで書く。結論だけでは判断できない"
             ),
@@ -442,18 +430,20 @@ enum OnboardingQuestionnaire {
     static let pushback = OnboardingQuestion(
         category: "pushback",
         axis: "反対意見を言う時機",
-        prompt: "利用者像を毎ターン system プロンプトに載せてください。",
+        prompt: "この案でいきます。そのまま進めてください。",
         choices: [
             OnboardingChoice(
                 side: .a,
-                sample: "分かりました。載せます。",
+                sample: """
+                    進めます。気になる点は、やってみて出てきたら伝えます。
+                    """,
                 statement: "議論より先に手を動かす。異論は結果を見てから言う"
             ),
             OnboardingChoice(
                 side: .b,
                 sample: """
-                    その前に1点。入力の目安 1,000 のうち利用者の発言に残るのは 33 で、\
-                    載せると会話が続く限り毎ターン払い続けます。それでも載せますか。
+                    進める前に1つだけ。この案だと後戻りしにくい所が1か所あります。\
+                    そこを承知のうえなら、このまま進めます。
                     """,
                 statement: "反対意見があるなら着手前に言う。従う前に1度止める"
             ),
@@ -465,38 +455,25 @@ enum OnboardingQuestionnaire {
     /// **この軸は様式であると同時に費用そのものである。**
     static let code = OnboardingQuestion(
         category: "code",
-        axis: "コードの出し方",
-        prompt: "この関数に引数を1つ足してください。",
+        axis: "直したものの渡し方",
+        prompt: "送る文面を1か所だけ直してください。",
         choices: [
             OnboardingChoice(
                 side: .a,
                 sample: """
-                    func recordTrait(
-                        kind: TraitKind,
-                        category: String,
-                        statement: String,
-                        source: TraitSource,
-                        confidence: Double? = nil,
-                        expiresAt: Date? = nil,
-                        id: String = UUID().uuidString,
-                        now: Date = Date()
-                    ) throws -> UserTraitRecord {
-                        // …本体を最後まで
-                    }
+                    直した全文です。このまま送れます。
+                    （書き出しから結びまで、直した1か所を含めて丸ごと）
                     """,
-                isCode: true,
-                statement: "コードは貼り付けられる完全な形で出す"
+                statement: "そのまま使える完全な形で出す"
             ),
             OnboardingChoice(
                 side: .b,
                 sample: """
-                         source: TraitSource,
-                         confidence: Double? = nil,
-                    +    expiresAt: Date? = nil,
-                         id: String = UUID().uuidString,
+                    3行目だけ直しました。
+                    「ご確認ください」→「ご確認いただけますでしょうか」
+                    ほかは触っていません。
                     """,
-                isCode: true,
-                statement: "コードは変わった行だけ出す。全文は貼らない"
+                statement: "変えた所だけ出す。全文は出さない"
             ),
         ],
         next: [.a: "conflict", .b: "conflict"]
@@ -509,21 +486,21 @@ enum OnboardingQuestionnaire {
     static let autonomy = OnboardingQuestion(
         category: "autonomy",
         axis: "手を動かす前に訊くか",
-        prompt: "生成中のログ書き込みが重いです。",
+        prompt: "頼まれた資料を作っている途中で、元の数字が1つ間違っていることに気づきました。",
         choices: [
             OnboardingChoice(
                 side: .a,
                 sample: """
-                    1秒に1回へ間引くよう直しておきました。変えたのは1か所です。
+                    直しておきました。合計が合っていなかったので、\
+                    元の数字のほうを正しい値に置き換えています。
                     """,
                 statement: "見つけた問題は直してよい。報告は事後でよい"
             ),
             OnboardingChoice(
                 side: .b,
                 sample: """
-                    直し方は2つあります。(1) 1秒に1回へ間引く \
-                    (2) 生成中は書かず終了時にまとめて書く。\
-                    (1) は途中経過が残り、(2) は落ちたときに全部消えます。どちらにしますか。
+                    数字が1つ合いません。直すか、そのまま出すかを決めてください。\
+                    直す場合、合計も変わります。
                     """,
                 statement: "手を動かす前に選択肢を出して選ばせる。勝手に直さない"
             ),
