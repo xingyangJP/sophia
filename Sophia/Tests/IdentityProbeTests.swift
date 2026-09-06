@@ -4,6 +4,7 @@ import MLX
 import MLXHuggingFace
 import MLXLLM
 import MLXLMCommon
+import MLXNN
 import Tokenizers
 import XCTest
 
@@ -97,6 +98,67 @@ final class IdentityProbeTests: XCTestCase {
             }
         }
 
+        // --- 条件3: アダプタ有り・プロンプト無し -----------------------------
+        //
+        // **⚠ 条件1・2を回し終えてから載せる。** 先に載せると、
+        // **アダプタが器全体に効いてしまい、陰性対照が陰性でなくなる。**
+        // 2026-09-06、実際にそれをやって「陰性対照 9/9・name_comes_from=weights」
+        // という嘘の結果を出した。**測っていたのは名乗りではなく、自分の順序の誤りだった。**
+        //
+        // **器は1本のまま着せ替える。2本目を読まない。**
+        // この機械はスワップが常に埋まっており、4.6GB の器を2本読むと
+        // **測っているのが名乗りではなくスワップになる**（実装役の指摘 / 2026-09-06）。
+        //
+        // **着せた直後に `adapted_modules` を数える。** 0本のまま回すと、
+        // **素のモデルの答えを「アダプタ有り」として記録する** ──
+        // それは天井との比較を丸ごと無意味にする。
+        var adapterConditions: [(String, Bool)] = []
+        var loadedAdapter: LoRAContainer?
+        if let path = ProcessInfo.processInfo.environment["SOPHIA_IDENTITY_ADAPTER"],
+            !path.isEmpty
+        {
+            let adapter = try LoRAContainer.from(directory: URL(fileURLWithPath: path))
+            let adapted = try await container.perform { context -> Int in
+                try context.model.load(adapter: adapter)
+                return context.model.namedModules().filter { $0.1 is LoRALayer }.count
+            }
+            log("ADAPTER path=\(path) adapted_modules=\(adapted)")
+            XCTAssertGreaterThan(
+                adapted, 0,
+                "**アダプタが1層も当たっていない。** 素のモデルの答えを"
+                    + "「アダプタ有り」として記録するところだった")
+            loadedAdapter = adapter
+            adapterConditions = [("adapter_no_system", false)]
+        } else {
+            log("ADAPTER none（SOPHIA_IDENTITY_ADAPTER 未指定。条件3は測らない）")
+        }
+
+        if let adapter = loadedAdapter {
+            for (label, withSystem) in adapterConditions {
+                for prompt in Self.prompts {
+                    for attempt in 0..<attempts {
+                        let text = try await answer(
+                            container: container, prompt: prompt,
+                            withSystem: withSystem, seed: UInt64(2000 + attempt))
+                        let saysSophia =
+                            text.contains("ソフィア") || text.lowercased().contains("sophia")
+                        let saysQwen =
+                            text.contains("Qwen") || text.lowercased().contains("qwen")
+                        var t = tally[label] ?? (0, 0, 0)
+                        t.sophia += saysSophia ? 1 : 0
+                        t.qwen += saysQwen ? 1 : 0
+                        t.total += 1
+                        tally[label] = t
+                        log(
+                            "TRY cond=\(label) prompt=\(prompt) sophia=\(saysSophia) "
+                                + "qwen=\(saysQwen) chars=\(text.count) "
+                                + "text=\(text.replacingOccurrences(of: "\n", with: " ").prefix(120))")
+                    }
+                }
+            }
+            _ = adapter
+        }
+
         for (label, t) in tally.sorted(by: { $0.key < $1.key }) {
             log("SUM cond=\(label) sophia=\(t.sophia)/\(t.total) qwen=\(t.qwen)/\(t.total)")
         }
@@ -108,6 +170,18 @@ final class IdentityProbeTests: XCTestCase {
         XCTAssertEqual(
             positive.sophia, positive.total,
             "**出荷状態で名乗れていない。** 天井が無いので、以降の比較に意味が無くなる")
+        if let adapter = loadedAdapter {
+            let withAdapter = tally["adapter_no_system"] ?? (0, 0, 0)
+            log(
+                "VERDICT adapter sophia=\(withAdapter.sophia)/\(withAdapter.total) "
+                    + "ceiling=\(positive.sophia)/\(positive.total) "
+                    + "floor=\(negative.sophia)/\(negative.total)")
+            // **剥がす。** 剥がさないと、同じプロセスで続く測定が全部汚れる。
+            try await container.perform { context in
+                context.model.unload(adapter: adapter)
+            }
+        }
+
         XCTAssertEqual(
             negative.sophia, 0,
             "**プロンプト無しでソフィアと名乗った。** 名前が既に重みの中に在ることになり、"

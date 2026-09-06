@@ -339,6 +339,42 @@ test-inference:
 # **「ソフィアってすでに名乗るよ？」への答えを、口ではなく実測で出す。**
 # system プロンプトを外して訊く。陰性対照が「Qwen」なら、名前は毎ターンの
 # 97トークンが作っていることになる ── そこが第一号のアダプタの前提である。
+# --- 第一号のアダプタを焼く（docs/ADAPTER_01.md 手順5）----------------------
+# **system プロンプトを混ぜないこと。** 混ぜると「プロンプトがあるときに名乗る」を
+# 学ぶだけで、それはいま既にできていることである。学習側は .system を1度も足さない。
+IDTRAIN_LOG ?= logs/identity-train.log
+# **アプリのコンテナの中へ書くこと。** 試験はサンドボックスの中で走るので、
+# ~/.sophia のような外の場所へは書けない（Operation not permitted で落ちる）。
+# 読む側（アプリ）も同じコンテナなので、ここなら両方から触れる。
+# **空白を含まない場所にすること。** `Application Support` に置いたら、
+# 環境変数を渡す途中で空白で切れ、`Data/Library/Application/` に落ちた
+# （`SAVED dir=` のログも同じ位置で切れていて、それで気づいた）。
+ADAPTER_OUT ?= $(HOME)/Library/Containers/jp.co.xerographix.sophia/Data/Library/SophiaAdapters/identity-01
+
+.PHONY: identitytrain
+
+identitytrain:
+	@mkdir -p logs
+	@if [ -n "$$(pgrep -x Sophia)" ]; then \
+		echo "Sophia が起動している。**先に落とすこと**: pkill -x Sophia"; \
+		exit 1; \
+	fi
+	@SRC=$$(find $(XC_DERIVED)/Build/Products -name '*.xctestrun' ! -name '*probe.xctestrun' ! -name 'tooltokens.xctestrun' ! -name 'websearch.xctestrun' ! -name 'identity.xctestrun' ! -name 'idtrain.xctestrun' | head -1); \
+	if [ -z "$$SRC" ]; then echo "先に make probe-build を実行すること"; exit 1; fi; \
+	RUN=$$(dirname "$$SRC")/idtrain.xctestrun; cp "$$SRC" "$$RUN"; \
+	ENV_PATH=:TestConfigurations:0:TestTargets:0:EnvironmentVariables; \
+	for kv in SOPHIA_IDENTITYTRAIN=1 SOPHIA_ENGINE=stub SOPHIA_ADAPTER_OUT=$(ADAPTER_OUT) \
+	          SOPHIA_IDENTITYTRAIN_ITERS=$${IDTRAIN_ITERS:-80} \
+	          SOPHIA_IDENTITYTRAIN_LAYERS=$${IDTRAIN_LAYERS:-16}; do \
+		k=$${kv%%=*}; v=$${kv#*=}; \
+		/usr/libexec/PlistBuddy -c "Add $$ENV_PATH:$$k string $$v" "$$RUN" >/dev/null 2>&1 \
+			|| /usr/libexec/PlistBuddy -c "Set $$ENV_PATH:$$k $$v" "$$RUN"; \
+	done; \
+	caffeinate -dimsu xcodebuild test-without-building -xctestrun "$$RUN" \
+		-destination '$(XC_DEST)' \
+		-only-testing:SophiaTests/IdentityTrainingTests \
+		2>&1 | tee $(IDTRAIN_LOG) | grep -E 'IDTRAIN|error:|Executed'
+
 IDENTITY_LOG ?= logs/identity-probe.log
 
 .PHONY: identityprobe
@@ -354,7 +390,7 @@ identityprobe:
 	if [ -z "$$SRC" ]; then echo "先に make probe-build を実行すること"; exit 1; fi; \
 	RUN=$$(dirname "$$SRC")/identity.xctestrun; cp "$$SRC" "$$RUN"; \
 	ENV_PATH=:TestConfigurations:0:TestTargets:0:EnvironmentVariables; \
-	for kv in SOPHIA_IDENTITYPROBE=1 SOPHIA_ENGINE=stub; do \
+	for kv in SOPHIA_IDENTITYPROBE=1 SOPHIA_ENGINE=stub SOPHIA_IDENTITY_ADAPTER="$${IDENTITY_ADAPTER:-}"; do \
 		k=$${kv%%=*}; v=$${kv#*=}; \
 		/usr/libexec/PlistBuddy -c "Add $$ENV_PATH:$$k string $$v" "$$RUN" >/dev/null 2>&1 \
 			|| /usr/libexec/PlistBuddy -c "Set $$ENV_PATH:$$k $$v" "$$RUN"; \
