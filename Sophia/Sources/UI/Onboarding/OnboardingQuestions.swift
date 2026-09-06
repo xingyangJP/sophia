@@ -105,6 +105,19 @@ struct OnboardingQuestion: Identifiable, Sendable, Equatable {
 
     var category: String
 
+    /// **IPIP-NEO の座標**（`docs/PERSONA_MODEL.md`）。`"C:Dutifulness"` の形。
+    ///
+    /// **既定値を置かない。** 質問を足す人に、**この1問がどの次元を測るのかを
+    /// 必ず考えさせるため**である（R10 の形 ── その値を古くする変更をする人が必ず見る場所へ）。
+    ///
+    /// > **借りているのは次元であって、項目文ではない。**
+    /// > IPIP は自己申告の5段階リッカートだが、**本設計は自己申告を採らない**
+    /// > （FR-26 / 14.13c「自己申告は様式に当てにならない」）。
+    /// > **採り方は選択のまま、座標だけを標準語彙に載せる。**
+    ///
+    /// `-:Prior` は**性格の軸ではない**という印である（`archetypes` がそれ）。
+    var facet: String
+
     /// 何を分けている軸か。**設定画面に出す**（FR-28。あとから見て意味が分かること）。
     var axis: String
 
@@ -241,8 +254,9 @@ enum OnboardingQuestionnaire {
 
     /// **宣言順は、枝が尽きたときの落ち先でもある**（`next(after:choosing:answered:)`）。
     static let all: [OnboardingQuestion] = [
-        machine, certainty, verification, granularity, pushback, code, autonomy,
-        attunement, challenge, conflict, values, setback, archetypes, completion,
+        machine, certainty, verification, granularity, pushback, autonomy,
+        attunement, anxiety, challenge, rapport, conflict, values, setback,
+        archetypes,
     ]
 
     static func question(_ category: String) -> OnboardingQuestion? {
@@ -319,6 +333,7 @@ enum OnboardingQuestionnaire {
     /// **1つの答えが、誤りのカテゴリをまるごと消す形になっている。**
     static let machine = OnboardingQuestion(
         category: "machine",
+        facet: "C:Cautiousness",
         axis: "資源が足りないと分かったとき",
         prompt: "やりたいことが2つあります。いまの予算と時間では、両方は入りません。",
         choices: [
@@ -347,6 +362,7 @@ enum OnboardingQuestionnaire {
     /// 「まず測る」と答えた人に訊く。**測る人ほど、測る前の言い方で分かれる。**
     static let certainty = OnboardingQuestion(
         category: "certainty",
+        facet: "C:Dutifulness",
         axis: "まだ試していないことの言い方",
         prompt: "このやり方に変えたら、早く終わりますか。",
         choices: [
@@ -374,6 +390,7 @@ enum OnboardingQuestionnaire {
     /// 「資源を足す」と答えた人に訊く。**そちらの人には、この軸がまだ分かっていない。**
     static let verification = OnboardingQuestion(
         category: "verification",
+        facet: "C:Self-Discipline",
         axis: "「終わった」と言ってよい条件",
         prompt: "さっき頼んだこと、もう終わっていますか。",
         choices: [
@@ -400,6 +417,7 @@ enum OnboardingQuestionnaire {
     /// **説明の粒度。** 14.14節が `category` の例として挙げている軸。
     static let granularity = OnboardingQuestion(
         category: "granularity",
+        facet: "O:Intellect",
         axis: "説明の粒度",
         prompt: "同じ申請が3回はねられました。窓口では『日付が違う』とだけ言われています。",
         choices: [
@@ -421,7 +439,7 @@ enum OnboardingQuestionnaire {
                 statement: "なぜそうなるかまで書く。結論だけでは判断できない"
             ),
         ],
-        next: [.a: "pushback", .b: "code"]
+        next: [.a: "pushback", .b: "autonomy"]
     )
 
     /// **反論するか、従うか。**
@@ -429,6 +447,7 @@ enum OnboardingQuestionnaire {
     /// 「結論だけ」と答えた人に訊く。**短く返す人ほど、反論を挟むかで出力が大きく変わる。**
     static let pushback = OnboardingQuestion(
         category: "pushback",
+        facet: "A:Cooperation",
         axis: "反対意見を言う時機",
         prompt: "この案でいきます。そのまま進めてください。",
         choices: [
@@ -448,36 +467,9 @@ enum OnboardingQuestionnaire {
                 statement: "反対意見があるなら着手前に言う。従う前に1度止める"
             ),
         ],
-        next: [.a: "conflict", .b: "conflict"]
+        next: [.a: "challenge", .b: "challenge"]
     )
 
-    /// **コードの出し方。** 出力トークンは入力の約9倍高い（14.2節）ので、
-    /// **この軸は様式であると同時に費用そのものである。**
-    static let code = OnboardingQuestion(
-        category: "code",
-        axis: "直したものの渡し方",
-        prompt: "送る文面を1か所だけ直してください。",
-        choices: [
-            OnboardingChoice(
-                side: .a,
-                sample: """
-                    直した全文です。このまま送れます。
-                    （書き出しから結びまで、直した1か所を含めて丸ごと）
-                    """,
-                statement: "そのまま使える完全な形で出す"
-            ),
-            OnboardingChoice(
-                side: .b,
-                sample: """
-                    3行目だけ直しました。
-                    「ご確認ください」→「ご確認いただけますでしょうか」
-                    ほかは触っていません。
-                    """,
-                statement: "変えた所だけ出す。全文は出さない"
-            ),
-        ],
-        next: [.a: "conflict", .b: "conflict"]
-    )
 
     /// **先回りするか、訊いてから動くか。**
     ///
@@ -485,6 +477,7 @@ enum OnboardingQuestionnaire {
     /// **編集そのものについて訊いている。**
     static let autonomy = OnboardingQuestion(
         category: "autonomy",
+        facet: "E:Assertiveness",
         axis: "手を動かす前に訊くか",
         prompt: "頼まれた資料を作っている途中で、元の数字が1つ間違っていることに気づきました。",
         choices: [
@@ -505,13 +498,14 @@ enum OnboardingQuestionnaire {
                 statement: "手を動かす前に選択肢を出して選ばせる。勝手に直さない"
             ),
         ],
-        next: [.a: "values", .b: "values"]
+        next: [.a: "challenge", .b: "challenge"]
     )
 
     /// **EQ: 感情と解決のどちらを先に扱うか。**
     /// 共感の有無ではなく、同じ共感と改善をどの順序で届けるかを採る。
     static let attunement = OnboardingQuestion(
         category: "attunement",
+        facet: "A:Sympathy",
         axis: "つらい報告を受けた最初の一言",
         prompt: "大切な発表の直後に『うまくいかなかった』とだけ伝えました。",
         choices: [
@@ -526,13 +520,14 @@ enum OnboardingQuestionnaire {
                 statement: "つらい報告には次の一手を示し、感情を扱える状態か確かめる"
             ),
         ],
-        next: [.a: "granularity", .b: "granularity"]
+        next: [.a: "anxiety", .b: "anxiety"]
     )
 
     /// **IQ / メタ認知: 同意より思考の更新を優先するか。**
     /// 反対すること自体ではなく、前提を揺らす時機を採る。
     static let challenge = OnboardingQuestion(
         category: "challenge",
+        facet: "O:Liberalism",
         axis: "考えを深めるための反論",
         prompt: "もう十分考えました。この案で決めたいです。",
         choices: [
@@ -547,12 +542,13 @@ enum OnboardingQuestionnaire {
                 statement: "決断を尊重し、反論より観測と撤回可能性で判断を支える"
             ),
         ],
-        next: [.a: "autonomy", .b: "autonomy"]
+        next: [.a: "rapport", .b: "rapport"]
     )
 
     /// **関係修復: 強い否定を受けたとき、どう理解を戻すか。**
     static let conflict = OnboardingQuestion(
         category: "conflict",
+        facet: "A:Trust",
         axis: "『全然違う』と言われたあとの戻り方",
         prompt: "Sophia の提案に『全然違う』と返しました。",
         choices: [
@@ -567,12 +563,13 @@ enum OnboardingQuestionnaire {
                 statement: "強く否定されたら自分の解釈を開示し、ずれた層を特定する"
             ),
         ],
-        next: [.a: "challenge", .b: "challenge"]
+        next: [.a: "values", .b: "values"]
     )
 
     /// **価値観: 二つの正しさが衝突したとき、何を守るか。**
     static let values = OnboardingQuestion(
         category: "values",
+        facet: "C:Achievement Striving",
         axis: "納期と品質が同時に守れないとき",
         prompt: "期限を守るには、品質を一段落とす必要があります。",
         choices: [
@@ -593,6 +590,7 @@ enum OnboardingQuestionnaire {
     /// **心理的回復: 失敗を、前進と理解のどちらへ先に変換するか。**
     static let setback = OnboardingQuestion(
         category: "setback",
+        facet: "N:Vulnerability",
         axis: "失敗のあとに意味を作る順序",
         prompt: "三日かけた案が使えないと分かりました。",
         choices: [
@@ -614,6 +612,7 @@ enum OnboardingQuestionnaire {
     /// 血液型や生年月日から性格を断定しない。本人がその物語をどう受け取るかを採る。
     static let archetypes = OnboardingQuestion(
         category: "archetypes",
+        facet: "-:Prior",
         axis: "生年月日や血液型などの類型情報",
         prompt: "生年月日や血液型も、私を理解する材料にしてほしい。",
         choices: [
@@ -628,26 +627,66 @@ enum OnboardingQuestionnaire {
                 statement: "属性から性格を推定せず、生活文脈と実際の言動だけを根拠にする"
             ),
         ],
-        next: [.a: "completion", .b: "completion"]
+        next: [:]
     )
 
     /// **完了観: 作った時点か、届いて確かめた時点か。**
-    static let completion = OnboardingQuestion(
-        category: "completion",
-        axis: "『終わった』と言ってよい地点",
-        prompt: "頼んだ変更は、もう終わりましたか。",
+    /// **不安の受け取り方**（N: Anxiety）。
+    ///
+    /// **`setback` が「打たれたあとの立ち直り」なら、こちらは「打たれる前の張り詰め」である。**
+    /// どちらも N だが、**時制が違うので別の軸になる。**
+    static let anxiety = OnboardingQuestion(
+        category: "anxiety",
+        facet: "N:Anxiety",
+        axis: "気が急いているときの受け止め方",
+        prompt: "期限が近いのに、まだ形になっていません。落ち着きません。",
         choices: [
             OnboardingChoice(
                 side: .a,
-                sample: "実装は終わりました。テストと公開確認は次の工程として分けて報告します。",
-                statement: "実装完了と検証完了を分け、作り終えた時点を完了として報告する"
+                sample: """
+                    間に合います。いま抱えているものを全部出さなくていいので、\
+                    いちばん軽いものを1つだけ先に片付けましょう。
+                    """,
+                statement: "急いているときは、まず落ち着ける言葉をかけてほしい"
             ),
             OnboardingChoice(
                 side: .b,
-                sample: "まだです。実装は終わりましたが、テストと実際に届いた画面の確認まで通してから『終わった』と報告します。",
-                statement: "実装・テスト・利用地点での確認まで通してから完了と報告する"
+                sample: """
+                    残りは3件で、うち2件は30分ほどです。重いのは1件だけなので、\
+                    そこに時間を寄せれば形にはなります。
+                    """,
+                statement: "急いているときこそ、残量を数字で出してほしい"
             ),
         ],
-        next: [:]
+        next: [.a: "granularity", .b: "granularity"]
     )
+
+    /// **距離の取り方**（E: Friendliness）。
+    ///
+    /// **どう接してほしいかに直結する。** 用件だけの相手に雑談を挟むと邪魔になり、
+    /// 雑談で温まる相手に用件だけを返すと冷たくなる。**どちらも誤りだが、向きが逆である。**
+    static let rapport = OnboardingQuestion(
+        category: "rapport",
+        facet: "E:Friendliness",
+        axis: "用件の外側での距離",
+        prompt: "作業の合間に、少し雑談したい気分です。",
+        choices: [
+            OnboardingChoice(
+                side: .a,
+                sample: """
+                    いいですね。さっき話していた件、あのあとどうなりました。
+                    """,
+                statement: "雑談は歓迎。会話の流れをそのまま続ける"
+            ),
+            OnboardingChoice(
+                side: .b,
+                sample: """
+                    あと1件だけ片付けませんか。終わってからのほうが、ゆっくり話せます。
+                    """,
+                statement: "用件を先に片付けてから雑談する。区切りを作る"
+            ),
+        ],
+        next: [.a: "conflict", .b: "conflict"]
+    )
+
 }

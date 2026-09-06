@@ -182,10 +182,14 @@ final class OnboardingQuestionsTests: StoreTestCase {
                 .category,
             "pushback"
         )
+        // **見ているのは「答えで次が変わること」であって、行き先の名前ではない。**
+        // `code`（直したものの渡し方 / C:Orderliness）は 2026-09-06 に落とした ──
+        // 様式の色が濃く、性格の次元としては弱かった（`docs/PERSONA_MODEL.md` の確度「低」）。
+        // 枝は残っている: a は A:Cooperation、b は E:Assertiveness へ分かれる。
         XCTAssertEqual(
             OnboardingQuestionnaire.next(after: granularity, choosing: .b, answered: answered)?
                 .category,
-            "code"
+            "autonomy"
         )
     }
 
@@ -212,9 +216,14 @@ final class OnboardingQuestionsTests: StoreTestCase {
 
     /// 仕事の設定だけで終わらず、一人の認知・感情・関係・価値判断まで通る。
     func testEveryAdaptivePathIncludesTheDeepPersonalAxes() throws {
+        // **2026-09-06、`completion` を外し `anxiety` と `rapport` を足した。**
+        // `completion` は `verification` と同じことを訊いていた（どちらも
+        // 「終わったと言ってよい条件」/ C:Self-Discipline）。空いた枠に、
+        // **それまで1ファセットしか無かった N と E** を入れた
+        // （`docs/PERSONA_MODEL.md` の写像表）。**要求は緩めていない。増やしている。**
         let required: Set<String> = [
-            "attunement", "challenge", "conflict", "values",
-            "setback", "archetypes", "completion",
+            "attunement", "anxiety", "challenge", "rapport",
+            "conflict", "values", "setback", "archetypes",
         ]
 
         func paths(from category: String, visited: Set<String>) -> [Set<String>] {
@@ -713,4 +722,48 @@ final class OnboardingQuestionsTests: StoreTestCase {
         XCTAssertTrue(model.traits.isEmpty)
         XCTAssertEqual(model.perTurnTokenCost, 0)
     }
+
+    // MARK: - 座標（`docs/PERSONA_MODEL.md`）
+
+    /// **どの質問も、自分がどの次元を測っているかを言えること。**
+    ///
+    /// 言えないまま足すと、**「何を測っているのか誰も知らない質問」**が増える。
+    /// 14軸を書いたときに実際にそうなっていた ── 軸の名前はこのプロジェクトの中でしか
+    /// 通じない語彙で、**標準語彙に載せて初めて偏りが見えた。**
+    func testEveryQuestionSaysWhichDimensionItMeasures() {
+        let domains: Set<String> = ["N", "E", "O", "A", "C", "-"]
+        for q in OnboardingQuestionnaire.all {
+            let parts = q.facet.split(separator: ":", maxSplits: 1)
+            XCTAssertEqual(parts.count, 2, "\(q.category) の facet が `領域:ファセット` の形でない")
+            XCTAssertTrue(
+                domains.contains(String(parts[0])),
+                "\(q.category) の領域 `\(parts[0])` は IPIP-NEO の5領域にない")
+            XCTAssertFalse(
+                parts[1].isEmpty, "\(q.category) のファセット名が空")
+        }
+    }
+
+    /// **5領域のどれもが、2ファセット以上覆われていること。**
+    ///
+    /// > **これは「均等に測れ」ではない。** 情報利得の高い軸が C に偏るのは自然である。
+    /// > **1本しか無い領域は「測っていない」に等しい**というだけの話で、
+    /// > **その領域について何か言えば、それは1問から外挿した断定になる。**
+    func testNoDomainIsLeftWithASingleFacet() {
+        var byDomain: [String: Set<String>] = [:]
+        for q in OnboardingQuestionnaire.all where !q.facet.hasPrefix("-") {
+            let parts = q.facet.split(separator: ":", maxSplits: 1)
+            guard parts.count == 2 else { continue }
+            byDomain[String(parts[0]), default: []].insert(String(parts[1]))
+        }
+
+        // **2026-09-06 に埋めた。** それまで N と E は1ファセットずつしか無く、
+        // C に5本・A に3本ある一方で「その人がどういう人か」の側が空だった。
+        // `anxiety`（N: Anxiety）と `rapport`（E: Friendliness）を足して外した印である。
+        for domain in ["N", "E", "O", "A", "C"] {
+            XCTAssertGreaterThanOrEqual(
+                byDomain[domain]?.count ?? 0, 2,
+                "領域 \(domain) が \(byDomain[domain]?.count ?? 0) ファセットしか無い")
+        }
+    }
+
 }
