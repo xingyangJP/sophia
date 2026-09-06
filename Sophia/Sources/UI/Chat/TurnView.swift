@@ -8,10 +8,37 @@ import SwiftUI
 struct TurnView: View {
     @Bindable var turn: ChatTurn
 
+    /// **訂正を採るために要る**（FR-27 / FR-31）。`nil` なら採らない。
+    var model: ChatViewModel?
+
     var body: some View {
         switch turn.author {
         case .user: userBubble
-        case .assistant: assistantBlock
+        case .assistant:
+            assistantBlock
+                // **明示的に押されたときだけ記録する。**
+                // 利用者の次の発言を読んで判定しない（推論を置かない / 14.4節）。
+                .contextMenu { correctionMenu }
+        }
+    }
+
+    /// **「この返しは違う」を、向き付きで採る口。**
+    ///
+    /// 2つの向きは**正反対**である ── 向きを持たせずに記録すると、
+    /// **焼いたときに打ち消し合って何も学ばない**（FR-31）。
+    /// 3つ目は向きの無い訂正で、**無理に二択へ倒さない**ためにある。
+    @ViewBuilder private var correctionMenu: some View {
+        if let model {
+            Button("踏み込みすぎ（根拠より強く言った）") {
+                model.recordCorrection(.overreach)
+            }
+            Button("逃げすぎ（正しいが使えない）") {
+                model.recordCorrection(.hedging)
+            }
+            Divider()
+            Button("言い方が合わない") {
+                model.recordCorrection(nil)
+            }
         }
     }
 

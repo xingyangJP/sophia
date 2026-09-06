@@ -229,6 +229,15 @@ final class ChatViewModel {
     /// 空文字の update が finish を上書きしうる。
     @ObservationIgnored private var persistTail: Task<Void, Never>?
 
+    /// **積んである書き込みが終わるまで待つ。**
+    ///
+    /// `persist` は順序を守るために直列の尾（`persistTail`）へ積むので、
+    /// **呼んだ直後には DB へ届いていない。** 試験がここを待たずに読むと、
+    /// **「書かれていない」と「まだ書かれていない」を取り違える。**
+    func waitForPendingWrites() async {
+        await persistTail?.value
+    }
+
     private func persist(_ body: @escaping @Sendable (Store) async -> Void) {
         guard let store else { return }
         let previous = persistTail
@@ -238,11 +247,68 @@ final class ChatViewModel {
         }
     }
 
+    // MARK: - 訂正を採る（FR-27 / FR-31）
+
+    /// **利用者が「この返しは違う」と言ったことを、向き付きで記録する。**
+    ///
+    /// ## 引き金は決定論的である
+    ///
+    /// **利用者の次の発言を読んで「訂正かどうか」を判定しない。**
+    /// 判定を置けば**推論を1回払う**うえ、外したときに
+    /// **利用者が言っていないことを利用者像として焼く**ことになる
+    /// （14.4節 / 16.2節と同じ規則）。**明示的に押されたときだけ記録する。**
+    ///
+    /// ## 文はこちらが書く
+    ///
+    /// 利用者に文章を書かせない。**書かせると、書くのが面倒で押されなくなる。**
+    /// **押した事実（向き）だけを受け取り、言語化はこちらが持つ**
+    /// ── これは FR-26（様式は直接質問せず、選ばせて採る）と同じ考え方である。
+    ///
+    /// **1回では焼かれない。2回目で関門を越える**（0.65 → 0.75）。
+    func recordCorrection(_ direction: TraitDirection?) {
+        let category: String
+        let statement: String
+        switch direction {
+        case .overreach:
+            category = "certainty"
+            statement = "確かめていないことは断定せず、確かめた範囲と分けて書く"
+        case .hedging:
+            category = "certainty"
+            statement = "留保を並べず、まず結論を出す。分からない部分だけを分けて書く"
+        case nil:
+            category = "tone"
+            statement = "この言い回しは合わない。言い方を変える"
+        }
+        persist { store in
+            do {
+                _ = try await store.recordCorrection(
+                    category: category, statement: statement, direction: direction)
+            } catch {
+                // **黙って落とさない。** 訂正が採れていないことに気づけないと、
+                // 「使っているのに学ばない」という最も分かりにくい壊れ方になる。
+                FileHandle.standardError.write(
+                    Data("[TRAIT] event=correction_failed reason=\(error)\n".utf8))
+            }
+        }
+    }
+
     // MARK: - 生成
 
-    init(engine: any InferenceEngine, folder: ConversationFolder = ConversationFolder()) {
+    /// - Parameter store: **試験のための注入口。** `nil` なら `prepare()` が自分で開く。
+    ///   **開く場所を2つ作らないため**、既定は `nil` のままにしてある ──
+    ///   注入されているときだけ `prepare()` が開き直さない。
+    ///
+    ///   **口を開けた理由**: これが無いと「画面から訂正を押したら DB に書かれるか」を
+    ///   試験できず、**書かれていないことに気づけない**（FR-27 / FR-31）。
+    ///   使っているのに学ばない、という最も分かりにくい壊れ方になる。
+    init(
+        engine: any InferenceEngine,
+        folder: ConversationFolder = ConversationFolder(),
+        store: Store? = nil
+    ) {
         self.engine = engine
         self.folder = folder
+        self.store = store
     }
 
     /// 起動時に、ローカル状態とモデルを順に用意する。
@@ -269,7 +335,9 @@ final class ChatViewModel {
 
         if store == nil {
             do {
-                store = try await Store.open()
+                // **注入されていれば開き直さない。** 開き直すと、
+                // 試験が見ている DB と、実際に書かれる DB が別物になる。
+                if store == nil { store = try await Store.open() }
             } catch {
                 // 会話は続行する。保存できないことだけを伝える。
                 globalError = SophiaError.wrap(error, fallback: .unknown)

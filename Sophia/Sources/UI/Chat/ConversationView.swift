@@ -29,7 +29,7 @@ struct ConversationView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: SophiaMetrics.space5) {
                         ForEach(model.turns) { turn in
-                            TurnView(turn: turn)
+                            TurnView(turn: turn, model: model)
                         }
                         if let error = model.globalError {
                             globalErrorRow(error)
