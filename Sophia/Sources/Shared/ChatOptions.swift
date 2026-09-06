@@ -220,6 +220,27 @@ enum SophiaDefaults {
     /// 必ず MLX形式（safetensors）のリポジトリIDを指すこと。
     static let modelID = "mlx-community/Qwen3-8B-4bit"
 
+    /// 焼いた重み（LoRA アダプタ）の置き場所。**既定は無し。**
+    ///
+    /// `SOPHIA_ADAPTER=/path/to/adapter` で渡す。指すのは PEFT 形式のディレクトリで、
+    /// 中に `adapter_config.json` と `adapter_model.safetensors` があること。
+    ///
+    /// **既定を無しにしてあるのは、対照をタダで取るためである**（ADAPTER_01）。
+    ///
+    /// | | プロンプト | アダプタ | 期待 |
+    /// |---|---|---|---|
+    /// | 陰性対照 | 無し | 無し | **「Qwen」と名乗るはず。** ここでソフィアと言うなら測っているものが違う |
+    /// | 陽性対照 | **有り**（いまの出荷状態） | 無し | 天井 |
+    /// | 本番 | 無し | **有り** | 天井にどこまで届くか |
+    ///
+    /// `SOPHIA_SYSTEM_PROMPT=0` と組み合わせると、**同じバイナリで3条件が取れる。**
+    static var adapterDirectory: URL? {
+        guard let path = ProcessInfo.processInfo.environment["SOPHIA_ADAPTER"],
+            !path.isEmpty
+        else { return nil }
+        return URL(fileURLWithPath: (path as NSString).expandingTildeInPath, isDirectory: true)
+    }
+
     /// モデルの自己認識（FR-23）。**毎ターン払うトークンなので、入れる文はここまで。**
     ///
     /// 出所は `modelfiles/sophia-chat.Modelfile` の SYSTEM の**冒頭3行だけ**である。

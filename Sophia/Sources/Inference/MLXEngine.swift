@@ -570,6 +570,15 @@ actor MLXEngine: InferenceEngine {
             // `LLMModelFactory._load` が `ModelContext.configuration` に載せる。
             let declaredReasoning = await loaded.configuration.reasoningConfig
 
+            // **焼いた重みを載せる**（ADAPTER_01 / 第一号は自己認識）。
+            //
+            // 既定は無し。`SOPHIA_ADAPTER` が指されたときだけ載せる ──
+            // 載せない状態が陰性対照そのものなので、**既定を「載せる」にすると
+            // 対照が取れなくなる。**
+            if let adapterDirectory = SophiaDefaults.adapterDirectory {
+                try await Self.applyAdapter(at: adapterDirectory, to: loaded)
+            }
+
             container = loaded
             reasoning = declaredReasoning
 
@@ -2599,6 +2608,40 @@ func observeDownloadTemporaryBytes(
         total += Int64(size)
     }
     return total
+}
+
+/// PEFT 形式のアダプタを読み、モデルへ載せて、**本当に載ったかを数える。**
+///
+/// **数えるのが本体である。** `LoRAContainer` は対象層が0でも例外を投げない経路を持ち、
+/// そのまま「成功」として通ると、**素のモデルが答えているのに
+/// 「重みに焼けた」と読む**ことになる ── 仮説そのものを偽装する形の嘘になる。
+///
+/// `LanguageModel` を触れるのはこの層だけなので、ここで数えて
+/// `AdapterApplication.verify` へ渡す（あちらは MLX を知らない）。
+///
+/// > **`fuse` は使わない。** あれは重みへ恒久的に焼き込むので**戻せない** ──
+/// > FR-28（削除したものは完全に消える）と正面から関わる。
+/// > `load(adapter:)` なら、載せない起動で素のモデルに戻せる。
+extension MLXEngine {
+
+    static func applyAdapter(at directory: URL, to container: ModelContainer) async throws {
+        let adapter = try LoRAContainer.fromPEFT(directory: directory)
+
+        let adaptedModules = try await container.perform { context in
+            try context.model.load(adapter: adapter)
+            // **置き換わったモジュールを数える。** `LoRALinear` と `QLoRALinear` は
+            // どちらも `LoRALayer` に適合しているので、量子化されていても数えられる。
+            return context.model.namedModules().filter { $0.1 is LoRALayer }.count
+        }
+
+        try AdapterApplication.verify(adaptedModules: adaptedModules, directory: directory)
+
+        if logsModelLoad {
+            FileHandle.standardError.write(
+                Data((AdapterApplication.logLine(
+                    directory: directory, adaptedModules: adaptedModules) + "\n").utf8))
+        }
+    }
 }
 
 /// 「0.00 GB / 4.62 GB」の形に整える。
