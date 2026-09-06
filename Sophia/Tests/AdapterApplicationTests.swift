@@ -69,11 +69,82 @@ final class AdapterApplicationTests: XCTestCase {
         let line = AdapterApplication.logLine(directory: hostile, adaptedModules: 8)
 
         let fields = line.dropFirst("[ADAPTER] ".count).split(separator: " ")
-        XCTAssertEqual(fields.count, 3, "空白が混ざって key=value が割れている: \(line)")
+        // event / format / modules / path の4つ。**数を書いてあるのは意図的である** ──
+        // 項目を足したときに、この表明が「足したこと」を必ず知らせる。
+        XCTAssertEqual(fields.count, 4, "空白が混ざって key=value が割れている: \(line)")
         for scalar in line.unicodeScalars {
             let category = scalar.properties.generalCategory
             XCTAssertNotEqual(category, .control, "制御文字が残った")
             XCTAssertNotEqual(category, .format, "書式文字が残った（行の見た目を反転できる）")
         }
+    }
+
+    // =========================================================================
+    //  形式の判別 —— **焼いた重みが読み込みの1行目で落ちるのを防ぐ**
+    // =========================================================================
+    //
+    //  MLX には入口が2つあり、期待する重みのファイル名が違う。
+    //  `LoRATrain.saveLoRAWeights` が出すのは MLX 名の鍵なので、
+    //  **我々が焼いたものは `fromPEFT` では読めない。**
+    //  最初の実装は `fromPEFT` を主経路にしていた（監督の指摘で判明）。
+
+    /// **設定ファイルでは判別できない。** 両方とも `adapter_config.json` を使う。
+    func testTheConfigurationFileNameIsTheSameForBothFormats() {
+        XCTAssertEqual(AdapterFormat.configurationFileName, "adapter_config.json")
+        // 判別に使えるのは重みの名前だけ、という事実をここで固定する。
+        XCTAssertNotEqual(
+            AdapterFormat.native.weightsFileName, AdapterFormat.peft.weightsFileName)
+    }
+
+    /// 我々の学習が吐く形式を native と読むこと。
+    func testOurOwnTrainingOutputIsDetectedAsNative() {
+        let names: Set<String> = ["adapters.safetensors", "adapter_config.json"]
+        XCTAssertEqual(AdapterFormat.detect(in: names), .native)
+    }
+
+    /// 外から持ってきたものを PEFT と読むこと。
+    func testAnExternalAdapterIsDetectedAsPEFT() {
+        let names: Set<String> = ["adapter_model.safetensors", "adapter_config.json", "README.md"]
+        XCTAssertEqual(AdapterFormat.detect(in: names), .peft)
+    }
+
+    /// **どちらでもなければ nil。** 「分からないので PEFT を試す」をしない ──
+    /// 失敗したとき、形式が違うのか中身が壊れているのかが分からなくなる。
+    func testAnUnknownLayoutIsNotGuessedAtAllPEFT() {
+        XCTAssertNil(AdapterFormat.detect(in: ["adapter_config.json"]))
+        XCTAssertNil(AdapterFormat.detect(in: []))
+        XCTAssertNil(AdapterFormat.detect(in: ["model.safetensors"]))
+    }
+
+    /// **どちらも在るときは native を採る。** 我々が焼いたものを優先する
+    /// （`fromPEFT` は鍵を変換するので、MLX 名の鍵には当たらない）。
+    func testNativeWinsWhenBothArePresent() {
+        let names: Set<String> = ["adapters.safetensors", "adapter_model.safetensors"]
+        XCTAssertEqual(AdapterFormat.detect(in: names), .native)
+    }
+
+    /// **分からないときの失敗は、実際に何が入っていたかを見せること**（R7）。
+    func testTheUnknownFormatFailureShowsWhatWasActuallyThere() {
+        let error = AdapterApplication.unknownFormat(
+            directory: directory, names: ["config.json", "weights.bin"])
+
+        XCTAssertEqual(error.code, .modelLoadFailed)
+        let detail = error.detail ?? ""
+        XCTAssertTrue(detail.contains("weights.bin"), "中身が文に出ていない: \(detail)")
+        XCTAssertTrue(detail.contains("sophia-adapter-01"), "どのディレクトリか分からない")
+        XCTAssertTrue(
+            (error.hint ?? "").contains("adapters.safetensors"),
+            "何を用意すればいいかが書かれていない")
+    }
+
+    /// ログ行に**どちらの経路で読んだか**が出ること。
+    func testTheLogLineCarriesWhichFormatWasUsed() {
+        let native = AdapterApplication.logLine(
+            directory: directory, adaptedModules: 224, format: .native)
+        let peft = AdapterApplication.logLine(
+            directory: directory, adaptedModules: 224, format: .peft)
+
+        XCTAssertTrue(native.contains("format=native"))
+        XCTAssertTrue(peft.contains("format=peft"))
     }
 }

@@ -2625,7 +2625,25 @@ func observeDownloadTemporaryBytes(
 extension MLXEngine {
 
     static func applyAdapter(at directory: URL, to container: ModelContainer) async throws {
-        let adapter = try LoRAContainer.fromPEFT(directory: directory)
+        // **形式は推測しない。ディレクトリの中身で決める**（`AdapterFormat` の但し書き）。
+        //
+        // 両方とも `adapter_config.json` という同じ名前を使い、**中のスキーマだけが違う。**
+        // 判別できるのは重みのファイル名だけである。
+        let names = Set((try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? [])
+        guard let format = AdapterFormat.detect(in: names) else {
+            throw AdapterApplication.unknownFormat(directory: directory, names: names)
+        }
+
+        let adapter: LoRAContainer
+        switch format {
+        case .native:
+            // **我々の学習が吐くのはこちら。** `LoRATrain.saveLoRAWeights` は
+            // MLX のモジュール名をそのまま鍵にするので、変換を挟む `fromPEFT` では読めない。
+            adapter = try LoRAContainer.from(directory: directory)
+        case .peft:
+            // 外から持ってきたもの（HuggingFace にある LoRA はほぼこれ）。
+            adapter = try LoRAContainer.fromPEFT(directory: directory)
+        }
 
         let adaptedModules = try await container.perform { context in
             try context.model.load(adapter: adapter)
@@ -2639,7 +2657,8 @@ extension MLXEngine {
         if logsModelLoad {
             FileHandle.standardError.write(
                 Data((AdapterApplication.logLine(
-                    directory: directory, adaptedModules: adaptedModules) + "\n").utf8))
+                    directory: directory, adaptedModules: adaptedModules,
+                    format: format) + "\n").utf8))
         }
     }
 }
