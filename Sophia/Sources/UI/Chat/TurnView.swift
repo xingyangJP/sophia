@@ -39,12 +39,28 @@ struct TurnView: View {
             VStack(alignment: .leading, spacing: SophiaMetrics.space1) {
                 HStack(spacing: SophiaMetrics.space2) {
                     Text("この返しは")
-                    Button("踏み込みすぎ") { model.recordCorrection(.overreach, turnID: turn.id) }
-                        .help("根拠より強く言った。確かめていないのに断定している")
-                    Button("逃げすぎ") { model.recordCorrection(.hedging, turnID: turn.id) }
-                        .help("正しいが使えない。結局どうすればよいか分からない")
-                    Button("言い方が違う") { model.recordCorrection(nil, turnID: turn.id) }
-                        .help("内容は合っているが、口調・長さ・丁寧さが合わない")
+                    // **よく使う3つは見える場所に。** 残りは畳む ──
+                    // 10個並べると選ぶのが仕事になり、押されなくなる。
+                    ForEach(
+                        [
+                            ChatViewModel.CorrectionKind.overreach, .hedging, .tooLong,
+                        ], id: \.self
+                    ) { kind in
+                        Button(kind.label) { model.recordCorrection(kind, turnID: turn.id) }
+                            .help(kind.hint)
+                    }
+                    Menu("ほかにも") {
+                        ForEach(
+                            ChatViewModel.CorrectionKind.allCases.filter {
+                                $0 != .overreach && $0 != .hedging && $0 != .tooLong
+                            }, id: \.self
+                        ) { kind in
+                            Button(kind.label) { model.recordCorrection(kind, turnID: turn.id) }
+                                .help(kind.hint)
+                        }
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
                 }
                 .buttonStyle(.link)
 

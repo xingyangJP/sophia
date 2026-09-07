@@ -62,7 +62,7 @@ final class CorrectionAffordanceTests: StoreTestCase {
         let store = try makeInMemoryStore()
         let model = makeModel(store)
 
-        model.recordCorrection(nil)
+        model.recordCorrection(.tone)
         await model.waitForPendingWrites()
 
         let traits = try await store.allTraits()
@@ -111,6 +111,50 @@ final class CorrectionAffordanceTests: StoreTestCase {
         XCTAssertTrue(
             receipt.line.contains("学習に使えるようになりました"),
             "関門を越えたのに、越えたと言っていない: \(receipt.line)")
+    }
+
+    // MARK: - 軸が質問側と揃っていること（2026-09-07）
+
+    /// **訂正の軸の綴りが、質問側と一致していること。**
+    ///
+    /// > 揃っていないと、**同じことについて像が2つでき、どちらも関門に届かない。**
+    /// > 「質問では granularity、訂正では granularity2」のような取り違えは、
+    /// > **動くし、緑になるし、永久に学習されない。**
+    func testEveryCorrectionAxisExistsOnTheQuestionSide() {
+        let questionCategories = Set(OnboardingQuestionnaire.all.map(\.category))
+        for kind in ChatViewModel.CorrectionKind.allCases {
+            // `tone` は質問側に無い軸である（会話の中でしか出ない）。
+            if kind.category == "tone" { continue }
+            XCTAssertTrue(
+                questionCategories.contains(kind.category),
+                "訂正の軸 `\(kind.category)`（\(kind.label)）が質問側に無い。"
+                    + "**綴りがずれると像が2つできる**")
+        }
+    }
+
+    /// **押せる軸が2つだけ、という状態に戻らないこと。**
+    ///
+    /// 2026-09-07、最初は `certainty` と `tone` の2軸しか無かった。
+    /// **質問では12軸を訊いているのに、訂正で触れるのは2軸だけ**という状態で、
+    /// **口が無い軸は永久に学習されない。**
+    func testTheCorrectionMenuCoversMoreThanTwoAxes() {
+        let axes = Set(ChatViewModel.CorrectionKind.allCases.map(\.category))
+        XCTAssertGreaterThanOrEqual(
+            axes.count, 5,
+            "訂正で触れる軸が \(axes.count) 個しかない。**口が無い軸は学習されない**")
+    }
+
+    /// **向きの割り当てが揃っていること。**
+    ///
+    /// 「勝手に進めた」は踏み込みすぎ側、「訊きすぎ」は逃げすぎ側 ──
+    /// **同じ軸の正反対が、同じ向きに倒れていないこと。**
+    func testOppositeKindsOnTheSameAxisCarryOppositeDirections() {
+        XCTAssertEqual(ChatViewModel.CorrectionKind.actedWithoutAsking.direction, .overreach)
+        XCTAssertEqual(ChatViewModel.CorrectionKind.askedTooMuch.direction, .hedging)
+        XCTAssertEqual(
+            ChatViewModel.CorrectionKind.actedWithoutAsking.category,
+            ChatViewModel.CorrectionKind.askedTooMuch.category,
+            "同じ軸のはずが別の軸になっている")
     }
 }
 

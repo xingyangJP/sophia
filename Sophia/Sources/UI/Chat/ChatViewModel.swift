@@ -275,6 +275,7 @@ final class ChatViewModel {
 
     struct CorrectionReceipt: Sendable, Equatable {
         var turnID: UUID
+        var kind: CorrectionKind
         var direction: TraitDirection?
         var confidence: Double
         /// **関門を越えたか。** 越えた瞬間だけ言い方を変える。
@@ -282,7 +283,7 @@ final class ChatViewModel {
 
         /// 画面に出す1行。**確信度を数字で出す** ── FR-29（費用と状態を見せる）と同じ考え方。
         var line: String {
-            let what = direction?.label ?? "言い方"
+            let what = kind.label
             if qualifies {
                 return "「\(what)」を記録しました。**この軸は学習に使えるようになりました**"
                     + "（確信度 \(String(format: "%.2f", confidence))）"
@@ -292,27 +293,107 @@ final class ChatViewModel {
         }
     }
 
-    func recordCorrection(_ direction: TraitDirection?, turnID: UUID = UUID()) {
-        let category: String
-        let statement: String
-        switch direction {
-        case .overreach:
-            category = "certainty"
-            statement = "確かめていないことは断定せず、確かめた範囲と分けて書く"
-        case .hedging:
-            category = "certainty"
-            statement = "留保を並べず、まず結論を出す。分からない部分だけを分けて書く"
-        case nil:
-            category = "tone"
-            statement = "この言い回しは合わない。言い方を変える"
+    /// **訂正の種類。** 軸と向きと文を、1か所で持つ。
+    ///
+    /// ## ⚠ 2026-09-07、ここが2軸しか無かった
+    ///
+    /// 最初は「踏み込みすぎ / 逃げすぎ / 言い方」の3つだけで、
+    /// **軸は `certainty` と `tone` の2つしか無かった。**
+    /// 質問では12軸を訊いているのに、**訂正で触れるのは2軸だけ**という状態である。
+    ///
+    /// > **利用者に「別の軸でも訂正を貯めて」と言ったが、押す場所が無かった。**
+    /// > **口が無い軸は、永久に学習されない。**
+    ///
+    /// 軸の名前は**質問側（`OnboardingQuestionnaire`）と同じ綴りにする** ──
+    /// 揃えないと、**同じことについて像が2つでき、どちらも関門に届かない。**
+    enum CorrectionKind: String, CaseIterable, Sendable {
+        case overreach, hedging, tone
+        case tooLong, tooShort
+        case actedWithoutAsking, askedTooMuch
+        case wentAlongTooEasily
+        case saidItWasDoneTooEarly
+        case missedTheFeeling
+
+        var direction: TraitDirection? {
+            switch self {
+            case .overreach, .actedWithoutAsking, .saidItWasDoneTooEarly: .overreach
+            case .hedging, .askedTooMuch, .wentAlongTooEasily: .hedging
+            case .tone, .tooLong, .tooShort, .missedTheFeeling: nil
+            }
         }
+
+        /// **質問側と同じ category を使う**（`OnboardingQuestionnaire` の綴り）。
+        var category: String {
+            switch self {
+            case .overreach, .hedging: "certainty"
+            case .tone: "tone"
+            case .tooLong, .tooShort: "granularity"
+            case .actedWithoutAsking, .askedTooMuch: "autonomy"
+            case .wentAlongTooEasily: "challenge"
+            case .saidItWasDoneTooEarly: "verification"
+            case .missedTheFeeling: "attunement"
+            }
+        }
+
+        /// 画面のボタン名。**短く、押す前に何を言うことになるか分かる形。**
+        var label: String {
+            switch self {
+            case .overreach: "踏み込みすぎ"
+            case .hedging: "逃げすぎ"
+            case .tone: "言い方が違う"
+            case .tooLong: "長すぎ"
+            case .tooShort: "短すぎ"
+            case .actedWithoutAsking: "勝手に進めた"
+            case .askedTooMuch: "訊きすぎ"
+            case .wentAlongTooEasily: "流されすぎ"
+            case .saidItWasDoneTooEarly: "終わってないのに終わったと言った"
+            case .missedTheFeeling: "気持ちを扱わなかった"
+            }
+        }
+
+        var hint: String {
+            switch self {
+            case .overreach: "根拠より強く言った。確かめていないのに断定している"
+            case .hedging: "正しいが使えない。結局どうすればよいか分からない"
+            case .tone: "内容は合っているが、口調・丁寧さが合わない"
+            case .tooLong: "説明が要る量を超えている"
+            case .tooShort: "結論だけで、なぜそうなるかが分からない"
+            case .actedWithoutAsking: "訊いてから動いてほしかった"
+            case .askedTooMuch: "いちいち訊かず、進めてほしかった"
+            case .wentAlongTooEasily: "こちらの案に乗っただけ。反対する材料があるなら言ってほしい"
+            case .saidItWasDoneTooEarly: "確かめた範囲と確かめていない範囲を分けて書いてほしい"
+            case .missedTheFeeling: "先に解決策を出された。受け止めてほしかった"
+            }
+        }
+
+        /// `user_traits.statement` に入る文。**利用者に書かせない**（FR-26 と同じ考え方）。
+        var statement: String {
+            switch self {
+            case .overreach: "確かめていないことは断定せず、確かめた範囲と分けて書く"
+            case .hedging: "留保を並べず、まず結論を出す。分からない部分だけを分けて書く"
+            case .tone: "この言い回しは合わない。言い方を変える"
+            case .tooLong: "説明は短く。要点だけを出し、詳細は求められたら足す"
+            case .tooShort: "結論だけで終わらせず、なぜそうなるかまで書く"
+            case .actedWithoutAsking: "手を動かす前に選択肢を出して選ばせる。勝手に進めない"
+            case .askedTooMuch: "いちいち訊かず進める。報告は事後でよい"
+            case .wentAlongTooEasily: "決定前に、結論を壊しうる前提を一度反対側から検査する"
+            case .saidItWasDoneTooEarly: "「やった」を「できている」と言わない。確かめた範囲を分けて書く"
+            case .missedTheFeeling: "つらい報告には感情を先に受け止め、解決はそのあとに置く"
+            }
+        }
+    }
+
+    func recordCorrection(_ kind: CorrectionKind, turnID: UUID = UUID()) {
+        let direction = kind.direction
+        let category = kind.category
+        let statement = kind.statement
         persist { [weak self] store in
             do {
                 let trait = try await store.recordCorrection(
                     category: category, statement: statement, direction: direction)
                 await MainActor.run {
                     self?.lastCorrection = CorrectionReceipt(
-                        turnID: turnID, direction: direction,
+                        turnID: turnID, kind: kind, direction: direction,
                         confidence: trait.confidence,
                         qualifies: trait.qualifiesForTraining())
                 }
