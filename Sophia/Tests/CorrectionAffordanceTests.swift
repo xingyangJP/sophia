@@ -69,6 +69,49 @@ final class CorrectionAffordanceTests: StoreTestCase {
         XCTAssertNil(traits.first?.direction)
         XCTAssertEqual(traits.first?.category, "tone")
     }
+
+    // MARK: - 押した結果を返す（2026-09-07）
+
+    /// **押したら受領が返ること。**
+    ///
+    /// > **押しても何も変わらないと、利用者は押せたか分からず、もう一度押す。**
+    /// > 実際にそうなった ── 2回押されて確信度が 0.5 → 0.7 まで動いた。
+    /// > **たまたま関門へ届いたが、逆に5回押されていたら
+    /// > 「押した回数」という信号そのものが壊れていた。**
+    func testPressingReturnsAReceipt() async throws {
+        let store = try makeInMemoryStore()
+        let model = makeModel(store)
+        let turnID = UUID()
+
+        model.recordCorrection(.hedging, turnID: turnID)
+        await model.waitForPendingWrites()
+
+        let receipt = try XCTUnwrap(model.lastCorrection, "**押したのに受領が返らない**")
+        XCTAssertEqual(receipt.turnID, turnID, "別の発言の受領が混ざっている")
+        XCTAssertEqual(receipt.direction, .hedging)
+        XCTAssertFalse(receipt.qualifies, "1回目で関門を越えている")
+        XCTAssertTrue(receipt.line.contains("もう一度"), "あと何回で効くのかが伝わらない")
+    }
+
+    /// **関門を越えた瞬間は、言い方が変わること。**
+    ///
+    /// **「記録しました」だけだと、越えたことが分からない。**
+    /// 越えた回だけは、**そう言う。**
+    func testCrossingTheGateIsAnnounced() async throws {
+        let store = try makeInMemoryStore()
+        let model = makeModel(store)
+        let turnID = UUID()
+
+        model.recordCorrection(.hedging, turnID: turnID)
+        model.recordCorrection(.hedging, turnID: turnID)
+        await model.waitForPendingWrites()
+
+        let receipt = try XCTUnwrap(model.lastCorrection)
+        XCTAssertTrue(receipt.qualifies)
+        XCTAssertTrue(
+            receipt.line.contains("学習に使えるようになりました"),
+            "関門を越えたのに、越えたと言っていない: \(receipt.line)")
+    }
 }
 
 /// 何も返さない実行役。**訂正の経路だけを測るので、生成は要らない。**

@@ -265,7 +265,34 @@ final class ChatViewModel {
     /// ── これは FR-26（様式は直接質問せず、選ばせて採る）と同じ考え方である。
     ///
     /// **1回では焼かれない。2回目で関門を越える**（0.65 → 0.75）。
-    func recordCorrection(_ direction: TraitDirection?) {
+    /// **直前に採れた訂正の結果**（画面へ返すため）。
+    ///
+    /// **押しても何も変わらないと、利用者は押せたか分からず、もう一度押す。**
+    /// 2026-09-07、実際にそうなった ── 2回押されて確信度が 0.5 → 0.7 まで動き、
+    /// **たまたま関門へ届いた。** 逆に「効いていない」と思って5回押されていたら、
+    /// **押した回数という信号そのものが壊れていた。**
+    var lastCorrection: CorrectionReceipt?
+
+    struct CorrectionReceipt: Sendable, Equatable {
+        var turnID: UUID
+        var direction: TraitDirection?
+        var confidence: Double
+        /// **関門を越えたか。** 越えた瞬間だけ言い方を変える。
+        var qualifies: Bool
+
+        /// 画面に出す1行。**確信度を数字で出す** ── FR-29（費用と状態を見せる）と同じ考え方。
+        var line: String {
+            let what = direction?.label ?? "言い方"
+            if qualifies {
+                return "「\(what)」を記録しました。**この軸は学習に使えるようになりました**"
+                    + "（確信度 \(String(format: "%.2f", confidence))）"
+            }
+            return "「\(what)」を記録しました（確信度 \(String(format: "%.2f", confidence))"
+                + "・もう一度同じ訂正が入ると学習に使えます）"
+        }
+    }
+
+    func recordCorrection(_ direction: TraitDirection?, turnID: UUID = UUID()) {
         let category: String
         let statement: String
         switch direction {
@@ -279,10 +306,16 @@ final class ChatViewModel {
             category = "tone"
             statement = "この言い回しは合わない。言い方を変える"
         }
-        persist { store in
+        persist { [weak self] store in
             do {
-                _ = try await store.recordCorrection(
+                let trait = try await store.recordCorrection(
                     category: category, statement: statement, direction: direction)
+                await MainActor.run {
+                    self?.lastCorrection = CorrectionReceipt(
+                        turnID: turnID, direction: direction,
+                        confidence: trait.confidence,
+                        qualifies: trait.qualifiesForTraining())
+                }
             } catch {
                 // **黙って落とさない。** 訂正が採れていないことに気づけないと、
                 // 「使っているのに学ばない」という最も分かりにくい壊れ方になる。

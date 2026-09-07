@@ -36,16 +36,26 @@ struct TurnView: View {
         // **生成が終わってから出す。** 途中で出すと、まだ読んでいない答えを
         // 評価させることになる。
         if let model, turn.phase == .finished, !turn.text.isEmpty {
-            HStack(spacing: SophiaMetrics.space2) {
-                Text("この返しは")
-                Button("踏み込みすぎ") { model.recordCorrection(.overreach) }
-                    .help("根拠より強く言った。確かめていないのに断定している")
-                Button("逃げすぎ") { model.recordCorrection(.hedging) }
-                    .help("正しいが使えない。結局どうすればよいか分からない")
-                Button("言い方が違う") { model.recordCorrection(nil) }
-                    .help("内容は合っているが、口調・長さ・丁寧さが合わない")
+            VStack(alignment: .leading, spacing: SophiaMetrics.space1) {
+                HStack(spacing: SophiaMetrics.space2) {
+                    Text("この返しは")
+                    Button("踏み込みすぎ") { model.recordCorrection(.overreach, turnID: turn.id) }
+                        .help("根拠より強く言った。確かめていないのに断定している")
+                    Button("逃げすぎ") { model.recordCorrection(.hedging, turnID: turn.id) }
+                        .help("正しいが使えない。結局どうすればよいか分からない")
+                    Button("言い方が違う") { model.recordCorrection(nil, turnID: turn.id) }
+                        .help("内容は合っているが、口調・長さ・丁寧さが合わない")
+                }
+                .buttonStyle(.link)
+
+                // **押した結果を必ず返す。** 返さないと、押せたか分からず
+                // もう一度押される ── **押した回数という信号そのものが壊れる。**
+                if let receipt = model.lastCorrection, receipt.turnID == turn.id {
+                    Text(.init(receipt.line))
+                        .foregroundStyle(
+                            receipt.qualifies ? SophiaColor.accent : SophiaColor.ink3)
+                }
             }
-            .buttonStyle(.link)
             .font(SophiaFont.footnote)
             .foregroundStyle(SophiaColor.ink4)
         }
