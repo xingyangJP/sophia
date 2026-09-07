@@ -14,31 +14,40 @@ struct TurnView: View {
     var body: some View {
         switch turn.author {
         case .user: userBubble
-        case .assistant:
-            assistantBlock
-                // **明示的に押されたときだけ記録する。**
-                // 利用者の次の発言を読んで判定しない（推論を置かない / 14.4節）。
-                .contextMenu { correctionMenu }
+        case .assistant: assistantBlock
         }
     }
 
-    /// **「この返しは違う」を、向き付きで採る口。**
+    /// **「この返しは違う」を、向き付きで採る口**（FR-27 / FR-31）。
+    ///
+    /// ## ⚠ 右クリックのメニューにしてはいけない
+    ///
+    /// **最初は `.contextMenu` に置いた。出なかった。**
+    /// 本文は `textSelection(.enabled)` なので、**右クリックはテキスト選択の
+    /// メニュー（コピー・調べる）に取られる。**
+    ///
+    /// > **そもそも、学習の唯一の入口を隠しメニューへ置いたのが設計の誤りだった。**
+    /// > **押されない口は、無いのと同じである** ── 貯まらなければ永久に焼けない。
     ///
     /// 2つの向きは**正反対**である ── 向きを持たせずに記録すると、
     /// **焼いたときに打ち消し合って何も学ばない**（FR-31）。
     /// 3つ目は向きの無い訂正で、**無理に二択へ倒さない**ためにある。
-    @ViewBuilder private var correctionMenu: some View {
-        if let model {
-            Button("踏み込みすぎ（根拠より強く言った）") {
-                model.recordCorrection(.overreach)
+    @ViewBuilder private var correctionRow: some View {
+        // **生成が終わってから出す。** 途中で出すと、まだ読んでいない答えを
+        // 評価させることになる。
+        if let model, turn.phase == .finished, !turn.text.isEmpty {
+            HStack(spacing: SophiaMetrics.space2) {
+                Text("この返しは")
+                Button("踏み込みすぎ") { model.recordCorrection(.overreach) }
+                    .help("根拠より強く言った。確かめていないのに断定している")
+                Button("逃げすぎ") { model.recordCorrection(.hedging) }
+                    .help("正しいが使えない。結局どうすればよいか分からない")
+                Button("言い方が違う") { model.recordCorrection(nil) }
+                    .help("内容は合っているが、口調・長さ・丁寧さが合わない")
             }
-            Button("逃げすぎ（正しいが使えない）") {
-                model.recordCorrection(.hedging)
-            }
-            Divider()
-            Button("言い方が合わない") {
-                model.recordCorrection(nil)
-            }
+            .buttonStyle(.link)
+            .font(SophiaFont.footnote)
+            .foregroundStyle(SophiaColor.ink4)
         }
     }
 
@@ -105,6 +114,9 @@ struct TurnView: View {
 
             // 6. 計測値（FR-14）
             StatsLine(turn: turn)
+
+            // 7. 訂正（FR-27 / FR-31）。**Sophia があなたを学ぶ唯一の入口である。**
+            correctionRow
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
