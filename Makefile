@@ -411,6 +411,30 @@ identityprobe:
 		-only-testing:SophiaTests/IdentityProbeTests \
 		2>&1 | tee $(IDENTITY_LOG) | grep -E 'IDENTITY|error:|Executed'
 
+# --- サンドボックスの中から何が走るかを測る（FR-32 の前提 / 2026-09-21）--------
+# **的はコーディングエージェント（読んで・書いて・走らせる）。** アプリは App Sandbox の中にあり、
+# 子プロセスはそれを継ぐ。**走るか走らないかを推測で決めず、出荷物と同じ条件で走らせて見る。**
+SANDBOXPROBE_LOG ?= logs/sandbox-probe.log
+
+.PHONY: sandboxprobe
+
+sandboxprobe:
+	@mkdir -p logs
+	@SRC=$$(find $(XC_DERIVED)/Build/Products -name '*.xctestrun' ! -name '*probe.xctestrun' ! -name 'tooltokens.xctestrun' ! -name 'websearch.xctestrun' ! -name 'identity.xctestrun' ! -name 'idtrain.xctestrun' | head -1); \
+	if [ -z "$$SRC" ]; then echo "先に make probe-build を実行すること"; exit 1; fi; \
+	RUN=$$(dirname "$$SRC")/sandboxprobe.xctestrun; cp "$$SRC" "$$RUN"; \
+	ENV_PATH=:TestConfigurations:0:TestTargets:0:EnvironmentVariables; \
+	for kv in SOPHIA_SANDBOXPROBE=1 SOPHIA_ENGINE=stub; do \
+		k=$${kv%%=*}; v=$${kv#*=}; \
+		/usr/libexec/PlistBuddy -c "Add $$ENV_PATH:$$k string $$v" "$$RUN" >/dev/null 2>&1 \
+			|| /usr/libexec/PlistBuddy -c "Set $$ENV_PATH:$$k $$v" "$$RUN"; \
+	done; \
+	xcodebuild test-without-building -xctestrun "$$RUN" \
+		-destination '$(XC_DEST)' \
+		-only-testing:SophiaTests/SandboxExecutionProbeTests \
+		2>&1 | tee $(SANDBOXPROBE_LOG) | grep -E 'SANDBOXPROBE|error:|Executed'; \
+	rm -f "$$RUN"
+
 WEBSEARCH_LOG ?= logs/websearch-probe.log
 
 .PHONY: websearch
