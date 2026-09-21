@@ -452,6 +452,8 @@
 				kind = revision;
 				revision = d7dc03d8447ee6b42b54a1c5295b4e56ee9274f3;
 			};
+			traits = (
+			);
 		};
 		5000000000000000000000C3 /* XCRemoteSwiftPackageReference "swift-huggingface" */ = {
 			isa = XCRemoteSwiftPackageReference;

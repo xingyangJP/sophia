@@ -15,6 +15,16 @@ XC_DERIVED   := Sophia/DerivedData
 # -skipPackagePluginValidation: mlx-swift の CudaBuild プラグインの信頼確認を省く。
 # -skipMacroValidation:         MLXHuggingFace のマクロの信頼確認を省く。
 # どちらも Xcode GUI では初回に手動で「信頼」を押す部分で、CLI では止まってしまう。
+#
+# ⚠ **手で xcodebuild を打つときも、この2つを必ず付けること。** 付けないと
+# 「Validate plug-in “CudaBuild”」で落ち、**エラー文が1行も出ない**（2026-09-21 に実際に踏んだ）。
+#
+# ⚠ **mlx-swift-lm の trait `FoundationModelsIntegration` は project.pbxproj で切ってある**
+# （`traits = ();`）。Xcode 27.0 の SDK では `MLXFoundationModels` がコンパイルできない ──
+# 固定している版（d7dc03d）はベータの API に対して書かれている。
+# **Sophia はこの部品を一度も使っていない**（Xcode 26 までは `canImport(FoundationModels, _version: 2)`
+# が偽で、丸ごと空にコンパイルされていた）。**版を上げて直すのではなく trait を切ったのは、
+# 推論ライブラリの版を動かすと、これまでの実測値がすべて条件違いになるからである。**
 XC_FLAGS     := -skipPackagePluginValidation -skipMacroValidation
 XCODEBUILD    = xcodebuild -project $(XC_PROJECT) -scheme $(XC_SCHEME) \
                 -destination '$(XC_DEST)' -derivedDataPath $(XC_DERIVED) $(XC_FLAGS)
