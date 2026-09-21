@@ -20,8 +20,8 @@ final class StoreSchemaTests: StoreTestCase {
             tables,
             [
             "adapter_generations", "conversations", "messages", "model_files",
-            "models", "profiles", "user_trait_bakes", "user_trait_revisions",
-            "user_traits",
+            "models", "profiles", "trait_evidence", "user_trait_bakes",
+            "user_trait_revisions", "user_traits",
         ],
             "第8章（+8.2節）が定めた5枚以外のテーブルができている、または足りない"
         )

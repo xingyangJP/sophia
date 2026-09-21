@@ -55,7 +55,7 @@ final class UserTraitsStoreTests: StoreTestCase {
         XCTAssertEqual(SophiaMigration.v2UserTraits.rawValue, "v2.userTraits")
         XCTAssertEqual(
             SophiaMigration.allCases.map(\.rawValue),
-            ["v1.initial", "v2.userTraits", "v3.traitDirection"],
+            ["v1.initial", "v2.userTraits", "v3.traitDirection", "v4.traitEvidence"],
             "利用者像の移行は**末尾に**足すこと。間に挿すと既存DBで順序が食い違う"
         )
     }
@@ -76,7 +76,7 @@ final class UserTraitsStoreTests: StoreTestCase {
         let store = try Store(.file(url))
 
         let applied = try await store.rawAppliedMigrationIdentifiers()
-        XCTAssertEqual(Set(applied), ["v1.initial", "v2.userTraits", "v3.traitDirection"], "追加分だけが当たること")
+        XCTAssertEqual(Set(applied), ["v1.initial", "v2.userTraits", "v3.traitDirection", "v4.traitEvidence"], "追加分だけが当たること")
 
         let messages = try await store.messages(in: conversationID)
         XCTAssertEqual(messages.map(\.content), ["ここにいる"], "移行で会話が消えている")
@@ -103,6 +103,8 @@ final class UserTraitsStoreTests: StoreTestCase {
                 "adapter_generations",
                 // 第8章の5枚。**1枚も減っていないこと**
                 "conversations", "messages", "model_files", "models", "profiles",
+                // v4（2026-09-21）。訂正の証拠
+                "trait_evidence",
                 "user_trait_bakes", "user_trait_revisions", "user_traits",
             ]
         )

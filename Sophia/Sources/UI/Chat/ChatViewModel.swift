@@ -387,10 +387,14 @@ final class ChatViewModel {
         let direction = kind.direction
         let category = kind.category
         let statement = kind.statement
+        // **押された瞬間に写し取る。** 後から `turnID` で引き直さない ──
+        // 会話を切り替えれば `turns` は入れ替わり、**どの答えだったかは二度と分からない。**
+        let evidence = Self.evidence(for: turnID, in: turns, kind: kind)
         persist { [weak self] store in
             do {
                 let trait = try await store.recordCorrection(
-                    category: category, statement: statement, direction: direction)
+                    category: category, statement: statement, direction: direction,
+                    evidence: evidence)
                 await MainActor.run {
                     self?.lastCorrection = CorrectionReceipt(
                         turnID: turnID, kind: kind, direction: direction,
@@ -406,6 +410,33 @@ final class ChatViewModel {
         }
     }
 
+    /// **押された答えと、その直前の問いを取り出す。**
+    ///
+    /// **見つからなければ `nil` を返し、でっち上げない。** 像は証拠なしでも記録される ──
+    /// **押したという事実まで捨てる理由にはならない**からである。
+    ///
+    /// - 生成中・中断・失敗の答えは採らない。**途中までの文を「こう答えてはいけなかった」の実例にすると、
+    ///   焼かれるのは内容ではなく「途中で切れること」になる**（14.13b と同じ型の事故）
+    /// - 空の答えも採らない。実例として何も言っていない
+    static func evidence(
+        for turnID: UUID, in turns: [ChatTurn], kind: CorrectionKind
+    ) -> CorrectionEvidence? {
+        guard let index = turns.firstIndex(where: { $0.id == turnID }) else { return nil }
+        let answer = turns[index]
+        guard answer.author == .assistant, answer.phase == .finished,
+            !answer.wasInterrupted
+        else { return nil }
+        let rejected = answer.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rejected.isEmpty else { return nil }
+        // **直前の利用者の発言まで遡る。** 間にツールの往復が挟まっても、問いは1つである。
+        guard let question = turns[..<index].last(where: { $0.author == .user }) else {
+            return nil
+        }
+        let prompt = question.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else { return nil }
+        return CorrectionEvidence(correction: kind.rawValue, prompt: prompt, rejected: rejected)
+    }
+
     // MARK: - 生成
 
     /// - Parameter store: **試験のための注入口。** `nil` なら `prepare()` が自分で開く。
@@ -415,14 +446,18 @@ final class ChatViewModel {
     ///   **口を開けた理由**: これが無いと「画面から訂正を押したら DB に書かれるか」を
     ///   試験できず、**書かれていないことに気づけない**（FR-27 / FR-31）。
     ///   使っているのに学ばない、という最も分かりにくい壊れ方になる。
+    /// - Parameter turns: **同じく試験のための口。** 「どの答えに押されたか」が
+    ///   DB まで届くことを、生成を走らせずに確かめるため。
     init(
         engine: any InferenceEngine,
         folder: ConversationFolder = ConversationFolder(),
-        store: Store? = nil
+        store: Store? = nil,
+        turns: [ChatTurn] = []
     ) {
         self.engine = engine
         self.folder = folder
         self.store = store
+        self.turns = turns
     }
 
     /// 起動時に、ローカル状態とモデルを順に用意する。

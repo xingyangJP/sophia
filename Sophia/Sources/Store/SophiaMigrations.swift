@@ -31,10 +31,19 @@ enum SophiaMigration: String, CaseIterable, Sendable {
     /// **過去の訂正に後から向きを推測して埋めるのは、観測ではなく捏造である。**
     case v3TraitDirection = "v3.traitDirection"
 
-    // case v4FullTextSearch = "v4.fts5"
+    /// **訂正の証拠**（FR-27 / FR-31 / 2026-09-21）。`trait_evidence` を足す。
+    ///
+    /// **v3 までは、訂正が「どの答えに対して押されたか」を捨てていた。**
+    /// 残っていたのは軸と向きと定型文だけで、**焼く材料になる実例が1件も無かった。**
+    ///
+    /// **過去の訂正には埋め戻さない。** v3 と同じ理由である ──
+    /// **どの答えに押されたかは、押された時点でしか分からない。**
+    case v4TraitEvidence = "v4.traitEvidence"
+
+    // case v5FullTextSearch = "v5.fts5"
     //     FR-13。messages の外部コンテンツ FTS5 仮想テーブル（第8.1節）
     //
-    // case v4ExtendedStats = "v4.stats"
+    // case v5ExtendedStats = "v5.stats"
     //     第8.3節。ttfr_ms / prompt_tokens_per_sec / thinking_chars /
     //     stop_reason / thinking_enabled / peak_memory_bytes を messages に追加
 }
@@ -91,8 +100,40 @@ enum SophiaMigrations {
             // **「制約で守れないものは、型で守る」** ── どちらも無い状態にはしない。
         }
 
+        // --- v4: 訂正の証拠（FR-27 / FR-31）----------------------------------
+        migrator.registerMigration(SophiaMigration.v4TraitEvidence.rawValue) { db in
+            try db.execute(sql: Self.v4TraitEvidenceSQL)
+        }
+
         return migrator
     }
+
+    /// DESIGN.md 14.14節（v4）の逐語コピー。
+    ///
+    /// ## なぜ `messages.id` を参照せず、本文を写し取るのか
+    ///
+    /// 1. **会話は消せる。** 参照にすると、会話を消した瞬間に証拠の中身が消え、
+    ///    **「確信度 0.9 だが実例は0件」**という、根拠を辿れない像が残る（NFR-12 違反）
+    /// 2. **画面のターンは `messages` の行と1対1ではない。** ツール呼び出しを挟んだ応答は
+    ///    複数行に分かれる。**利用者が押したのは、画面に見えていた1つの答えである**
+    ///
+    /// **`ON DELETE CASCADE`** ── 像を消したら証拠も消える（FR-28「削除したものは完全に消える」）。
+    static let v4TraitEvidenceSQL = """
+        CREATE TABLE trait_evidence (
+          id         TEXT PRIMARY KEY,
+          trait_id   TEXT NOT NULL REFERENCES user_traits(id) ON DELETE CASCADE,
+          -- 押されたボタン。'overreach' / 'tooLong' など。
+          -- **閉じた列挙ではないので CHECK を付けない**（category と同じ理由）
+          correction TEXT NOT NULL,
+          direction  TEXT,
+          -- **利用者が訊いたこと。** 写しである（参照ではない）
+          prompt     TEXT NOT NULL,
+          -- **押された答え。** 「こう答えてはいけなかった」の実例
+          rejected   TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        );
+        CREATE INDEX idx_trait_evidence_trait ON trait_evidence(trait_id, created_at);
+        """
 
     /// DESIGN.md 第8章（+ 第8.2節の `models` 改訂）の逐語コピー。
     ///

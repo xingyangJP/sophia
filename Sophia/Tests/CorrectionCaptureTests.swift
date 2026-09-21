@@ -124,6 +124,52 @@ final class CorrectionCaptureTests: StoreTestCase {
             "追記されているのが新しい文でない")
     }
 
+    // MARK: - 証拠（v4）
+
+    /// **押した回数だけ実例が積まれること。像は1行のまま。**
+    ///
+    /// 像を1行に保つ（確信度を上げるため）ことと、実例を全部残すこと（焼くため）は両立する。
+    func testEveryPressKeepsItsOwnExample() async throws {
+        let store = try makeInMemoryStore()
+        var last: UserTraitRecord?
+        for n in 1...3 {
+            last = try await store.recordCorrection(
+                category: "certainty", statement: "まず結論", direction: .hedging,
+                evidence: CorrectionEvidence(
+                    correction: "hedging", prompt: "問い\(n)", rejected: "答え\(n)"))
+        }
+        let trait = try XCTUnwrap(last)
+        let evidence = try await store.traitEvidence(of: trait.id)
+        XCTAssertEqual(evidence.map(\.prompt), ["問い1", "問い2", "問い3"])
+        let rows = try await store.allTraits().filter { $0.category == "certainty" }
+        XCTAssertEqual(rows.count, 1, "実例を積んだら像まで増えた")
+    }
+
+    /// **証拠なしの訂正は、実例を0件のまま残すこと**（陰性対照）。
+    func testACorrectionWithoutEvidenceLeavesNoExample() async throws {
+        let store = try makeInMemoryStore()
+        let trait = try await store.recordCorrection(
+            category: "tone", statement: "言い方を変える", direction: nil)
+        let evidence = try await store.traitEvidence(of: trait.id)
+        XCTAssertTrue(evidence.isEmpty, "渡していない実例が湧いている")
+    }
+
+    /// **像を消したら、実例も消えること**（FR-28「削除したものは完全に消える」）。
+    ///
+    /// **実例には利用者の問いの本文が入っている。** 像だけ消えて実例が残るなら、
+    /// 「消した」と画面が言っているのに、いちばん生々しい部分が残っていることになる。
+    func testErasingATraitErasesItsExamples() async throws {
+        let store = try makeInMemoryStore()
+        let trait = try await store.recordCorrection(
+            category: "certainty", statement: "まず結論", direction: .hedging,
+            evidence: CorrectionEvidence(
+                correction: "hedging", prompt: "消えるべき問い", rejected: "消えるべき答え"))
+        _ = try await store.deleteTrait(id: trait.id)
+
+        let evidence = try await store.traitEvidence(of: trait.id)
+        XCTAssertTrue(evidence.isEmpty, "**像を消したのに、問いと答えの本文が残っている**")
+    }
+
     // MARK: - 質問との線引き（14.13c）
 
     /// **質問だけでは、いくら答えても関門に届かないこと。**

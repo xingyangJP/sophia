@@ -158,11 +158,27 @@ extension Store {
         category: String,
         statement: String,
         direction: TraitDirection?,
+        evidence: CorrectionEvidence? = nil,
         now: Date = Date()
     ) throws -> UserTraitRecord {
         try Self.rejectNUL(statement, field: "statement")
         try Self.rejectNUL(category, field: "category")
+        if let evidence {
+            try Self.rejectNUL(evidence.prompt, field: "evidence.prompt")
+            try Self.rejectNUL(evidence.rejected, field: "evidence.rejected")
+        }
         let stamp = SophiaTimestamp.truncated(now)
+
+        // **証拠は像と同じトランザクションで書く。**
+        // 分けると「確信度は上がったが実例は残っていない」が起こりうる ──
+        // **それは v3 までの状態そのもので、焼く段になって初めて気づく。**
+        func attach(_ db: Database, to traitID: String) throws {
+            guard let evidence else { return }
+            try TraitEvidenceRecord(
+                traitID: traitID, correction: evidence.correction, direction: direction,
+                prompt: evidence.prompt, rejected: evidence.rejected, createdAt: stamp
+            ).insert(db)
+        }
 
         // **探すのと書くのを1つのトランザクションに入れる。**
         // 分けると、探した直後に別の経路が同じ軸を作った場合、
@@ -179,6 +195,7 @@ extension Store {
                     source: .correction, direction: direction,
                     createdAt: stamp)
                 try record.insert(db)
+                try attach(db, to: record.id)
                 return record
             }
 
@@ -206,6 +223,7 @@ extension Store {
             ) else {
                 throw StoreFailure.traitNotFound(id: current.id)
             }
+            try attach(db, to: current.id)
             return updated
         }
     }
@@ -433,6 +451,23 @@ extension Store {
                     SELECT * FROM user_trait_revisions
                      WHERE trait_id = ?
                      ORDER BY revision
+                    """,
+                arguments: [traitID]
+            )
+        }
+    }
+
+    /// **その像について、押された実例の一覧。** 古い順。
+    ///
+    /// **焼く材料はここから出る。** 像の文（方針）ではなく、こちら（実例）である。
+    func traitEvidence(of traitID: String) async throws -> [TraitEvidenceRecord] {
+        try await read { db in
+            try TraitEvidenceRecord.fetchAll(
+                db,
+                sql: """
+                    SELECT * FROM trait_evidence
+                     WHERE trait_id = ?
+                     ORDER BY created_at, id
                     """,
                 arguments: [traitID]
             )

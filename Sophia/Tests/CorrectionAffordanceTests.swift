@@ -156,6 +156,85 @@ final class CorrectionAffordanceTests: StoreTestCase {
             ChatViewModel.CorrectionKind.askedTooMuch.category,
             "同じ軸のはずが別の軸になっている")
     }
+
+    // MARK: - 証拠（v4 / 2026-09-21）
+
+    /// **押された答えと、その問いが DB まで届くこと。**
+    ///
+    /// > **v3 までは `turnID` が受領にだけ入り、DB に届いていなかった。**
+    /// > 残るのは軸・向き・定型文だけで、**焼く材料になる実例が1件も無かった。**
+    /// > しかも**動くし、緑になるし、確信度も上がる** ── 焼く段になって初めて気づく壊れ方である。
+    func testThePressedAnswerReachesTheDatabase() async throws {
+        let store = try makeInMemoryStore()
+        let question = ChatTurn(author: .user, text: "SQLite と Postgres、どっちがいい？")
+        let answer = ChatTurn(author: .assistant, text: "用途によります。一概には言えません。")
+        let model = ChatViewModel(
+            engine: SilentEngine(), store: store, turns: [question, answer])
+
+        model.recordCorrection(.hedging, turnID: answer.id)
+        await model.waitForPendingWrites()
+
+        let certainty = try await store.allTraits().first { $0.category == "certainty" }
+        let trait = try XCTUnwrap(certainty)
+        let evidence = try await store.traitEvidence(of: trait.id)
+        XCTAssertEqual(evidence.count, 1, "**押したのに実例が残っていない**")
+        XCTAssertEqual(evidence.first?.prompt, "SQLite と Postgres、どっちがいい？")
+        XCTAssertEqual(evidence.first?.rejected, "用途によります。一概には言えません。")
+        XCTAssertEqual(evidence.first?.correction, "hedging")
+        XCTAssertEqual(evidence.first?.direction, .hedging)
+    }
+
+    /// **別の答えの本文を拾わないこと。** 会話が長くなっても、押された1つだけを採る。
+    func testItPicksThePressedAnswerNotTheLatestOne() async throws {
+        let store = try makeInMemoryStore()
+        let q1 = ChatTurn(author: .user, text: "一つ目の問い")
+        let a1 = ChatTurn(author: .assistant, text: "一つ目の答え")
+        let q2 = ChatTurn(author: .user, text: "二つ目の問い")
+        let a2 = ChatTurn(author: .assistant, text: "二つ目の答え")
+        let model = ChatViewModel(
+            engine: SilentEngine(), store: store, turns: [q1, a1, q2, a2])
+
+        model.recordCorrection(.tooLong, turnID: a1.id)
+        await model.waitForPendingWrites()
+
+        let granularity = try await store.allTraits().first { $0.category == "granularity" }
+        let trait = try XCTUnwrap(granularity)
+        let evidence = try await store.traitEvidence(of: trait.id)
+        XCTAssertEqual(evidence.first?.prompt, "一つ目の問い", "最新の問いを拾っている")
+        XCTAssertEqual(evidence.first?.rejected, "一つ目の答え", "最新の答えを拾っている")
+    }
+
+    /// **途中で切れた答えを実例にしないこと。**
+    ///
+    /// 採ると、焼かれるのは内容ではなく**「途中で切れること」**になる（14.13b と同じ型）。
+    /// **それでも像は記録される** ── 押したという事実まで捨てない。
+    func testAnInterruptedAnswerIsNotKeptAsAnExample() async throws {
+        let store = try makeInMemoryStore()
+        let question = ChatTurn(author: .user, text: "説明して")
+        let answer = ChatTurn(author: .assistant, text: "これは途中まで")
+        answer.wasInterrupted = true
+        let model = ChatViewModel(
+            engine: SilentEngine(), store: store, turns: [question, answer])
+
+        model.recordCorrection(.tooLong, turnID: answer.id)
+        await model.waitForPendingWrites()
+
+        let granularity = try await store.allTraits().first { $0.category == "granularity" }
+        let trait = try XCTUnwrap(
+            granularity, "**実例が採れないからといって、押した事実まで捨てている**")
+        let evidence = try await store.traitEvidence(of: trait.id)
+        XCTAssertTrue(evidence.isEmpty, "中断された答えが実例として残っている")
+    }
+
+    /// **知らない `turnID` では、実例をでっち上げないこと**（陰性対照）。
+    func testAnUnknownTurnProducesNoEvidence() {
+        let turns = [
+            ChatTurn(author: .user, text: "問い"), ChatTurn(author: .assistant, text: "答え"),
+        ]
+        XCTAssertNil(ChatViewModel.evidence(for: UUID(), in: turns, kind: .hedging))
+        // **利用者の発言に押しても採らない。** 却下されたのは答えである。
+        XCTAssertNil(ChatViewModel.evidence(for: turns[0].id, in: turns, kind: .hedging))
+    }
 }
 
 /// 何も返さない実行役。**訂正の経路だけを測るので、生成は要らない。**

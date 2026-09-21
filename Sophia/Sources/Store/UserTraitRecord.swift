@@ -470,3 +470,84 @@ struct UserTraitRevisionRecord: Codable, Sendable, Equatable, Identifiable,
         self.createdAt = createdAt
     }
 }
+
+// MARK: - 訂正の証拠（v4）
+
+/// **訂正が押された瞬間の、質問と答えの写し。**
+///
+/// ## これが無いと何が起きるか
+///
+/// 像（`user_traits`）に残るのは**軸・向き・定型文**だけである。
+/// 「留保を並べず、まず結論を出す」は**方針であって実例ではない。**
+/// **重みへ焼けるのは実例だけである** ── 第一号（`IdentityCorpus`）が
+/// 20組の問いと答えで出来ていたのと同じで、**方針の文を20回見せても名乗るようにはならない。**
+///
+/// > **v3 までは、利用者が押すたびに、いちばん強い材料をその場で捨てていた。**
+struct TraitEvidenceRecord: Codable, Sendable, Equatable, Identifiable,
+                            FetchableRecord, PersistableRecord {
+
+    static let databaseTableName = "trait_evidence"
+
+    var id: String
+
+    var traitID: String
+
+    /// 押されたボタン（`ChatViewModel.CorrectionKind` の rawValue）。
+    ///
+    /// **`direction` だけでは足りない** ── 「長すぎ」と「踏み込みすぎ」は
+    /// どちらも `overreach` だが、**直すべき所が違う。**
+    var correction: String
+
+    var direction: TraitDirection?
+
+    /// **利用者が訊いたこと。**
+    var prompt: String
+
+    /// **押された答え。** こう答えてはいけなかった、の実例。
+    var rejected: String
+
+    var createdAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case traitID = "trait_id"
+        case correction
+        case direction
+        case prompt
+        case rejected
+        case createdAt = "created_at"
+    }
+
+    static func databaseDateEncodingStrategy(for column: String) -> DatabaseDateEncodingStrategy {
+        .millisecondsSince1970
+    }
+
+    static func databaseDateDecodingStrategy(for column: String) -> DatabaseDateDecodingStrategy {
+        .millisecondsSince1970
+    }
+
+    init(
+        id: String = UUID().uuidString,
+        traitID: String,
+        correction: String,
+        direction: TraitDirection?,
+        prompt: String,
+        rejected: String,
+        createdAt: Date = Date()
+    ) {
+        self.id = id
+        self.traitID = traitID
+        self.correction = correction
+        self.direction = direction
+        self.prompt = prompt
+        self.rejected = rejected
+        self.createdAt = createdAt
+    }
+}
+
+/// 訂正と一緒に渡す証拠。**無いこともある**（画面の外から記録される訂正・試験）。
+struct CorrectionEvidence: Sendable, Equatable {
+    var correction: String
+    var prompt: String
+    var rejected: String
+}
